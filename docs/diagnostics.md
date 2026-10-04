@@ -1,6 +1,6 @@
 # Operational diagnostics
 
-Run from the repository root after `npm ci && npm run build`, using Node.js 22.9+. Commands load `.env` if present; a future VM can use its non-secret environment/systemd configuration without any `.env` file. Paths are ordinary filesystem paths, not platform-specific constants. For machine-readable output use `npm run --silent ...` to suppress npm's own banner.
+Run from the repository root after `npm ci` (each source diagnostic automatically builds current TypeScript), using Node.js 22.9+. Commands load `.env` if present; the VM can use its non-secret environment/systemd configuration without any `.env` file. Paths are ordinary filesystem paths, not platform-specific constants. For machine-readable output use `npm run --silent ...` to suppress npm's own banner.
 
 | Command                                | Required access/settings                                         | Output                                                                    |
 | -------------------------------------- | ---------------------------------------------------------------- | ------------------------------------------------------------------------- |
@@ -29,7 +29,7 @@ Output can contain text extracted from your image; keep private diagnostic outpu
 
 ## Telegram IDs
 
-For `SECRET_SOURCE=google`, the local setup identity or future VM runtime identity needs ADC and `roles/secretmanager.secretAccessor` on the existing `TELEGRAM_BOT_TOKEN` secret in `mom-im-ok-places`. No Firestore access or Gemini secret is needed. For `SECRET_SOURCE=env`, explicitly supply `TELEGRAM_BOT_TOKEN` through a private local environment/ignored `.env`; no Google credentials are required. Never put it on the command line or in GitHub/CI.
+For `SECRET_SOURCE=google`, the local setup identity or VM runtime identity needs ADC and `roles/secretmanager.secretAccessor` on the existing `TELEGRAM_BOT_TOKEN` secret in `mom-im-ok-places`. No Firestore access or Gemini secret is needed. For `SECRET_SOURCE=env`, explicitly supply `TELEGRAM_BOT_TOKEN` through a private local environment/ignored `.env`; no Google credentials are required. Never put it on the command line or in GitHub/CI.
 
 Stop the normal production worker and **every other getUpdates poller for this bot** before starting `npm run telegram:ids`. Send one harmless message/image to the intended private group from each intended user. Copy the numeric chat ID and sender IDs manually into non-secret runtime configuration, then stop with Ctrl+C. Group privacy mode must permit the bot to receive those messages; configure BotFather access if needed. Do not use real private conversation as a test message.
 
@@ -45,4 +45,4 @@ Only human-sender group/supergroup updates produce output: chat ID/type/title, s
 | Protected persistent VM directory    | VM host identity, imported SIWC account profile, rotating access/refresh credentials |
 | Firestore                            | Canonical application data                                                           |
 
-The laptop is a setup tool. The permanent runtime does not depend on it. Before transferring the authorized profile, create/persist the VM's own host ID; securely copy **only the selected profile credential file**, preserving the VM's host identity. The VM becomes the sole refresh owner. Diagnostics on that VM use the same protected directory while the worker is stopped. Follow [the existing SIWC VM procedure](openai-siwc.md#persistent-vm-setup), which was rechecked against current official guidance. Never upload SIWC files to Secret Manager, Codex environment variables, GitHub, CI artifacts or logs. No automatic upload, infrastructure provisioning or new cloud token storage is implemented.
+The laptop is a setup tool. The permanent runtime does not depend on it. Before transferring the authorized profile, create/persist the VM's own host ID; securely copy **only the selected profile credential file**, preserving the VM's host identity. The VM becomes the sole refresh owner. Diagnostics on that VM use the same protected directory while the worker is stopped. Follow [the existing SIWC VM procedure](openai-siwc.md#persistent-vm-setup), which was rechecked against current official guidance. Never upload SIWC files to Secret Manager, Codex environment variables, GitHub, CI artifacts or logs. See the [owner-run infrastructure procedure](../infra/README.md) for exact IAP transfer and VM validation commands. No credential upload or new cloud token storage is performed by the agent.

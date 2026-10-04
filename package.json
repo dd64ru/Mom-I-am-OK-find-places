@@ -15,12 +15,20 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "npm run build && node --test tests/*.test.mjs",
-    "check": "npm run format:check && npm run typecheck && npm test",
+    "check": "npm run format:check && npm run typecheck && npm test && npm run infra:check",
     "worker": "node --env-file-if-exists=.env apps/worker/dist/main.js",
     "oauth": "node --env-file-if-exists=.env apps/worker/dist/oauth-cli.js",
     "models": "node --env-file-if-exists=.env apps/worker/dist/models-cli.js",
     "vision:smoke": "node --env-file-if-exists=.env apps/worker/dist/vision-smoke-cli.js",
-    "telegram:ids": "node --env-file-if-exists=.env apps/worker/dist/telegram-ids-cli.js"
+    "telegram:ids": "node --env-file-if-exists=.env apps/worker/dist/telegram-ids-cli.js",
+    "runtime:init": "node --env-file-if-exists=.env apps/worker/dist/runtime-init-cli.js",
+    "preoauth": "npm run build",
+    "premodels": "npm run build",
+    "prevision:smoke": "npm run build",
+    "pretelegram:ids": "npm run build",
+    "preruntime:init": "npm run build",
+    "deploy:package": "node scripts/package-release.mjs",
+    "infra:check": "bash scripts/check-infra.sh"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

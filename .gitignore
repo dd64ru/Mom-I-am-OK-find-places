@@ -15,3 +15,11 @@ firebase-debug.log*
 firestore-debug.log*
 *.local
 .DS_Store
+gha-creds-*.json
+.deploy/
+__pycache__/
+*.pyc
+.ssh/
+google_compute_engine*
+worker.env
+*.bundle

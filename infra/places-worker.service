@@ -1,6 +1,6 @@
 [Unit]
 Description=Mom I'm OK Places Telegram worker
-After=network-online.target
+After=network-online.target google-startup-scripts.service
 Wants=network-online.target
 
 [Service]
@@ -9,18 +9,28 @@ User=places
 Group=places
 WorkingDirectory=/opt/places
 EnvironmentFile=/etc/places/worker.env
-ExecStart=/usr/bin/node /opt/places/apps/worker/dist/main.js
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+ExecStart=/usr/local/bin/node /opt/places/apps/worker/dist/main.js
 Restart=on-failure
 RestartSec=15
-TimeoutStopSec=180
+TimeoutStopSec=300
 UMask=0077
+StateDirectory=places
+StateDirectoryMode=0700
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ReadWritePaths=/var/lib/places
-# Set OPENAI_SESSION_DIR=/var/lib/places in worker.env. No secrets in that file.
-# owner.lock survives a crash; an operator checks the process before removing it.
+# No build, OAuth, token import, or automatic stale-lock removal at service startup.
 
 [Install]
 WantedBy=multi-user.target
