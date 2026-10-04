@@ -6,6 +6,7 @@ import {
   OpenAiOAuth,
   FileSessions,
   OpenAiVision,
+  OpenAiFailure,
   GeminiVision,
   FallbackVision,
   acquireRuntimeLock,
@@ -26,7 +27,10 @@ async function main() {
     const oauth = new OpenAiOAuth(sessions, config.OPENAI_PROFILE);
     // Missing primary authorization is a setup error, never silently switched to Gemini.
     await oauth.accessToken();
-    let vision: VisionProvider = new OpenAiVision(oauth, config.OPENAI_MODEL);
+    const primary = new OpenAiVision(oauth, config.OPENAI_MODEL);
+    // Validate before fallback composition or polling, so setup failures abort startup.
+    await primary.validateModel();
+    let vision: VisionProvider = primary;
     if (config.GEMINI_FALLBACK_ENABLED === 'true') {
       const key =
         config.SECRET_SOURCE === 'google'
@@ -74,9 +78,11 @@ async function main() {
     await release();
   }
 }
-void main().catch(() => {
+void main().catch((error) => {
   console.error(
-    'worker_start_or_runtime_failed:check_configuration_authorization_and_IAM',
+    error instanceof OpenAiFailure
+      ? error.code
+      : 'worker_start_or_runtime_failed:check_configuration_authorization_and_IAM',
   );
   process.exitCode = 1;
 });

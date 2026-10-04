@@ -11,7 +11,7 @@ npm ci
 npm run check
 ```
 
-`check` runs Prettier, TypeScript checking, builds, and nine focused smoke tests. There is no separate linter. Tests use fixtures and fake transports, not production services.
+`check` runs Prettier, TypeScript checking, builds, and focused smoke tests. There is no separate linter. Tests use fixtures and fake transports, not production services.
 
 To prepare a real worker:
 
@@ -42,7 +42,7 @@ Before starting the worker, provision `workspaces/{WORKSPACE_ID}` with the schem
 
 ## What runs today
 
-The configured worker long-polls one allowed group, accepts photos and supported image documents from allowed users, groups albums, downloads bounded images, calls OpenAI vision, and writes a **pending discovery** to Firestore. It replies with possible names/confidence. `/help` and `/area <city or region>` are supported. Gemini is an opt-in fallback, with a configured model and its actual use recorded. Ordinary conversation and image captions are ignored, never sent to AI, stored or logged. No conversational assistant behavior exists.
+The configured worker long-polls one allowed group, accepts photos and supported image documents from allowed users, groups albums, downloads bounded images, calls OpenAI vision, and writes a **pending discovery** to Firestore. It replies with possible names/confidence. `/help` and `/area <city or region>` are supported. The primary model is validated against the signed-in account catalog once at worker startup; unavailable models fail startup with `openai_model_unavailable`. Gemini is an opt-in emergency fallback only for Responses HTTP 502/503/504 service outages, with its actual use recorded. Authentication, permissions, configuration, model, schema, programming, quota and unclassified transport errors fail closed without switching providers. Ordinary conversation and image captions are ignored, never sent to AI, stored or logged. No conversational assistant behavior exists.
 
 Canonical confirmed places and chains have real schemas and repository operations. Recognition alone never creates a geographic point. Search and POI verification ports exist, but no real search/geocoding provider is wired; consequently the worker currently saves no confirmed places. User confirmation, chain linking, `/find`, `/branches`, `/map`, `/undo`, exports and Android/OsmAnd sync remain future work.
 
@@ -53,3 +53,7 @@ The album buffer and work queue are bounded in-memory structures for a single VM
 Already created by the owner: project `mom-im-ok-places`, Firestore `(default)`, Firebase Authentication with Google enabled, Secret Manager secrets `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`, Blaze billing, and public GitHub repository `dd64ru/Mom-I-am-OK-find-places`. These are supplied facts, not resources provisioned or verified by this implementation. No production deployment, real OAuth, Android registration, secret access or live-service validation was performed.
 
 Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [next infrastructure setup](infra/README.md).
+
+## License
+
+[MIT](LICENSE).

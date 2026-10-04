@@ -16,6 +16,8 @@ import {
   OpenAiOAuth,
   readResponseStream,
   FallbackVision,
+  OpenAiFailure,
+  OpenAiVision,
 } from '@places/providers';
 const policy = { chatId: -100123, userIds: new Set([11, 22]) };
 const base = {
@@ -155,7 +157,7 @@ test('fallback preserves actual provider attribution', async () => {
     {
       name: 'primary',
       recognize: async () => {
-        throw new Error('offline');
+        throw new OpenAiFailure('openai_service_unavailable');
       },
     },
     {
@@ -271,11 +273,12 @@ test('Responses stream requires completion and rejects a failure arriving after 
 });
 
 test('OpenAI adapter discovers the account catalog and emits only supported plan request fields', async () => {
-  const { OpenAiVision } = await import('@places/providers');
   const originalFetch = globalThis.fetch;
   let request;
+  let catalogRequests = 0;
   globalThis.fetch = async (url, init) => {
-    if (String(url).endsWith('/models'))
+    if (String(url).endsWith('/models')) {
+      catalogRequests++;
       return Response.json({
         models: [
           {
@@ -285,6 +288,7 @@ test('OpenAI adapter discovers the account catalog and emits only supported plan
           },
         ],
       });
+    }
     assert.equal(String(url), 'https://api.openai.com/v1/responses');
     assert.equal(init.headers.Authorization, 'Bearer fixture-access');
     request = JSON.parse(init.body);
@@ -297,11 +301,16 @@ test('OpenAI adapter discovers the account catalog and emits only supported plan
       { accessToken: async () => 'fixture-access' },
       'account-image-model',
     );
+    await vision.validateModel();
     const result = await vision.recognize(
       [{ mimeType: 'image/png', bytes: new Uint8Array([1, 2]) }],
       'Shanghai',
     );
     assert.equal(result.provider, 'openai-siwc');
+    await vision.recognize([
+      { mimeType: 'image/png', bytes: new Uint8Array([1, 2]) },
+    ]);
+    assert.equal(catalogRequests, 1);
     assert.deepEqual(Object.keys(request).sort(), [
       'input',
       'instructions',
@@ -377,5 +386,171 @@ test('OAuth refreshes serialize and atomically replace the rotating token set', 
   } finally {
     globalThis.fetch = originalFetch;
     await rm(directory, { recursive: true, force: true });
+  }
+});
+
+test('unavailable startup models and invalid catalogs fail closed with safe diagnostics', async () => {
+  const originalFetch = globalThis.fetch;
+  let requests = 0;
+  try {
+    globalThis.fetch = async () => {
+      requests++;
+      return Response.json({ models: [] });
+    };
+    const vision = new OpenAiVision(
+      { accessToken: async () => 'fixture-access' },
+      'missing-model',
+    );
+    await assert.rejects(vision.validateModel(), {
+      message: 'openai_model_unavailable',
+    });
+    await assert.rejects(vision.recognize([]), {
+      message: 'openai_model_not_validated',
+    });
+    assert.equal(requests, 1);
+    globalThis.fetch = async () => new Response('private upstream body');
+    await assert.rejects(vision.validateModel(), {
+      message: 'openai_catalog_invalid',
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('fallback preserves non-eligible errors without invoking Gemini or fallback logging', async () => {
+  let fallbackCalls = 0;
+  let notifications = 0;
+  for (const error of [
+    new Error('openai_authorization_required'),
+    new Error('chatgpt_plan_permission_missing'),
+    new OpenAiFailure('openai_model_unavailable'),
+    new OpenAiFailure('openai_model_not_validated'),
+    new OpenAiFailure('openai_catalog_invalid'),
+    new OpenAiFailure('openai_output_invalid'),
+    new OpenAiFailure('openai_request_rejected'),
+    new OpenAiFailure('openai_request_failed'),
+    new SyntaxError('invalid JSON'),
+    new TypeError('programming failure'),
+    // A message resembling an eligible error is insufficient; the typed classification is required.
+    new Error('openai_service_unavailable'),
+  ]) {
+    const vision = new FallbackVision(
+      {
+        name: 'primary',
+        recognize: async () => {
+          throw error;
+        },
+      },
+      {
+        name: 'gemini',
+        recognize: async () => {
+          fallbackCalls++;
+        },
+      },
+      () => {
+        notifications++;
+      },
+    );
+    await assert.rejects(
+      vision.recognize([]),
+      (received) => received === error,
+    );
+  }
+  assert.equal(fallbackCalls, 0);
+  assert.equal(notifications, 0);
+});
+
+test('real primary HTTP classification falls back only for gateway/service outages', async () => {
+  const originalFetch = globalThis.fetch;
+  let status = 200;
+  let mode = 'http';
+  let authError;
+  let fallbackCalls = 0;
+  let notifications = 0;
+  const fallbackResult = {
+    provider: 'gemini',
+    recognition: { visibleText: [], clues: [] },
+  };
+  try {
+    globalThis.fetch = async (url) => {
+      if (String(url).endsWith('/models'))
+        return Response.json({
+          models: [
+            { slug: 'selected', display_name: 'Selected', visibility: 'list' },
+          ],
+        });
+      if (mode === 'transport')
+        throw new TypeError('private transport details');
+      if (['schema', 'malformed', 'incomplete', 'failed'].includes(mode)) {
+        const delta = JSON.stringify({
+          type: 'response.output_text.delta',
+          delta:
+            mode === 'schema'
+              ? JSON.stringify({
+                  visibleText: 'private model content',
+                  clues: [],
+                })
+              : 'private invalid model output',
+        });
+        const terminal =
+          mode === 'incomplete'
+            ? ''
+            : `data: ${JSON.stringify({ type: mode === 'failed' ? 'response.failed' : 'response.completed' })}\n\n`;
+        return new Response(`data: ${delta}\n\n${terminal}`);
+      }
+      return new Response('private upstream body', { status });
+    };
+    const primary = new OpenAiVision(
+      {
+        accessToken: async () => {
+          if (authError) throw authError;
+          return 'fixture-access';
+        },
+      },
+      'selected',
+    );
+    await primary.validateModel();
+    const vision = new FallbackVision(
+      primary,
+      {
+        name: 'gemini',
+        recognize: async () => {
+          fallbackCalls++;
+          return fallbackResult;
+        },
+      },
+      () => {
+        notifications++;
+      },
+    );
+    for (status of [400, 401, 403, 404, 429, 500]) {
+      await assert.rejects(vision.recognize([]), {
+        message: 'openai_request_rejected',
+      });
+    }
+    for (mode of ['schema', 'malformed', 'incomplete', 'failed']) {
+      await assert.rejects(vision.recognize([]), {
+        message: 'openai_output_invalid',
+      });
+    }
+    mode = 'transport';
+    await assert.rejects(vision.recognize([]), {
+      message: 'openai_request_failed',
+    });
+    authError = new Error('openai_authorization_required');
+    await assert.rejects(
+      vision.recognize([]),
+      (received) => received === authError,
+    );
+    assert.equal(fallbackCalls, 0);
+    assert.equal(notifications, 0);
+    authError = undefined;
+    mode = 'http';
+    for (status of [502, 503, 504])
+      assert.deepEqual(await vision.recognize([]), fallbackResult);
+    assert.equal(fallbackCalls, 3);
+    assert.equal(notifications, 3);
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

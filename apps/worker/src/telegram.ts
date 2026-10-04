@@ -1,3 +1,4 @@
+import { OpenAiFailure } from '@places/providers';
 import { createHash } from 'node:crypto';
 import { Bot } from 'grammy';
 import type { Message } from 'grammy/types';
@@ -191,8 +192,10 @@ export function createTelegramWorker(options: {
   const bot = new Bot(options.token);
   let serial = Promise.resolve();
   let outstanding = 0;
-  const reportError = () => {
-    console.error('image_processing_failed');
+  const reportError = (error?: unknown) => {
+    console.error(
+      error instanceof OpenAiFailure ? error.code : 'image_processing_failed',
+    );
   };
   const albums = new AlbumBuffer(
     options.albumWaitMs,
@@ -244,8 +247,8 @@ export function createTelegramWorker(options: {
             await bot.api.sendMessage(options.policy.chatId, text, {
               reply_parameters: { message_id: batch.messageId },
             });
-          } catch {
-            reportError();
+          } catch (error) {
+            reportError(error);
             await bot.api
               .sendMessage(
                 options.policy.chatId,

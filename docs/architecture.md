@@ -33,7 +33,7 @@ The repository implements validated reads/writes and transactional, create-if-ab
 
 ## Boundaries
 
-- Vision: multilingual extraction only; OpenAI primary, configurable Gemini fallback. Output is validated as untrusted data. Prompts cannot make the vision contract authoritative.
+- Vision: multilingual extraction only; OpenAI primary validated against the account catalog at startup; opt-in Gemini fallback only for Responses HTTP 502/503/504 outages. Other primary failures remain visible and fail closed. Output is validated as untrusted data. Prompts cannot make the vision contract authoritative.
 - Search: evidence verification; POI: geographic candidates and branch search using an existing Chain. Concrete providers remain unselected. Public Nominatim is unsuitable as a bulk or automatic branch-crawling backend: its [official policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying User-Agent, caching, at most one request/second and prohibits systematic POI extraction. Any future Nominatim/Overpass adapter needs its own policy review and throttling; none is enabled here.
 - Persistence: Firestore via ADC, independent of transport. Trusted server IAM and client membership rules are separate controls. Firebase UID membership is not Telegram numeric user identity.
 - Output: confirmed places may later project to GeoJSON, GPX, KML, OsmAnd or Mom I'm OK; adapters must preserve canonical identity. None of these formats owns data.

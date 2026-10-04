@@ -1,3 +1,9 @@
+export class UpstreamHttpError extends Error {
+  constructor(readonly status: number) {
+    super(`upstream_http_${status}`);
+    this.name = 'UpstreamHttpError';
+  }
+}
 export async function checkedFetch(
   url: string | URL,
   init: RequestInit = {},
@@ -7,6 +13,6 @@ export async function checkedFetch(
     signal: init.signal ?? AbortSignal.timeout(90_000),
   });
   // Never include URL (Telegram token), upstream body, or bearer token in an error.
-  if (!response.ok) throw new Error(`upstream_http_${response.status}`);
+  if (!response.ok) throw new UpstreamHttpError(response.status);
   return response;
 }
