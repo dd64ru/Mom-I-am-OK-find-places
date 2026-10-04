@@ -300,6 +300,7 @@ test('OpenAI adapter discovers the account catalog and emits only supported plan
     const vision = new OpenAiVision(
       { accessToken: async () => 'fixture-access' },
       'account-image-model',
+      'medium',
     );
     await vision.validateModel();
     const result = await vision.recognize(
@@ -315,9 +316,11 @@ test('OpenAI adapter discovers the account catalog and emits only supported plan
       'input',
       'instructions',
       'model',
+      'reasoning',
       'store',
       'stream',
     ]);
+    assert.deepEqual(request.reasoning, { effort: 'medium' });
     assert.equal(request.store, false);
     assert.equal(request.stream, true);
     assert.equal(request.input[0].role, 'user');
@@ -400,6 +403,7 @@ test('unavailable startup models and invalid catalogs fail closed with safe diag
     const vision = new OpenAiVision(
       { accessToken: async () => 'fixture-access' },
       'missing-model',
+      'low',
     );
     await assert.rejects(vision.validateModel(), {
       message: 'openai_model_unavailable',
@@ -508,6 +512,7 @@ test('real primary HTTP classification falls back only for gateway/service outag
         },
       },
       'selected',
+      'low',
     );
     await primary.validateModel();
     const vision = new FallbackVision(
@@ -525,7 +530,10 @@ test('real primary HTTP classification falls back only for gateway/service outag
     );
     for (status of [400, 401, 403, 404, 429, 500]) {
       await assert.rejects(vision.recognize([]), {
-        message: 'openai_request_rejected',
+        message:
+          status === 400
+            ? 'openai_request_options_rejected'
+            : 'openai_request_rejected',
       });
     }
     for (mode of ['schema', 'malformed', 'incomplete', 'failed']) {

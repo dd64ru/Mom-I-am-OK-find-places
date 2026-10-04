@@ -8,6 +8,8 @@ Use one VM attached service account with Application Default Credentials; never 
 
 For local live work, use an owner-authorized ADC setup or impersonate the intended runtime service account with appropriate IAM; this is an operator action, not part of bootstrap. Secret values need not be exposed to development agents. `SECRET_SOURCE=google` resolves secret versions at runtime. No key files, secret values or arbitrary Firebase app registrations are included.
 
+The independent [operational diagnostics](../docs/diagnostics.md) run before workspace provisioning or VM deployment. Source belongs in GitHub, non-secret settings in VM environment/systemd configuration, Telegram/Gemini values in Secret Manager, and SIWC credentials only in protected persistent VM storage. The laptop is temporary setup tooling; it is not a runtime dependency.
+
 ## Initial workspace
 
 After the intended users sign in with Firebase Google, obtain their Firebase Auth UIDs. Separately obtain the group chat ID and permitted Telegram numeric user IDs; no automatic identity mapping exists. Choose a path-safe workspace ID, e.g. `shared`, and create `workspaces/shared` using the trusted console/admin identity:

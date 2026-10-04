@@ -1,3 +1,4 @@
+import { MAX_IMAGE_BYTES, imageFromBytes } from './images.js';
 import { OpenAiFailure } from '@places/providers';
 import { createHash } from 'node:crypto';
 import { Bot } from 'grammy';
@@ -133,7 +134,6 @@ export class AlbumBuffer {
     }
   }
 }
-const MAX_IMAGE = 5 * 1024 * 1024;
 export async function downloadImage(
   token: string,
   filePath: string,
@@ -148,7 +148,7 @@ export async function downloadImage(
   if (
     !r.ok ||
     !r.body ||
-    Number(r.headers.get('content-length') ?? 0) > MAX_IMAGE
+    Number(r.headers.get('content-length') ?? 0) > MAX_IMAGE_BYTES
   )
     throw new Error('image_download_failed');
   const reader = r.body.getReader();
@@ -159,27 +159,14 @@ export async function downloadImage(
       const { value, done } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > MAX_IMAGE) throw new Error('image_too_large');
+      if (size > MAX_IMAGE_BYTES) throw new Error('image_too_large');
       parts.push(value);
     }
   } finally {
     await reader.cancel();
     reader.releaseLock();
   }
-  const bytes = Buffer.concat(parts);
-  const mimeType =
-    bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff
-      ? 'image/jpeg'
-      : bytes
-            .subarray(0, 8)
-            .equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-        ? 'image/png'
-        : bytes.toString('ascii', 0, 4) === 'RIFF' &&
-            bytes.toString('ascii', 8, 12) === 'WEBP'
-          ? 'image/webp'
-          : undefined;
-  if (!mimeType) throw new Error('unsupported_image');
-  return { mimeType, bytes };
+  return imageFromBytes(Buffer.concat(parts));
 }
 export function createTelegramWorker(options: {
   token: string;
@@ -215,7 +202,7 @@ export function createTelegramWorker(options: {
               let total = 0;
               for (const id of batch.fileIds) {
                 const file = await bot.api.getFile(id);
-                if (!file.file_path || (file.file_size ?? 0) > MAX_IMAGE)
+                if (!file.file_path || (file.file_size ?? 0) > MAX_IMAGE_BYTES)
                   throw new Error('image_too_large');
                 const image = await downloadImage(
                   options.token,

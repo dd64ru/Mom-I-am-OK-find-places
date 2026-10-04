@@ -1,7 +1,7 @@
 import {
   FileSessions,
   OpenAiOAuth,
-  OpenAiVision,
+  listOpenAiModels,
   acquireRuntimeLock,
 } from '@places/providers';
 import { loadOAuthConfig } from './config.js';
@@ -9,11 +9,8 @@ async function main() {
   const c = loadOAuthConfig();
   const release = await acquireRuntimeLock(c.directory);
   try {
-    const provider = new OpenAiVision(
-      new OpenAiOAuth(new FileSessions(c.directory), c.profile),
-      '',
-    );
-    for (const model of await provider.models())
+    const oauth = new OpenAiOAuth(new FileSessions(c.directory), c.profile);
+    for (const model of await listOpenAiModels(oauth))
       console.info(`${model.slug}\t${model.display_name}`);
   } finally {
     await release();

@@ -3,6 +3,17 @@ import { RecognitionSchema, type Recognition } from '@places/schemas';
 import type { VisionProvider, ImageInput, VisionResult } from '@places/core';
 import { OpenAiOAuth } from './oauth.js';
 import { checkedFetch, UpstreamHttpError } from './http.js';
+// Official Responses reasoning enum; support for each value remains model-dependent.
+export const OpenAiReasoningEffortSchema = z.enum([
+  'none',
+  'minimal',
+  'low',
+  'medium',
+  'high',
+  'xhigh',
+  'max',
+]);
+export type OpenAiReasoningEffort = z.infer<typeof OpenAiReasoningEffortSchema>;
 export class OpenAiFailure extends Error {
   constructor(
     readonly code:
@@ -12,7 +23,9 @@ export class OpenAiFailure extends Error {
       | 'openai_service_unavailable'
       | 'openai_request_rejected'
       | 'openai_request_failed'
-      | 'openai_output_invalid',
+      | 'openai_output_invalid'
+      | 'openai_reasoning_effort_invalid'
+      | 'openai_request_options_rejected',
   ) {
     super(code);
     this.name = 'OpenAiFailure';
@@ -30,25 +43,33 @@ const CatalogSchema = z.object({
     }),
   ),
 });
+export async function listOpenAiModels(oauth: OpenAiOAuth) {
+  const token = await oauth.accessToken();
+  const response = await checkedFetch('https://api.openai.com/v1/models', {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  try {
+    return CatalogSchema.parse(await response.json()).models.filter(
+      (m) => m.visibility === 'list',
+    );
+  } catch {
+    throw new OpenAiFailure('openai_catalog_invalid');
+  }
+}
+
 export class OpenAiVision implements VisionProvider {
   readonly name = 'openai-siwc';
   private modelValidated = false;
   constructor(
     private readonly oauth: OpenAiOAuth,
     private readonly model: string,
-  ) {}
+    private readonly reasoningEffort: OpenAiReasoningEffort,
+  ) {
+    if (!OpenAiReasoningEffortSchema.safeParse(reasoningEffort).success)
+      throw new OpenAiFailure('openai_reasoning_effort_invalid');
+  }
   async models() {
-    const token = await this.oauth.accessToken();
-    const response = await checkedFetch('https://api.openai.com/v1/models', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    try {
-      return CatalogSchema.parse(await response.json()).models.filter(
-        (m) => m.visibility === 'list',
-      );
-    } catch {
-      throw new OpenAiFailure('openai_catalog_invalid');
-    }
+    return listOpenAiModels(this.oauth);
   }
   async validateModel(): Promise<void> {
     this.modelValidated = false;
@@ -72,6 +93,7 @@ export class OpenAiVision implements VisionProvider {
       },
       body: JSON.stringify({
         model: this.model,
+        reasoning: { effort: this.reasoningEffort },
         instructions: visionInstructions,
         input: [
           {
@@ -108,7 +130,9 @@ async function openAiInferenceRequest(init: RequestInit): Promise<Response> {
       throw new OpenAiFailure(
         [502, 503, 504].includes(error.status)
           ? 'openai_service_unavailable'
-          : 'openai_request_rejected',
+          : error.status === 400
+            ? 'openai_request_options_rejected'
+            : 'openai_request_rejected',
       );
     }
     throw new OpenAiFailure('openai_request_failed');

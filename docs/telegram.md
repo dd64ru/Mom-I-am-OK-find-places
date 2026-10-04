@@ -1,5 +1,7 @@
 # Telegram adapter and MVP UX
 
+Before setting the allowlist, use the [privacy-safe ID diagnostic](diagnostics.md#telegram-ids); stop the worker while it polls. It prints permitted group/sender metadata and never creates configuration automatically.
+
 Set exactly one negative group/supergroup `TELEGRAM_CHAT_ID` and positive permitted `TELEGRAM_USER_IDS`. Both chat and sender must match before file retrieval, AI, persistence or replies. Channel posts, anonymous senders, bots, edits, service messages, other chats and other users are ignored. The allowed-updates poller requests only `message` updates. Addressed commands for another bot are ignored.
 
 Accepted inputs:

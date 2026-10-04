@@ -27,7 +27,11 @@ async function main() {
     const oauth = new OpenAiOAuth(sessions, config.OPENAI_PROFILE);
     // Missing primary authorization is a setup error, never silently switched to Gemini.
     await oauth.accessToken();
-    const primary = new OpenAiVision(oauth, config.OPENAI_MODEL);
+    const primary = new OpenAiVision(
+      oauth,
+      config.OPENAI_MODEL,
+      config.OPENAI_REASONING_EFFORT,
+    );
     // Validate before fallback composition or polling, so setup failures abort startup.
     await primary.validateModel();
     let vision: VisionProvider = primary;
