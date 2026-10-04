@@ -21,6 +21,24 @@ def fail(code):
     raise RuntimeError(code)
 
 
+def canonical_build_email(build, project_number):
+    identity = build.get('serviceAccountEmail') if isinstance(build, dict) else None
+    if not isinstance(identity, str):
+        fail('default_cloud_build_identity_requires_owner_review')
+    if '/' in identity:
+        resource = re.fullmatch(r'projects/([a-z0-9-]+)/serviceAccounts/([^/]+)', identity)
+        if not resource or resource[1] not in {PROJECT, project_number}:
+            fail('default_cloud_build_identity_requires_owner_review')
+        identity = resource[2]
+    # Recognize current-project user-managed accounts and Google's two default build identities.
+    # Checking the email's project as well prevents a current-project path wrapping a foreign account.
+    user_managed = re.fullmatch(r'[a-z][a-z0-9-]{4,28}[a-z0-9]@' + re.escape(PROJECT) + r'\.iam\.gserviceaccount\.com', identity)
+    defaults = {f'{project_number}-compute@developer.gserviceaccount.com', f'{project_number}@cloudbuild.gserviceaccount.com'}
+    if not user_managed and identity not in defaults:
+        fail('default_cloud_build_identity_requires_owner_review')
+    return identity
+
+
 def cloud(*args, missing=False, disabled=False):
     result = subprocess.run(['gcloud', '--project=' + PROJECT, '--quiet', *args, '--format=json'], capture_output=True, text=True)
     if result.returncode:
@@ -164,8 +182,8 @@ def main(mode):
             fail('existing_artifact_repository_requires_owner_review')
     # Inspect effective build identity before any legacy deletions.
     build = cloud('builds', 'get-default-service-account', '--region=' + REGION)
-    build_email = build.get('serviceAccountEmail') or build.get('name', '').split('/')[-1]
-    if not re.fullmatch(r'[a-zA-Z0-9._-]+@[a-zA-Z0-9.-]+\.gserviceaccount\.com', build_email) or build_email in [RUNTIME, DEPLOY]:
+    build_email = canonical_build_email(build, number)
+    if build_email in [RUNTIME, DEPLOY]:
         fail('default_cloud_build_identity_requires_owner_review')
     build_roles = [b['role'] for b in policy.get('bindings', []) if 'serviceAccount:' + build_email in b.get('members', [])]
     if any(role in ['roles/owner', 'roles/editor'] for role in build_roles):
