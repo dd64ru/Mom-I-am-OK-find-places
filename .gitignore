@@ -1,0 +1,17 @@
+node_modules/
+dist/
+*.tsbuildinfo
+.env
+.env.*
+!.env.example
+.credentials/
+.runtime/
+*.pem
+*.key
+*service-account*.json
+*service_account*.json
+application_default_credentials.json
+firebase-debug.log*
+firestore-debug.log*
+*.local
+.DS_Store

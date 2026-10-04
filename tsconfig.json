@@ -1,0 +1,17 @@
+{
+  "files": [],
+  "references": [
+    {
+      "path": "packages/schemas"
+    },
+    {
+      "path": "packages/core"
+    },
+    {
+      "path": "packages/providers"
+    },
+    {
+      "path": "apps/worker"
+    }
+  ]
+}

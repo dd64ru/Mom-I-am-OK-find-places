@@ -1,0 +1,13 @@
+{
+  "name": "@places/schemas",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "types": "./dist/index.d.ts",
+  "dependencies": {
+    "zod": "^3.25.76"
+  }
+}

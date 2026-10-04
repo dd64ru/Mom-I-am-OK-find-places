@@ -1,0 +1,26 @@
+[Unit]
+Description=Mom I'm OK Places Telegram worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=places
+Group=places
+WorkingDirectory=/opt/places
+EnvironmentFile=/etc/places/worker.env
+ExecStart=/usr/bin/node /opt/places/apps/worker/dist/main.js
+Restart=on-failure
+RestartSec=15
+TimeoutStopSec=180
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/places
+# Set OPENAI_SESSION_DIR=/var/lib/places in worker.env. No secrets in that file.
+# owner.lock survives a crash; an operator checks the process before removing it.
+
+[Install]
+WantedBy=multi-user.target
