@@ -4,3 +4,5 @@ export * from './session.js';
 export * from './oauth.js';
 export * from './vision.js';
 export * from './lock.js';
+export * from './lease.js';
+export * from './secret-sessions.js';

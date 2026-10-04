@@ -1,35 +1,11 @@
-# Telegram adapter and MVP UX
+# Telegram privacy and delivery
 
-Before setting the allowlist, use the [privacy-safe ID diagnostic](diagnostics.md#telegram-ids); stop the worker while it polls. It prints permitted group/sender metadata and never creates configuration automatically.
+Production uses the authenticated HTTPS Functions v2 webhook in `europe-west3`; local `telegram:ids` polling is only a temporary owner diagnostic. Register only `message` updates with a dedicated `TELEGRAM_WEBHOOK_SECRET`. POST/JSON/size checks and constant-time header authentication precede application parsing; then one group and numeric user allowlists gate all content. Bot senders, outsiders, other chats, ordinary conversation and captions are ignored. Unsupported commands and commands for another bot are ignored.
 
-Set exactly one negative group/supergroup `TELEGRAM_CHAT_ID` and positive permitted `TELEGRAM_USER_IDS`. Both chat and sender must match before file retrieval, AI, persistence or replies. Channel posts, anonymous senders, bots, edits, service messages, other chats and other users are ignored. The allowed-updates poller requests only `message` updates. Addressed commands for another bot are ignored.
+Photos and JPEG/PNG/WebP documents are accepted. File IDs/source metadata enter a Firestore-backed inbox; raw updates, captions and bytes never enter it. Downloads validate file paths, actual format and bounded bytes: at most ten images, 5 MiB per image and 25 MiB per batch. `/help` explains provisional recognition; `/area <city or region>` updates an explicit optional hint up to 200 characters. Images/hints are untrusted input to vision. Recognition creates pending discoveries, never confirmed places or geographic coordinates.
 
-Accepted inputs:
+Albums settle after 1.5 seconds of quiet. A transactional lease owns a sealed batch; duplicates of completed batches do not reprocess it. Late members of a sealed/full album are retained as separate single-image discoveries. Busy processing returns 503 for Telegram retry; completion returns 200 only after processing/reply finishes. No background work runs after response. A global image slot limits concurrent image memory across revisions/instances.
 
-- Photos: choose the largest Telegram photo size.
-- Image documents: JPEG, PNG or WebP only; downloaded bytes must have the corresponding supported signature. Maximum 5 MiB per image, 25 MiB per batch, 10 images.
-- `/help`: lists current operations.
-- `/area <city or region>`: stores a bounded optional workspace hint. It is a hint, never geographic proof.
+Completed source IDs deduplicate discoveries. External inference/replies are not exactly-once: a crash after an external effect can cause a repeated call/reply. Pending metadata is durable, but no scheduler sweeps it: retry/resend drives recovery. If Telegram's finite retry window expires, resend affected images. Expired owners are fenced; credentials are independently protected by the SIWC refresh lease. There is no user export/search/confirmation implementation yet.
 
-Other text, unsupported commands, captions and unsupported media are ignored. The bot reads no surrounding conversation. In group privacy mode Telegram may not deliver unaddressed image messages: the owner must configure BotFather group privacy appropriately or give the bot the necessary group access. Application allowlists remain mandatory even when Telegram delivers more messages. No message content or upstream request/error object is logged.
-
-## Albums and persistence
-
-Updates with the same chat/media-group ID buffer together until 1.5 seconds of inactivity (configurable 0.5–5 seconds). Repeated file IDs collapse, pending albums are capped at 20, and batches process sequentially with a bounded queue. Graceful shutdown drains buffered batches. Telegram supplies no explicit album-complete event; this is a timing heuristic. An exceptionally late image after an already-created discovery will be treated as the same source and not re-analyzed. A future durable ingestion design should track individual image IDs and album revisions.
-
-Completed discovery writes use a stable hash of chat plus media-group/message ID, with a Firestore transaction preventing duplicate records. Response delivery can still duplicate after retries. Albums awaiting processing live only in memory; polling acknowledgement is not transactional with Firestore. Crashes or a full buffer can drop images; resend failed images. This limitation is acceptable for the foundation and must be hardened before promising reliable unattended ingestion.
-
-Responses show possible names and confidence and explicitly say verification/confirmation is pending. No personality, conversational follow-up or silently guessed point is generated. Images stay in memory; Firestore retains only image source references and extracted evidence.
-
-## Planned commands (currently ignored)
-
-| Command                                 | Intended behavior                                                       |
-| --------------------------------------- | ----------------------------------------------------------------------- |
-| `/find <area> <query>`                  | Explicit POI search; return verified candidates for confirmation        |
-| `/branches <area>` replying to a result | Resolve stored chainId and search branches without new vision inference |
-| `/map`                                  | Open/export the member workspace's confirmed place collection           |
-| `/undo`                                 | Archive the last supported creation, retaining provenance               |
-
-A future confirmation operation will atomically write the selected verified Place and chain link and map the bot's reply message to its domain result. The current adapter does not store a reply-to-place mapping or support these commands.
-
-Official transport reference: [Telegram Bot API](https://core.telegram.org/bots/api), inspected 2026-10-04. The implementation uses grammy for polling and Telegram methods; no webhook or public HTTP service is required.
+See [operations](../infra/README.md) for owner ID discovery, registration/status/removal, secret import, recovery and cost controls. No ordinary message content, raw Telegram errors, secret header, bot token or image bytes are logged.

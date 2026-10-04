@@ -9,7 +9,7 @@ async function main() {
   const config = loadOAuthConfig();
   const release = await acquireRuntimeLock(config.directory);
   const oauth = new OpenAiOAuth(
-    new FileSessions(config.directory),
+    new FileSessions(config.directory, config.hostId),
     config.profile,
   );
   let pending: Awaited<ReturnType<OpenAiOAuth['begin']>>['pending'] | undefined;

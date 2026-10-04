@@ -3,6 +3,10 @@ import { resolve } from 'node:path';
 import { OpenAiReasoningEffortSchema } from '@places/providers';
 import { IdSchema } from '@places/schemas';
 const CommonSchema = z.object({
+  OPENAI_HOST_ID: z
+    .string()
+    .regex(/^urn:uuid:[a-f0-9-]{36}$/)
+    .optional(),
   OPENAI_SESSION_DIR: z.string().min(1).default('.credentials'),
   OPENAI_PROFILE: z
     .string()
@@ -15,6 +19,7 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env) {
   return {
     directory: resolve(data.data.OPENAI_SESSION_DIR),
     profile: data.data.OPENAI_PROFILE,
+    hostId: data.data.OPENAI_HOST_ID,
   };
 }
 const OpenAiSettings = {

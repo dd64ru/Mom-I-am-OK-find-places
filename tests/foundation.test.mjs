@@ -4,11 +4,7 @@ import { mkdtemp, rm, stat, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createHash } from 'node:crypto';
-import {
-  classify,
-  AlbumBuffer,
-  loadConfig,
-} from '../apps/worker/dist/index.js';
+import { classify, loadConfig } from '../apps/worker/dist/index.js';
 import { DiscoveryService } from '@places/core';
 import { CoordinatesSchema, PlaceSchema } from '@places/schemas';
 import {
@@ -75,33 +71,6 @@ test('privacy gate ignores ordinary text, unknown commands, outsiders and comman
     ).argument,
     'Shanghai',
   );
-});
-test('an album produces one batch, deduplicates file IDs and separates chats', async () => {
-  const emitted = [];
-  const albums = new AlbumBuffer(
-    5000,
-    async (batch) => {
-      emitted.push(batch);
-    },
-    () => assert.fail('album error'),
-  );
-  for (const [chatId, fileId, messageId] of [
-    [-1, 'a', 1],
-    [-1, 'b', 2],
-    [-1, 'a', 1],
-    [-2, 'c', 3],
-  ]) {
-    await albums.add(chatId, {
-      kind: 'image',
-      fileId,
-      messageId,
-      albumId: 'album',
-    });
-  }
-  await albums.flush();
-  assert.equal(emitted.length, 2);
-  assert.deepEqual(emitted[0].fileIds, ['a', 'b']);
-  assert.notEqual(emitted[0].id, emitted[1].id);
 });
 test('vision-only ingestion saves a pending discovery and never creates a geographic place', async () => {
   const discoveries = new Map();

@@ -12,6 +12,9 @@
     },
     {
       "path": "apps/worker"
+    },
+    {
+      "path": "apps/functions"
     }
   ]
 }

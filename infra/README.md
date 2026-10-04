@@ -1,127 +1,87 @@
-# Production runtime preparation
+# Serverless production operations
 
-The owner already has project `mom-im-ok-places`, Firestore `(default)`, Firebase Google authentication, Blaze billing and Secret Manager secrets `TELEGRAM_BOT_TOKEN` / `GEMINI_API_KEY`. These are owner-supplied facts. This change has **not** provisioned or verified cloud resources: the agent environment has no `gcloud`. All tests are credential-free. No workspace/member documents are created here, and the production worker must remain stopped.
+Canonical runtime: Telegram HTTPS webhook → Firebase Functions v2 / Cloud Run request execution → Places Core → OpenAI SIWC → Firestore. Project `mom-im-ok-places`, region and existing Firestore location `europe-west3`. The owner reports that the abandoned `places-worker` VM and retained boot disk are deleted. Other old bootstrap resources may still exist. This implementation has no `gcloud` or cloud credentials; **no cloud deployment or cleanup was performed by the agent**.
 
-## Design and access
+## Runtime, cost and durable state
 
-One Debian 12 Compute Engine VM, Node 22.23.3, `e2-small` (2 GB RAM), a retained 20 GB `pd-balanced` boot disk, and one unprivileged `places` systemd worker. Debian 12 is supported until June 2028; schedule OS/Node updates. Region/zone are deliberately unset until the existing Firestore location is inspected. There is no application ingress, webhook, load balancer, domain or container. A custom VPC permits TCP 22 only from IAP's `35.235.240.0/20`, targeting the runtime service account. An ephemeral external IP supplies outbound internet without adding paid Cloud NAT infrastructure; it does not open public SSH. Normal outbound access permits Telegram/OpenAI/Google/Gemini HTTPS.
+`placesWebhook`: Node 22, `europe-west3`, `minInstances: 0`, `maxInstances: 2`, concurrency 16, 1 CPU, 512 MiB, 300-second HTTP timeout. CPU is request-based; cold starts are acceptable. No VM, production poller, VPC connector, NAT, scheduler, load balancer or custom domain. A Firestore image-processing lease limits image memory to one batch globally while concurrent HTTP requests collect album members. No work runs after the handler returns.
 
-- `places-runtime`: attached VM identity, `cloud-platform` scope bounded by IAM; project `roles/datastore.user` for server Firestore operations, per-secret `secretAccessor` on Telegram only. Optional `GRANT_GEMINI_ACCESS=true` adds the Gemini secret grant; fallback remains disabled until separately configured/tested. Firestore server IAM bypasses client rules, so this trusted identity can access the project's database.
-- `places-deploy`: distinct identity; a three-permission project read role (`compute.instances.get/list`, `compute.projects.get`), IAP tunnel access conditioned on this VM's internal IP and port 22, VM-scoped OS Admin Login, and `serviceAccountUser` on the attached runtime account, as required for SSH to that VM. No direct Firestore or Secret Manager payload grant, and no JSON keys.
-- GitHub OIDC → dedicated WIF pool/provider → deploy identity. Trust checks numeric repository/owner IDs, exact `dd64ru/Mom-I-am-OK-find-places`, `refs/heads/main` and the `production` environment subject. PR CI has no Google authentication. VM administration and application deployment are trusted privileges: deployers can execute runtime code and use its identity. Separate IAM is **not** a security boundary against a malicious trusted deployer.
+The design intentionally avoids always-on compute. Low personal usage should normally be inside or near Google's free/low-use allowances. Actual requests, Firestore operations, builds, Secret Manager versions, Artifact Registry storage, network and AI usage can still incur charges; **a zero bill is not guaranteed**. A new `gcf-artifacts` repository gets a seven-day cleanup policy using Google's supported artifact cleanup mechanism. An existing repository without a policy requires explicit owner review; the script does not change unrelated cleanup policies. No warm instances or keep-alive jobs are configured. Refreshes append Secret Manager versions; periodically disable/destroy obsolete versions through owner operations, retaining the latest valid session. No runtime version-deletion permission is granted.
 
-Code is root-owned in `/opt/places-releases/<40-character-commit>`, with `/opt/places` an atomic symlink. Private state stays in `/var/lib/places` (`places:places`, `0700`); deployments never copy, clean or replace it. `/etc/places/worker.env` (`root:places`, `0640`) contains only non-secret settings. The template sets the owner's initial `gpt-5.6-terra` / `low`; application defaults are unchanged. Workspace/chat/user IDs and Gemini model remain blank. Telegram/Gemini payloads come from Secret Manager at runtime; SIWC stays exclusively in protected VM files.
+The runtime identity remains `places-runtime`: project `datastore.user`; `secretAccessor` on `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WEBHOOK_SECRET`, `OPENAI_SIWC_SESSION`; a custom role containing **only** `secretmanager.versions.add`, bound **only** to `OPENAI_SIWC_SESSION`. Gemini has no runtime secret grant and stays disabled. Credentials never appear in Firestore lock documents or normal function environment variables.
 
-## Owner bootstrap (Cloud Shell)
+`OPENAI_HOST_ID` is a durable, non-secret `urn:uuid:...` configuration value shared across deployments/cold starts, generated once with `node -e "console.log('urn:uuid:'+require('node:crypto').randomUUID())"`. Keep it in the GitHub production environment settings and preserve it during redeploys. Do not derive it from an account/email. Import preserves the existing issued registration; as in OpenAI’s documented host-transfer guidance, the new host ID is used for subsequent authorization and does not retroactively reattribute an imported session. Secret Manager reads use `latest` for initial state and the immutable latest committed version after rotation, rather than a deployment-pinned environment secret.
 
-Use an authenticated owner/admin identity with permission to inspect existing resources and create the listed VM/IAM/WIF/network resources. Do not supply a key file. Start in a checkout of current `main`:
+## Owner migration and cleanup
 
-```sh
-bash infra/bootstrap-gcp.sh --plan
-```
-
-This reads project/Firestore/secret **metadata only**, prints the Firestore location, and makes no changes. Choose a nearby compatible region and an available zone based on that actual location (multi-region locations are not zone names). Review VM/IP/disk costs and the explicit settings near the script's top. Then run, replacing the three owner choices:
+From an authenticated owner Cloud Shell checkout of current `main`:
 
 ```sh
-REGION=CHOSEN_REGION ZONE=CHOSEN_ZONE ADMIN_MEMBER=user:OWNER_EMAIL \
-  bash infra/bootstrap-gcp.sh --apply
+python3 infra/migrate-serverless.py --plan
 ```
 
-The apply step enables APIs, reuses the existing project/database/secrets, creates dedicated identities/WIF/network/VM as necessary, and grants scoped IAM. It does not read/overwrite secret payloads or create Firestore documents. Reruns reuse resources; mismatched security settings, broad account grants, disabled-fallback secret grants or changed WIF trust fail closed for owner review. Bootstrap is not transactional: an interrupted run can leave already-created resources; inspect and rerun. Existing VM root helper changes require deliberate owner review and startup preparation rerun; bootstrap does not reboot an existing VM.
-
-Wait for startup preparation to finish. Inspect only public startup status via the Google Console/serial log or IAP SSH. Verify:
+Plan reads resource/IAM metadata and public GitHub repository identifiers; it never reads secret payloads or mutates cloud resources. It verifies the database location, VM/disk absence, old network/firewall/role shapes, and existing repository/main/production WIF trust. Review its safe summary, then run:
 
 ```sh
-sudo test -x /usr/local/sbin/places-install-release
-/usr/local/bin/node --version
-sudo stat -c '%U:%G %a' /var/lib/places /etc/places/worker.env
-sudo systemctl is-active places-worker # expected inactive (nonzero)
-sudo systemctl is-enabled places-worker # expected disabled (nonzero)
+python3 infra/migrate-serverless.py --apply
 ```
 
-The worker is neither enabled nor started. Keep the retained boot disk and its private state protected; deleting a VM retains its disk but does not make a backup. No snapshots/backups are configured by this task.
+Apply removes only the recognized abandoned firewall/subnet/network, Compute read role, matching IAP bindings and former IAP administrators' runtime `actAs` grants. VM-scoped OS Login bindings disappeared with the deleted VM. Unexpected members, resources or broad account grants fail closed; no VM/disk deletion or migration is attempted. Dedicated runtime/deploy accounts and compatible numeric-ID-restricted WIF are reused. Existing Firestore and Telegram/Gemini secret values are untouched. The two new secrets are created **empty**; this script never generates/imports a payload.
 
-## GitHub production deployment
+Serverless APIs, artifact retention and deployment IAM are prepared. Deploy gets `cloudfunctions.developer`, `serviceUsageConsumer` and a small Firebase metadata/function-invoker policy role; `actAs` applies to the runtime and effective build account, not all accounts. No Compute/IAP/SSH or direct secret access is retained. The current effective Cloud Build default is inspected: it receives Google's documented `cloudbuild.builds.builder` role; legacy Google-managed build identities do not receive an unsupported `actAs` binding. An effective build identity with Owner/Editor requires owner review. These deployment/build privileges are trusted: deploying code can indirectly use runtime permissions even though CI has no secret accessor role.
 
-Create GitHub environment `production`, restrict its deployment branches to **main**, and configure an owner approval protection if available for the repository plan. Put bootstrap's printed safe values in its environment variables:
+Migration is not a cross-service transaction; already-completed steps can remain after an interruption. Reinspect and rerun. Do not widen permissions merely to suppress a failure. The script does not disable shared APIs, delete service accounts/WIF, or touch unrelated resources.
 
-`GCP_PROJECT_ID`, `GCP_ZONE`, `GCP_VM_NAME`, `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`.
+## One-time IDs, secrets and SIWC import
 
-No GitHub secrets are needed. Enable Actions and manually run **Deploy production** on `main`. The workflow checks the complete repository, builds, prunes development dependencies and packages only the four compiled workspaces, production dependencies, public package metadata and MIT license. It records the exact commit in `RELEASE.json`; no `.env`, credentials, tests, Git checkout or compiler are shipped. The artifact job has no Google authentication. The deployment job acquires short-lived Google OIDC credentials only after packaging and uses IAP/OS Login with an expiring SSH key. Actions are pinned by commit. Gitleaks 8.30.1 is downloaded with a fixed SHA-256 and scans full Git history with redacted output; no secret-scan report is uploaded. This is a mature additional check, not proof that arbitrary private data cannot leak.
+Use the owner's local checkout or authenticated Cloud Shell, `npm ci`, and Node 22. `npm run telegram:ids` is a temporary diagnostic only. With ADC permitted to read the Telegram secret, run it while no webhook/other poller is active; send one harmless event from each intended user in the intended group, record chat ID and both user IDs, then Ctrl+C. `npm run webhook -- remove` removes an existing webhook without dropping pending updates before this diagnostic.
 
-The root installer validates SHA-256, paths, symlinks, metadata and prebuilt layout before switching the symlink. Transfers/staging failures leave current code intact. It restarts only an already-active worker, allows up to 300 seconds for graceful shutdown, checks process status after five seconds, and restores previous code on early restart failure. This is a process-status check, not an application readiness probe; later failures still need owner investigation. Initial deployment remains inactive. Three recent releases plus current/previous targets are retained. `/var/lib/places` and the environment file are outside all release cleanup.
-
-## VM initialization and owner-only profile import
-
-Use IAP from the owner's authenticated computer; set these **non-secret** local variables to the bootstrap values:
+Initialize the empty webhook secret once using owner ADC:
 
 ```sh
-PROJECT_ID=mom-im-ok-places
-ZONE=CHOSEN_ZONE
-VM_NAME=places-worker
+npm run webhook -- init-secret
 ```
 
-Open a VM shell:
+The CLI generates a random token directly into Secret Manager, never prints it, and refuses to overwrite any existing version. Bot token and webhook secret are retrieved directly by the owner CLI for registration; neither is a CLI argument or GitHub value.
+
+For SIWC import, stop all local OAuth/model/vision users of the copied `owner.json`. Keep that file private and outside the checkout. Before importing/replacing a production session, remove the webhook, prevent other requests (temporarily remove public invoker access if already deployed), and allow **all existing requests to drain for at least 300 seconds**. The old secret must not be refreshed concurrently. The owner can then run:
 
 ```sh
-gcloud compute ssh "$VM_NAME" --project="$PROJECT_ID" --zone="$ZONE" --tunnel-through-iap
+CONFIRM_WEBHOOK_STOPPED=true npm run siwc:import -- /PRIVATE/PATH/owner.json
 ```
 
-On the VM, ensure the worker is stopped and initialize its own host identity (this command does not perform OAuth or read an account profile):
+The import validates the same strict credential schema, adds a version to `OPENAI_SIWC_SESSION`, then clears only the non-secret refresh recovery marker. It never displays payloads or uploads them through GitHub/Codex/artifacts. `CONFIRM_WEBHOOK_STOPPED` is an explicit operator assertion, not an automatic proof of shutdown. Serverless becomes the sole refresh owner. Do not keep using the copied local profile. For future reauthorization, suspend/drain production again, use local `OPENAI_HOST_ID=<the stable serverless UUID> npm run oauth` (the override supplies that host identity to authorization without replacing the local host file), import the resulting profile, then restore invoker access/webhook. The local file-backed implementation stays available for OAuth and pre-import diagnostics.
+
+## Manual deployment and registration
+
+Use GitHub environment `production`, main-only deployment branches, optional owner approval protection, and these **non-secret** variables:
+
+- `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`: migration output.
+- `WORKSPACE_ID`, `TELEGRAM_CHAT_ID`, `TELEGRAM_USER_IDS`, `TELEGRAM_BOT_USERNAME`: actual workspace and allowlisted group/users; username without `@`.
+- `OPENAI_HOST_ID`: the stable generated host UUID.
+- `OPENAI_MODEL=gpt-5.6-terra`, `OPENAI_REASONING_EFFORT=low`: initial owner-selected deployment values, not application defaults.
+
+An actual workspace with real Firebase Auth member UIDs must exist before accepted images can be processed. This task creates no workspace/member documents or fake identities. Fill only known real values; registration waits until these prerequisites are ready.
+
+Manually run **Deploy production** on main. Full checks and Gitleaks run before Google authentication. Pinned Firebase CLI 15.32.1 deploys only `functions:places:placesWebhook`; no rules/indexes/hosting deployment is bundled. Compiled application code, vendored compiled workspace packages, tested production dependency lock and MIT license are allowlisted into `.deploy/functions`; Git/credentials/tests/local env files are excluded. Only validated non-secret function parameters are added. `RELEASE.json` records the exact source commit. Cloud Build installs production dependencies; production does not compile TypeScript. GitHub gets short-lived WIF credentials, never secret payloads. No deployment artifact is uploaded to GitHub.
+
+After deployment, take the HTTPS URL from the Firebase deployment/Google Console. Register and verify using owner ADC:
 
 ```sh
-sudo systemctl stop places-worker
-sudo -u places sh -c 'set -a; . /etc/places/worker.env; set +a; cd /opt/places; npm run runtime:init'
+npm run webhook -- set https://europe-west3-mom-im-ok-places.cloudfunctions.net/placesWebhook
+npm run webhook -- status
 ```
 
-It reports initialization/path/ownership/permission/host-presence checks only. Stop all laptop OAuth/model/vision/worker processes using the selected profile before transfer. From the owner's computer, with `LOCAL_OWNER_PROFILE` pointing privately to the already-authorized `owner.json`:
+Registration sets `secret_token`, `allowed_updates: ['message']`, `max_connections: 10`, and preserves pending updates. Use the actual deployed URL if it differs. Status prints only safe URL/count/error-presence metadata, never Telegram error descriptions. Removal for rollback is `npm run webhook -- remove`. Restore a previous reviewed source commit through the same manual deployment workflow; no filesystem release switching remains.
 
-```sh
-gcloud compute ssh "$VM_NAME" --project="$PROJECT_ID" --zone="$ZONE" --tunnel-through-iap \
-  --command='install -d -m 0700 "$HOME/places-import"'
-gcloud compute scp "$LOCAL_OWNER_PROFILE" "$VM_NAME:places-import/owner.json" \
-  --project="$PROJECT_ID" --zone="$ZONE" --tunnel-through-iap
-```
+## Processing and recovery guarantees
 
-Back in the VM shell, import **only** `owner.json`. Do not transfer or replace `host.json`. For a first import:
+Every delivery validates POST, JSON type and bounded body size, and checks the constant-time secret header before application parsing. Google/Firebase's HTTP framework may parse the body before user code; the application ignores `req.body` and uses bounded `rawBody` only after authentication. Chat/user allowlists precede media/command projection. Conversation, captions, raw updates and bytes are never logged/persisted. Only photos/supported image documents and `/help` / `/area` are accepted.
 
-```sh
-sudo systemctl stop places-worker
-sudo test ! -e /var/lib/places/owner.lock
-sudo test ! -e /var/lib/places/owner.json
-sudo test -f /var/lib/places/host.json
-chmod 0600 "$HOME/places-import/owner.json"
-sudo install -o places -g places -m 0600 "$HOME/places-import/owner.json" /var/lib/places/owner.json
-rm -- "$HOME/places-import/owner.json"
-rmdir -- "$HOME/places-import"
-sudo stat -c '%U:%G %a' /var/lib/places/owner.json /var/lib/places/host.json
-```
+`workspaces/{workspace}/pendingIngress/{hash}` retains image file IDs, source message ID, quiet deadline and ownership metadata, not update contents. Albums settle after 1.5 seconds of quiet, with up to ten deduplicated file IDs. Once processing is claimed, membership is sealed; unusually late members are preserved as separate single-image discoveries instead of being silently lost. Duplicates of completed work return 200; busy/failed work returns 503 so Telegram retries. Ingress/image leases expire after 330 seconds, beyond the 300-second handler bound; expired owners are fenced before subsequent writes. Completed discovery IDs are durable idempotency records. External OpenAI requests and Telegram replies cannot be exactly-once: a crash after an external effect may repeat an inference/reply on retry. Telegram retry retention is finite; if deliveries ultimately expire, resend affected images. There is no scheduler/queue sweeping abandoned pending documents; a subsequent delivery/resend drives recovery. Inbox metadata is retained to preserve deduplication; no TTL is configured.
 
-Stop if any `test` fails; do not paste this block into a shell that continues after a failed prerequisite (run checks individually or use `set -e` in a dedicated script). Never display the profile, upload it through Codex/GitHub/CI/Secret Manager/public URLs, or copy it into the deployment checkout. The VM becomes the sole refresh owner; do not reuse the copied laptop session. The official SIWC guidance preserves the VM's host identity and notes that transferred sessions do not yet have host-specific attribution/revocation. See [SIWC](../docs/openai-siwc.md).
+SIWC refresh uses a 120-second Firestore transactional lease, a bounded 25-second acquisition wait and 20-second token exchange. Latest session is reread after acquisition; the non-secret lease record retains the exact successfully saved Secret Manager version name, and subsequent reads use that immutable version to avoid `latest` alias propagation races (initial state falls back to `latest`); valid tokens avoid refresh. Successful replacement tokens are saved as a new secret version. Known temporary HTTP failures preserve the previous version and release ownership. Terminal invalid grants, missing rotating replacements, uncertain network outcomes, crashes during refresh or failed durable writes block further refresh with a safe reauthorization diagnostic. This conservative marker prevents replaying a possibly consumed token after lease expiry. Owner suspension/drain/import clears it. Access tokens last roughly an hour; refresh tokens have a rolling roughly 30-day lifetime, so long idle periods can require local reauthorization. No always-on refresh scheduler is added.
 
-## First validation — worker stays stopped
+Model selection is validated once per cold instance before its first image inference, with failed validation retried on later deliveries; no catalog query occurs per successful image batch. Auth/model/config/schema/programming failures remain visible through fixed diagnostics and never activate Gemini. No live Gemini test/activation, search/geocoding, confirmation UI, chains/branches, Android/OsmAnd or exports are added.
 
-In the VM shell, run each diagnostic as the runtime user with the non-secret environment:
-
-```sh
-sudo -u places sh -c 'set -a; . /etc/places/worker.env; set +a; cd /opt/places; npm run models'
-# Optional: owner securely transfers a harmless image, readable by places, outside private state.
-sudo -u places sh -c 'set -a; . /etc/places/worker.env; set +a; cd /opt/places; npm run vision:smoke -- /tmp/harmless-test.png'
-sudo -u places sh -c 'set -a; . /etc/places/worker.env; set +a; cd /opt/places; npm run telegram:ids'
-```
-
-Model listing must confirm the configured account model. Vision validates a real optional image. No workspace is required by these commands. For `telegram:ids`, stop every other bot poller, send one harmless event from each intended user in the intended group, record the numeric group ID and both user IDs, then **Ctrl+C**. Remove the optional image. Confirm `places-worker` remains inactive. Do not enable Gemini fallback or start the worker.
-
-Only a later task will create the actual workspace/member documents with real Firebase UIDs, fill workspace/chat/user settings, and start/enable the worker. No fake UIDs or members are generated here. Existing [Firestore rules](firestore.rules) and index definitions are unchanged; client rule emulator verification remains future work before releasing a client.
-
-## Recovery
-
-Inspect current public release with `readlink -f /opt/places` and `/opt/places/RELEASE.json`. To restore a retained known-good commit on the VM:
-
-```sh
-sudo /usr/local/sbin/places-rollback-release KNOWN_GOOD_40_CHARACTER_COMMIT
-```
-
-Rollback preserves state/configuration and only restarts a worker that was already active. A stale `owner.lock` deliberately fails closed: confirm **all** session-owning processes have exited before manually removing that one lock. Never delete the profile or host identity to unblock a deployment. If a restart fails, inspect fixed application diagnostics and service status; do not print secret files or upstream bodies. A five-second check cannot guarantee subsequent readiness. VM replacement/profile recovery and private backups remain owner operations, outside this bootstrap.
-
-Official references rechecked 2026-10-04: [attached service accounts](https://cloud.google.com/compute/docs/access/service-accounts), [Secret Manager IAM](https://cloud.google.com/secret-manager/docs/access-control), [deployment WIF](https://cloud.google.com/iam/docs/workload-identity-federation-with-deployment-pipelines), [OS Login](https://cloud.google.com/compute/docs/oslogin/set-up-oslogin), [IAP forwarding](https://cloud.google.com/iap/docs/using-tcp-forwarding), [supported OS images](https://cloud.google.com/compute/docs/images/os-details), [OpenAI self-hosted VMs](https://developers.openai.com/siwc/token-sharing-open-source/self-hosted-vms).
+References rechecked 2026-10-05: [Functions scaling/runtime](https://firebase.google.com/docs/functions/manage-functions), [Functions deployment IAM](https://cloud.google.com/functions/docs/reference/iam/roles), [Google GitHub auth / ADC](https://github.com/google-github-actions/auth), [Secret Manager IAM](https://cloud.google.com/secret-manager/docs/access-control), [version consistency](https://cloud.google.com/secret-manager/docs/consistency), [Telegram webhook](https://core.telegram.org/bots/api#setwebhook), [OpenAI sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). The existing [Mom-I-am-OK backend workflow](https://github.com/dd64ru/Mom-I-am-OK/blob/main/.github/workflows/release-production-backend.yml) informed manual WIF/ADC deployment; its legacy text logging/webhook handling was not copied.

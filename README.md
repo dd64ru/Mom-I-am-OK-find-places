@@ -13,48 +13,34 @@ npm run check
 
 `check` runs Prettier, TypeScript checking, builds, focused smoke tests and infrastructure static checks. There is no separate linter. Tests use fixtures and fake transports, not production services.
 
-To prepare a real worker:
+Operational commands `oauth`, `models`, `vision:smoke` and `telegram:ids` automatically build current TypeScript. They are owner-only local/Cloud Shell setup tools; Node 22 is used by production. Copy `.env.example` privately and reuse the owner's already-authorized profile for pre-import diagnostics. Never provide real credentials to Codex or CI.
 
-```sh
-cp .env.example .env
-npm run oauth # first authorization only; reuse an already-authorized protected profile
-npm run models
-# Fill OPENAI_MODEL from the current catalog; set OPENAI_REASONING_EFFORT independently.
-# Worker also needs the workspace/chat/user IDs.
-npm run worker
-```
-
-Source `oauth`, `models`, `vision:smoke`, `telegram:ids` and `runtime:init` automatically build current TypeScript through npm pre-hooks. Production bundles omit these hooks and systemd runs compiled code directly.
-
-Operational commands load an optional local `.env`; on the VM they can use only the inherited runtime environment. OAuth and model listing require only the session settings. The laptop is a temporary setup/diagnostic tool, not the intended permanent runtime. Worker configuration intentionally fails closed when IDs or model selection are absent. Use an available image-capable OpenAI model; no model is hardcoded. Complete OAuth on the computer running the browser. See [OpenAI authorization](docs/openai-siwc.md) for returning accounts and VM transfer.
-
-The owner has already completed SIWC authorization and account-specific model listing. Reuse that protected profile for `npm run vision:smoke -- <image-path>`. `OPENAI_MODEL` selects an available account model; `OPENAI_REASONING_EFFORT` independently selects reasoning depth (default `low` only when unset). No permanent model recommendation is coded. `npm run telegram:ids` discovers group/member IDs without starting the worker. See [diagnostics and prerequisites](docs/diagnostics.md) for both commands; neither needs a Firestore workspace.
-
-Keep the production worker stopped for the [VM bootstrap, deployment and diagnostics](infra/README.md). Workspace creation with real Firebase Auth UIDs and worker activation belong to a later task. The environment used to build this foundation had no secret values or Google credentials. Default secret source is Secret Manager; `SECRET_SOURCE=env` is an explicit local alternative. Never commit `.env`, credentials or session files.
+Production is now an authenticated **Firebase Functions v2 Telegram webhook** in `europe-west3`, with zero minimum instances. SIWC is stored/rotated explicitly through Secret Manager with a Firestore cross-instance lease. See [migration, deployment and owner setup](infra/README.md). No cloud cleanup/deployment was performed here and no workspace/member documents are created by this task.
 
 ## Repository
 
-| Path                 | Responsibility                                                                           |
-| -------------------- | ---------------------------------------------------------------------------------------- |
-| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts |
-| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                               |
-| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                       |
-| `apps/worker`        | Central configuration, narrow Telegram adapter, OAuth/model/vision/ID diagnostics        |
-| `apps/android-sync`  | Companion-app scaffold documentation; no Android build yet                               |
-| `infra`              | Firestore client rules, index configuration, service template and IAM/WIF preparation    |
-| `docs`               | Architecture, decisions, authorization, Telegram UX, Android integration                 |
+| Path                 | Responsibility                                                                            |
+| -------------------- | ----------------------------------------------------------------------------------------- |
+| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts  |
+| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                                |
+| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                        |
+| `apps/worker`        | Local configuration, privacy gate and OAuth/model/vision/ID diagnostics                   |
+| `apps/functions`     | Authenticated HTTPS webhook, durable ingress and serverless composition                   |
+| `apps/android-sync`  | Companion-app scaffold documentation; no Android build yet                                |
+| `infra`              | Firestore client rules, index configuration, serverless migration and IAM/WIF preparation |
+| `docs`               | Architecture, decisions, authorization, Telegram UX, Android integration                  |
 
 ## What runs today
 
-The configured worker long-polls one allowed group, accepts photos and supported image documents from allowed users, groups albums, downloads bounded images, calls OpenAI vision, and writes a **pending discovery** to Firestore. It replies with possible names/confidence. `/help` and `/area <city or region>` are supported. The primary model is validated against the signed-in account catalog once at worker startup; unavailable models fail startup with `openai_model_unavailable`. Gemini is an opt-in emergency fallback only for Responses HTTP 502/503/504 service outages, with its actual use recorded. Authentication, permissions, configuration, model, schema, programming, quota and unclassified transport errors fail closed without switching providers. Ordinary conversation and image captions are ignored, never sent to AI, stored or logged. No conversational assistant behavior exists.
+The configured webhook serves one allowed group, accepts photos and supported image documents from allowed users, groups albums, downloads bounded images, calls OpenAI vision, and writes a **pending discovery** to Firestore. It replies with possible names/confidence. `/help` and `/area <city or region>` are supported. The primary model is validated against the signed-in account catalog once per cold instance before its first inference; unavailable models fail processing with `openai_model_unavailable`. Gemini is an opt-in emergency fallback only for Responses HTTP 502/503/504 service outages, with its actual use recorded. Authentication, permissions, configuration, model, schema, programming, quota and unclassified transport errors fail closed without switching providers. Ordinary conversation and image captions are ignored, never sent to AI, stored or logged. No conversational assistant behavior exists.
 
-Canonical confirmed places and chains have real schemas and repository operations. Recognition alone never creates a geographic point. Search and POI verification ports exist, but no real search/geocoding provider is wired; consequently the worker currently saves no confirmed places. User confirmation, chain linking, `/find`, `/branches`, `/map`, `/undo`, exports and Android/OsmAnd sync remain future work.
+Canonical confirmed places and chains have real schemas and repository operations. Recognition alone never creates a geographic point. Search and POI verification ports exist, but no real search/geocoding provider is wired; consequently the adapter currently saves no confirmed places. User confirmation, chain linking, `/find`, `/branches`, `/map`, `/undo`, exports and Android/OsmAnd sync remain future work.
 
-The album buffer and work queue are bounded in-memory structures for a single VM worker. They are not crash-durable. A crash can lose an acknowledged album; resend it. Completed discoveries are idempotent by Telegram source. See [Telegram behavior](docs/telegram.md) for limits.
+Firestore-backed album debounce, processing leases and completed discovery IDs replace in-memory polling state. Only accepted image IDs/source metadata are persisted; image bytes remain transient. See [Telegram behavior](docs/telegram.md) for retry and late-album limits.
 
 ## Existing external infrastructure
 
-Already created by the owner: project `mom-im-ok-places`, Firestore `(default)`, Firebase Authentication with Google enabled, Secret Manager secrets `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`, Blaze billing, and public GitHub repository `dd64ru/Mom-I-am-OK-find-places`. These are supplied facts, not resources provisioned or verified by this implementation. No production deployment, Android registration, secret access or live-service validation was performed by the development agent. The owner subsequently completed real SIWC authorization, model listing and a real vision smoke test outside this environment. Owner-run GCE/WIF bootstrap and manual prebuilt deployment are now prepared; no cloud resource was provisioned by this change.
+Already created by the owner: project `mom-im-ok-places`, Firestore `(default)`, Firebase Authentication with Google enabled, Secret Manager secrets `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`, Blaze billing, and public GitHub repository `dd64ru/Mom-I-am-OK-find-places`. These are supplied facts, not resources provisioned or verified by this implementation. No production deployment, Android registration, secret access or live-service validation was performed by the development agent. The owner subsequently completed real SIWC authorization, model listing and a real vision smoke test outside this environment. The owner subsequently ran the GCE bootstrap and deleted its VM and retained disk. The serverless migration script assesses the remaining resources; this change did not mutate cloud state.
 
 Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [next infrastructure setup](infra/README.md).
 

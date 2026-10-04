@@ -19,8 +19,21 @@ export const SessionSchema = z
   })
   .strict();
 export type Session = z.infer<typeof SessionSchema>;
+export interface SessionStore {
+  hostId(): Promise<string>;
+  load(profile: string): Promise<Session | undefined>;
+  save(profile: string, session: Session): Promise<void>;
+  serializeRefresh?<T>(operation: () => Promise<T>): Promise<T>;
+  refreshPhase?(phase: 'reserved' | 'refreshing'): Promise<void>;
+}
 export class FileSessions {
-  constructor(readonly directory: string) {}
+  constructor(
+    readonly directory: string,
+    private readonly configuredHostId?: string,
+  ) {
+    if (configuredHostId && !/^urn:uuid:[a-f0-9-]{36}$/.test(configuredHostId))
+      throw new Error('invalid_host_id');
+  }
   private profilePath(profile: string) {
     if (!/^[a-zA-Z0-9_-]{1,64}$/.test(profile))
       throw new Error('invalid_profile');
@@ -46,6 +59,7 @@ export class FileSessions {
     await rename(temp, path);
   }
   async hostId(): Promise<string> {
+    if (this.configuredHostId) return this.configuredHostId;
     await this.prepare();
     const path = join(this.directory, 'host.json');
     try {

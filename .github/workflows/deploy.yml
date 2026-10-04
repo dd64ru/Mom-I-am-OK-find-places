@@ -7,9 +7,14 @@ concurrency:
   group: places-production-deploy
   cancel-in-progress: false
 jobs:
-  package:
+  deploy:
     if: github.ref == 'refs/heads/main'
+    environment: production
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -21,57 +26,22 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
-      - run: npm prune --omit=dev --ignore-scripts
-      - run: npm run deploy:package -- --output "$RUNNER_TEMP/places.tgz"
-      # Only the explicit public-code bundle is uploaded. No checkout or credential files.
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: places-release
-          path: ${{ runner.temp }}/places.tgz
-          retention-days: 3
-          if-no-files-found: error
-  deploy:
-    needs: package
-    if: github.ref == 'refs/heads/main'
-    environment: production
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
-    permissions:
-      contents: read
-      id-token: write
-    env:
-      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
-      GCP_ZONE: ${{ vars.GCP_ZONE }}
-      GCP_VM_NAME: ${{ vars.GCP_VM_NAME }}
-    steps:
-      - name: Validate non-secret deployment identifiers
+      - run: npm run deploy:package -- --output .deploy/functions
+      - name: Write validated non-secret function settings
         env:
-          PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-          DEPLOY_ACCOUNT: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
-        run: |
-          [[ "$GCP_PROJECT_ID" =~ ^[a-z][a-z0-9-]{4,61}[a-z0-9]$ ]]
-          [[ "$GCP_ZONE" =~ ^[a-z]+-[a-z]+[0-9]+-[a-z]$ ]]
-          [[ "$GCP_VM_NAME" =~ ^[a-z][a-z0-9-]{4,28}[a-z0-9]$ ]]
-          [[ "$PROVIDER" =~ ^projects/[0-9]+/locations/global/workloadIdentityPools/[a-z0-9-]+/providers/[a-z0-9-]+$ ]]
-          [[ "$DEPLOY_ACCOUNT" =~ ^[a-z0-9-]+@${GCP_PROJECT_ID}\.iam\.gserviceaccount\.com$ ]]
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: places-release
-          path: ${{ runner.temp }}/release
+          WORKSPACE_ID: ${{ vars.WORKSPACE_ID }}
+          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
+          TELEGRAM_USER_IDS: ${{ vars.TELEGRAM_USER_IDS }}
+          TELEGRAM_BOT_USERNAME: ${{ vars.TELEGRAM_BOT_USERNAME }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL }}
+          OPENAI_REASONING_EFFORT: ${{ vars.OPENAI_REASONING_EFFORT }}
+          OPENAI_HOST_ID: ${{ vars.OPENAI_HOST_ID }}
+        run: node scripts/write-function-env.mjs
+      # Authentication happens after checks and public-source packaging; no secret payload reads.
       - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
-          project_id: ${{ vars.GCP_PROJECT_ID }}
+          project_id: mom-im-ok-places
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           create_credentials_file: true
-      - uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
-        with:
-          version: latest
-      - name: Transfer and atomically install prebuilt release
-        run: |
-          bundle="$RUNNER_TEMP/release/places.tgz"
-          digest=$(sha256sum "$bundle" | cut -d ' ' -f 1)
-          [[ "$GITHUB_SHA" =~ ^[a-f0-9]{40}$ && "$digest" =~ ^[a-f0-9]{64}$ ]]
-          gcloud compute scp "$bundle" "$GCP_VM_NAME:/tmp/places-$GITHUB_SHA.tgz" --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" --tunnel-through-iap --ssh-key-file="$RUNNER_TEMP/places-ssh" --ssh-key-expire-after=15m --quiet
-          gcloud compute ssh "$GCP_VM_NAME" --project="$GCP_PROJECT_ID" --zone="$GCP_ZONE" --tunnel-through-iap --ssh-key-file="$RUNNER_TEMP/places-ssh" --ssh-key-expire-after=15m --quiet --command="sudo -n /usr/local/sbin/places-install-release '$GITHUB_SHA' '$digest'"
+      - run: npx --no-install firebase deploy --project mom-im-ok-places --only functions:places:placesWebhook --non-interactive

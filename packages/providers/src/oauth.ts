@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { z } from 'zod';
 import { checkedFetch } from './http.js';
-import { FileSessions, type Session } from './session.js';
+import { type SessionStore, type Session } from './session.js';
 const issuer = 'https://auth.openai.com';
 const resource = 'https://api.openai.com/v1';
 const tokenUrl = `${issuer}/api/accounts/oauth/token`;
@@ -29,7 +29,7 @@ const jwks = createRemoteJWKSet(new URL(`${issuer}/.well-known/jwks.json`));
 export class OpenAiOAuth {
   private renewal?: Promise<Session>;
   constructor(
-    private readonly sessions: FileSessions,
+    private readonly sessions: SessionStore,
     readonly profile: string,
   ) {}
   async begin(redirectUri: string) {
@@ -154,18 +154,71 @@ export class OpenAiOAuth {
     this.checkPermission(session.scopes);
     if (session.expiresAt > Date.now() + 60_000) return session.accessToken;
     // Coalesce refreshes in this process; the worker holds an exclusive file lock for its lifetime.
-    this.renewal ??= this.refresh(session).finally(() => {
+    const renew = async () => {
+      // Durable stores serialize across instances; always reread after lease acquisition.
+      const latest = await this.sessions.load(this.profile);
+      if (!latest) throw new Error('openai_authorization_required');
+      this.checkPermission(latest.scopes);
+      if (latest.expiresAt > Date.now() + 60_000) return latest;
+      return this.refresh(latest);
+    };
+    this.renewal ??= (
+      this.sessions.serializeRefresh
+        ? this.sessions.serializeRefresh(renew)
+        : renew()
+    ).finally(() => {
       this.renewal = undefined;
     });
     return (await this.renewal).accessToken;
   }
+  private async refreshExchange(body: Record<string, string>) {
+    let response: Response;
+    try {
+      response = await fetch(tokenUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams(body),
+        signal: AbortSignal.timeout(20_000),
+      });
+    } catch {
+      throw new Error(
+        'openai_refresh_outcome_unknown:reauthorization_required',
+      );
+    }
+    if (!response.ok) {
+      // Only a bounded OAuth error identifier is inspected; bodies never escape.
+      let terminal = response.status === 401;
+      if (response.status === 400) {
+        try {
+          terminal = (await response.json()).error === 'invalid_grant';
+        } catch {
+          /* fixed error below */
+        }
+      }
+      if (terminal) throw new Error('openai_reauthorization_required');
+      await this.sessions.refreshPhase?.('reserved');
+      throw new Error('openai_refresh_failed');
+    }
+    try {
+      return TokenSchema.parse(await response.json());
+    } catch {
+      throw new Error(
+        'openai_refresh_response_invalid:reauthorization_required',
+      );
+    }
+  }
   private async refresh(session: Session): Promise<Session> {
-    const tokens = await this.exchange({
+    await this.sessions.refreshPhase?.('refreshing');
+    const tokens = await this.refreshExchange({
       grant_type: 'refresh_token',
       client_id: session.clientId,
       refresh_token: session.refreshToken,
       resource,
     });
+    if (!tokens.refresh_token)
+      throw new Error(
+        'openai_refresh_response_invalid:reauthorization_required',
+      );
     const next: Session = {
       ...session,
       accessToken: tokens.access_token,
@@ -185,6 +238,7 @@ export class OpenAiOAuth {
     }
     this.checkPermission(next.scopes);
     await this.sessions.save(this.profile, next);
+    await this.sessions.refreshPhase?.('reserved');
     return next;
   }
 }

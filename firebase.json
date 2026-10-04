@@ -3,5 +3,26 @@
     "rules": "infra/firestore.rules",
     "indexes": "infra/firestore.indexes.json"
   },
-  "emulators": { "firestore": { "port": 8080 }, "ui": { "enabled": false } }
+  "emulators": {
+    "firestore": {
+      "port": 8080
+    },
+    "ui": {
+      "enabled": false
+    }
+  },
+  "functions": [
+    {
+      "source": ".deploy/functions",
+      "codebase": "places",
+      "runtime": "nodejs22",
+      "ignore": [
+        "node_modules",
+        ".git",
+        "firebase-debug.log",
+        "firebase-debug.*.log"
+      ],
+      "disallowLegacyRuntimeConfig": true
+    }
+  ]
 }
