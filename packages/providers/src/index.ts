@@ -6,3 +6,5 @@ export * from './vision.js';
 export * from './lock.js';
 export * from './lease.js';
 export * from './secret-sessions.js';
+export * from './search.js';
+export * from './poi.js';

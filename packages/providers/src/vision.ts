@@ -122,7 +122,9 @@ export class OpenAiVision implements VisionProvider {
 }
 // Only a Responses HTTP gateway/service outage qualifies for emergency fallback.
 // OAuth refresh/catalog errors, 429 quota/permission ambiguity, and generic errors do not.
-async function openAiInferenceRequest(init: RequestInit): Promise<Response> {
+export async function openAiInferenceRequest(
+  init: RequestInit,
+): Promise<Response> {
   try {
     return await checkedFetch('https://api.openai.com/v1/responses', init);
   } catch (error) {
@@ -148,12 +150,39 @@ async function parseOpenAiOutput(response: Response): Promise<Recognition> {
 }
 // Exported for a credential-free protocol smoke test. A partial stream is never accepted.
 export async function readResponseStream(response: Response): Promise<string> {
+  return (await readResponseEvidence(response)).text;
+}
+export async function readResponseEvidence(
+  response: Response,
+  maxSearchCalls = Infinity,
+): Promise<{ text: string; citations: string[]; searched: boolean }> {
   if (!response.body) throw new Error('openai_stream_missing');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = '';
   let text = '';
   let completed = false;
+  let searched = false;
+  const searchCalls = new Set<string>();
+  let totalBytes = 0;
+  const citations = new Set<string>();
+  const collect = (annotation: unknown) => {
+    const a = annotation as { type?: string; url?: unknown } | undefined;
+    if (
+      a?.type !== 'url_citation' ||
+      typeof a.url !== 'string' ||
+      a.url.length > 2048
+    )
+      return;
+    const url = new URL(a.url);
+    if (
+      url.protocol === 'https:' &&
+      !url.username &&
+      !url.password &&
+      citations.size < 20
+    )
+      citations.add(url.href);
+  };
   const event = (block: string) => {
     const data = block
       .split('\n')
@@ -173,12 +202,43 @@ export async function readResponseStream(response: Response): Promise<string> {
       value.type === 'error'
     )
       throw new Error('openai_inference_failed');
-    if (value.type === 'response.completed') completed = true;
+    if (
+      value.type === 'response.output_item.added' &&
+      value.item?.type === 'web_search_call'
+    ) {
+      searchCalls.add(value.item.id ?? String(value.output_index));
+      if (searchCalls.size > maxSearchCalls)
+        throw new Error('openai_search_limit');
+    }
+    if (value.type === 'response.output_text.annotation.added')
+      collect(value.annotation);
+    if (value.type === 'response.web_search_call.completed') searched = true;
+    if (value.type === 'response.completed') {
+      if (value.response?.status && value.response.status !== 'completed')
+        throw new Error('openai_inference_failed');
+      completed = true;
+      if (
+        (value.response?.output ?? []).filter(
+          (item: { type: string }) => item.type === 'web_search_call',
+        ).length > maxSearchCalls
+      )
+        throw new Error('openai_search_limit');
+      for (const item of value.response?.output ?? []) {
+        if (item.type === 'web_search_call' && item.status === 'completed')
+          searched = true;
+        if (item.type === 'message')
+          for (const content of item.content ?? [])
+            for (const annotation of content.annotations ?? [])
+              collect(annotation);
+      }
+    }
     if (text.length > 100_000) throw new Error('openai_output_too_large');
   };
   try {
     while (true) {
       const chunk = await reader.read();
+      totalBytes += chunk.value?.byteLength ?? 0;
+      if (totalBytes > 2_000_000) throw new Error('openai_stream_too_large');
       buffer += decoder.decode(chunk.value, { stream: !chunk.done });
       buffer = buffer.replace(/\r\n/g, '\n');
       let boundary: number;
@@ -191,7 +251,7 @@ export async function readResponseStream(response: Response): Promise<string> {
     }
     if (buffer.trim()) event(buffer);
     if (!completed) throw new Error('openai_stream_incomplete');
-    return text;
+    return { text, citations: [...citations], searched };
   } finally {
     await reader.cancel();
     reader.releaseLock();

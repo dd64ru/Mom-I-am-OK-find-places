@@ -2,46 +2,37 @@
 
 ```mermaid
 flowchart LR
-  T[Telegram images and commands] --> W[Authenticated serverless webhook]
-  W --> C[Places Core]
-  C --> V[Vision port]
-  V --> O[OpenAI SIWC]
-  V --> G[Opt-in Gemini fallback]
-  C -. verification seam .-> S[Search and POI ports]
-  C --> R[Repository port]
-  R --> F[Firestore canonical data]
-  F -. future authenticated read .-> A[Android companion cache]
-  A -. future AIDL projection .-> M[Installed OsmAnd]
+  T[Telegram images / albums] --> W[Authenticated Functions v2 webhook]
+  W --> C[Reusable Places Core Discovery]
+  C --> V[Vision recognition: no coordinates]
+  V --> O[OpenAI SIWC / optional outage-only Gemini]
+  C --> S[SIWC web-search text and protocol citations]
+  S --> P[Deterministic Nominatim POI]
+  P --> Q[Telegram Confirm / Change city / Cancel]
+  Q --> X[Transactional completion]
+  X --> F[Firestore canonical Place]
+  Q --> R[City override: reuse Recognition]
+  R --> S
 ```
 
-`core` depends only on `schemas`. Providers implement its ports; the Functions adapter composes them. Telegram message types, AI HTTP payloads and OsmAnd favorite types do not enter canonical models. A later Mom I'm OK adapter can submit the same images and consume the same places.
-
-## Data ownership
+`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place contains name/aliases/category, WGS84 coordinates, address, evidence, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by a map, Android/OsmAnd or Mom-I-am-OK adapter.
 
 Firestore hierarchy:
 
-- `workspaces/{workspaceId}`: Firebase Auth member UIDs, locale, optional area hint and timestamps.
-- `workspaces/{workspaceId}/places/{placeId}`: canonical confirmed or archived places with WGS84 coordinates, normalized address, aliases, tags, chain link, source, evidence and confidence.
-- `workspaces/{workspaceId}/chains/{chainId}`: first-class reusable chain identity, native names and provider references. IDs are scoped to the workspace.
-- `workspaces/{workspaceId}/discoveries/{discoveryId}`: image-source reference, extracted text/clues, actual vision provider, optional verified POI candidates and pending status.
+- `workspaces/{id}`: Firebase UID `members`, locale, optional area hint and timestamps. Empty members is a legitimate Telegram-only workspace.
+- `discoveries`: Recognition, actual vision provider, verified deterministic candidates, per-discovery city override, revision, needs_confirmation/awaiting_city/confirmed/cancelled and confirmed Place ID.
+- `places`: canonical confirmed/archived geographic places. IDs deterministically dedupe provider identities without merging separate chain branches.
+- `chains`: existing reusable model; linking/branch browsing is future work.
+- `pendingIngress`: projected file/source IDs and debounce/lease metadata; no conversation, captions, raw update or image bytes.
+- `telegramInteractions` / `cityPrompts`: opaque token mappings, exact prompt/proposal IDs, temporary requester ownership, revision, expiry and processing leases; inaccessible to all client reads.
+- Global `_runtime`: image slot, existing credential-free SIWC refresh checkpoint and Nominatim rate gate. `_poiCache`: bounded deterministic POI responses under query hashes.
 
-Times are UTC ISO strings, not Firestore Timestamp objects. Coordinates explicitly declare WGS84. GCJ-02/BD-09 or other provider coordinates must be converted and independently checked inside that provider before entering the core. No China-specific assumptions exist.
+Discovery confirmation/cancellation and Place creation occur in one Firestore transaction. Revision compare-and-set prevents stale callbacks and verification results overwriting later edits or terminal states. The same OSM identity confirmed from different discoveries gets one Place; exact geographic fallback avoids fuzzy merging. Recognition is saved before search/POI so a retry or city edit can reuse it without downloading images or rerunning vision.
 
-A discovery is separate from a Place because unverified recognition often lacks any geographic point. The vision contract cannot return coordinates. Future verification calls a search provider, then a POI provider; even resulting candidates remain pending until explicit confirmation. Future confirmation should transactionally promote a selected candidate and link a reusable chain, retaining evidence. The current adapter does not promote candidates.
+A workspace initialized with `members: []` creates no Firebase Auth user and grants no client access. Admin/ADC runtime IAM is separate from client security rules. Later real Firebase UIDs can be attached to enable member reads of canonical data without schema redesign; the intended future integration is Mom-I-am-OK's real accounts. Cross-project integration is not implemented. Client writes and runtime interaction reads remain denied.
 
-The repository implements validated reads/writes and transactional, create-if-absent discovery storage. Source IDs make completed image ingestion idempotent; this is not an exactly-once Telegram transport guarantee. Raw images are transient memory buffers, not persisted. Normal conversation/captions are absent from application storage and logs. Source references retain the image's chat/message identifiers, not message content.
+OpenAI vision validates the chosen model once per cold instance. Gemini remains an opt-in emergency fallback only for Responses HTTP 502/503/504; auth/model/config/schema/programming errors fail closed. Search reuses the same OpenAiOAuth/SecretSessions and refresh lease, with `store:false` and streaming, no independent refresh owner and no API key. Coordinates never come from AI. See [geography](geography.md) for real protocol citations, bounded requests, Nominatim policy, cache and global rate limiting.
 
-## Boundaries
+Functions v2 / Cloud Run request execution stays in europe-west3, minInstances=0, maxInstances=2, 300 seconds, no VM/poller/VPC/NAT/scheduler. Low-volume synchronous processing is bounded: ten-second POI timeout, 45-second search timeout, 90-second vision transport and finite download budget. Busy/failing work returns 503 for Telegram retry; no work survives the HTTP response. A durable image slot limits image memory and city resolution; album grouping and rotating-refresh fencing are preserved. External Telegram side effects have retry limitations documented in [Telegram](telegram.md); domain Place writes are transactional.
 
-- Vision: multilingual extraction only; OpenAI primary validated against the account catalog once per cold instance before inference; opt-in Gemini fallback only for Responses HTTP 502/503/504 outages. Other primary failures remain visible and fail closed. Output is validated as untrusted data. Prompts cannot make the vision contract authoritative.
-- Search: evidence verification; POI: geographic candidates and branch search using an existing Chain. Concrete providers remain unselected. Public Nominatim is unsuitable as a bulk or automatic branch-crawling backend: its [official policy](https://operations.osmfoundation.org/policies/nominatim/) requires an identifying User-Agent, caching, at most one request/second and prohibits systematic POI extraction. Any future Nominatim/Overpass adapter needs its own policy review and throttling; none is enabled here.
-- Persistence: Firestore via ADC, independent of transport. Trusted server IAM and client membership rules are separate controls. Firebase UID membership is not Telegram numeric user identity.
-- Output: confirmed places may later project to GeoJSON, GPX, KML, OsmAnd or Mom I'm OK; adapters must preserve canonical identity. None of these formats owns data.
-
-## Expected production topology
-
-Firebase Functions v2 / Cloud Run request-based execution in `europe-west3`: zero minimum instances, at most two instances, modest memory and no production long polling. Firestore stores an image-only pending inbox, album debounce/claim metadata and cross-instance processing/refresh leases. Secret Manager durably stores the SIWC credential record and accepts rotating replacement versions. Stable serverless host identity is non-secret deployment configuration. File sessions remain local OAuth/diagnostic tooling.
-
-This pivots away from the technically sound VM design because its fixed cost and operational burden do not fit this workload. [Operations and cost limits](../infra/README.md) describe retries, late album members, refresh ambiguity and recovery. All work is awaited before the HTTP response; no background scheduler/queue is introduced.
-
-The future Android client authenticates through Firebase Google Sign-In, reads only member workspaces and confirmed places, retains its session/cache, and synchronizes its own OsmAnd favorite group. OsmAnd supplies GPS, maps and routing. Firestore stays authoritative; edits to exported favorites are not bidirectional edits to canonical data.
+No web map, Android/OsmAnd, branch crawler, paid geocoder, Cloud Tasks or artificial login requirement is introduced. A confirmed Place in Firestore is the “map update” for this milestone.

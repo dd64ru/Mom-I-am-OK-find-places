@@ -31,18 +31,20 @@ Output can contain text extracted from your image; keep private diagnostic outpu
 
 For `SECRET_SOURCE=google`, the local setup identity or serverless runtime identity needs ADC and `roles/secretmanager.secretAccessor` on the existing `TELEGRAM_BOT_TOKEN` secret in `mom-im-ok-places`. No Firestore access or Gemini secret is needed. For `SECRET_SOURCE=env`, explicitly supply `TELEGRAM_BOT_TOKEN` through a private local environment/ignored `.env`; no Google credentials are required. Never put it on the command line or in GitHub/CI.
 
-Remove the production webhook and stop **every other getUpdates poller for this bot** before starting `npm run telegram:ids`. Send one harmless message/image to the intended private group from each intended user. Copy the numeric chat ID and sender IDs manually into non-secret runtime configuration, then stop with Ctrl+C. Group privacy mode must permit the bot to receive those messages; configure BotFather access if needed. Do not use real private conversation as a test message.
+Remove the production webhook and stop **every other getUpdates poller for this bot** before starting `npm run telegram:ids`. Send one harmless message/image to the intended private group from each intended user. Copy only the numeric chat ID into non-secret runtime configuration (sender IDs are diagnostic metadata, not configuration), then stop with Ctrl+C. Group privacy mode must permit the bot to receive those messages; configure BotFather access if needed. Do not use real private conversation as a test message.
 
 Only human-sender group/supergroup updates produce output: chat ID/type/title, sender ID/username/display name, and a high-level event kind. Token values or Bot API URLs embedded in display labels are redacted. Text/captions are not emitted, media is never downloaded, and raw updates/token-containing URLs are never logged. The CLI keeps only a temporary in-memory polling offset, writes no application files/Firestore data, invokes no AI and creates no allowlist. getUpdates advances the polling offset: updates acknowledged by this diagnostic will not reach the webhook. The last received batch can be redelivered if you stop before the next poll acknowledges it. Errors stop the diagnostic with fixed codes; a conflict indicates another bot poller. No diagnostic output should be committed.
 
 ## Permanent ownership
 
-| Location                           | Owns                                                                                                     |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| GitHub                             | Application source                                                                                       |
-| Function non-secret parameters     | Non-secret model/effort, workspace/chat/user IDs and secret-source selection                             |
-| Google Secret Manager              | `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`                                                                   |
-| Secret Manager OPENAI_SIWC_SESSION | Stable serverless host configuration, imported SIWC account profile, rotating access/refresh credentials |
-| Firestore                          | Canonical application data                                                                               |
+| Location                           | Owns                                                                                                                      |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------- |
+| GitHub                             | Application source                                                                                                        |
+| Function non-secret parameters     | Non-secret model/effort, workspace/chat IDs and secret-source selection                                                   |
+| Google Secret Manager              | `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`                                                                                    |
+| Secret Manager OPENAI_SIWC_SESSION | Imported SIWC account profile and rotating access/refresh credentials (host ID is a separate non-secret function setting) |
+| Firestore                          | Canonical application data                                                                                                |
 
 The laptop/Cloud Shell is temporary setup tooling. Before importing the authorized profile into Secret Manager, finish local model/vision diagnostics and stop every process using that session. Follow the [serverless import and validation procedure](../infra/README.md). Credentials go directly from the owner into Secret Manager, never through Codex, GitHub, logs or artifacts. Stop polling before webhook registration. Production uses explicit latest-version reads and a distributed refresh lease; its filesystem is ephemeral.
+
+`npm run workspace:init -- --id "$WORKSPACE_ID"` uses owner ADC to initialize one empty-members workspace, never Firebase Auth. It prints only workspace ID/member count/locale/compatibility metadata and refuses conflicting existing documents. This is an explicit owner write after review, never part of development checks.

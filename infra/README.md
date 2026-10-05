@@ -1,6 +1,6 @@
 # Serverless production operations
 
-Canonical runtime: Telegram HTTPS webhook → Firebase Functions v2 / Cloud Run request execution → Places Core → OpenAI SIWC → Firestore. Project `mom-im-ok-places`, region and existing Firestore location `europe-west3`. The owner reports that the abandoned `places-worker` VM and retained boot disk are deleted. Other old bootstrap resources may still exist. This implementation has no `gcloud` or cloud credentials; **no cloud deployment or cleanup was performed by the agent**.
+Canonical runtime: Telegram HTTPS webhook → Firebase Functions v2 / Cloud Run request execution → Places Core → OpenAI SIWC vision/search → deterministic POI → explicit confirmation → Firestore. Project `mom-im-ok-places`, region and existing Firestore location `europe-west3`. The owner reports that the abandoned `places-worker` VM and retained boot disk are deleted. The owner also reports the old custom network, subnet, firewall, Compute role and GCE/IAP bindings are removed; a final plan reuses runtime/deploy/WIF with no cleanup remaining. No production function is deployed yet. This implementation has no `gcloud` or cloud credentials; **no cloud deployment or cleanup was performed by the agent**.
 
 ## Runtime, cost and durable state
 
@@ -34,7 +34,7 @@ Migration is not a cross-service transaction; already-completed steps can remain
 
 ## One-time IDs, secrets and SIWC import
 
-Use the owner's local checkout or authenticated Cloud Shell, `npm ci`, and Node 22. `npm run telegram:ids` is a temporary diagnostic only. With ADC permitted to read the Telegram secret, run it while no webhook/other poller is active; send one harmless event from each intended user in the intended group, record chat ID and both user IDs, then Ctrl+C. `npm run webhook -- remove` removes an existing webhook without dropping pending updates before this diagnostic.
+Use the owner's local checkout or authenticated Cloud Shell, `npm ci`, and Node 22. `npm run telegram:ids` is a temporary diagnostic only. With ADC permitted to read the Telegram secret, run it while no webhook/other poller is active; send one harmless event from each intended user in the intended group, record the chat ID (sender IDs are diagnostic only), then Ctrl+C. `npm run webhook -- remove` removes an existing webhook without dropping pending updates before this diagnostic.
 
 Initialize the empty webhook secret once using owner ADC:
 
@@ -57,11 +57,31 @@ The import validates the same strict credential schema, adds a version to `OPENA
 Use GitHub environment `production`, main-only deployment branches, optional owner approval protection, and these **non-secret** variables:
 
 - `GCP_WIF_PROVIDER`, `GCP_DEPLOY_SERVICE_ACCOUNT`: migration output.
-- `WORKSPACE_ID`, `TELEGRAM_CHAT_ID`, `TELEGRAM_USER_IDS`, `TELEGRAM_BOT_USERNAME`: actual workspace and allowlisted group/users; username without `@`.
+- `WORKSPACE_ID`, `TELEGRAM_CHAT_ID`, `TELEGRAM_BOT_USERNAME`: the chosen workspace and one private group; username without `@`. Every human participant is accepted.
 - `OPENAI_HOST_ID`: the stable generated host UUID.
-- `OPENAI_MODEL=gpt-5.6-terra`, `OPENAI_REASONING_EFFORT=low`: initial owner-selected deployment values, not application defaults.
+- `OPENAI_MODEL`, `OPENAI_REASONING_EFFORT`: your previously verified available model and supported effort; no model default is baked in.
+- Optional `NOMINATIM_ENDPOINT`: HTTPS origin of a compatible service; defaults to public Nominatim. Review [the usage policy and limits](../docs/geography.md).
 
-An actual workspace with real Firebase Auth member UIDs must exist before accepted images can be processed. This task creates no workspace/member documents or fake identities. Fill only known real values; registration waits until these prerequisites are ready.
+The existing secrets/session import and host ID are already verified by the owner. This change does not require a repeat import. There is no Firebase Auth prerequisite.
+
+After code review, the minimal owner sequence is:
+
+1. Choose `WORKSPACE_ID` externally and, in an owner-ADC Cloud Shell checkout of reviewed main, create/verify exactly that workspace:
+
+   ```sh
+   npm ci
+   npm run workspace:init -- --id "$WORKSPACE_ID"
+   ```
+
+   This stores `members: []`, locale `en` and timestamps, performs no Firebase Auth operations, and leaves a compatible existing document unchanged. Conflicting schema/ID/membership/locale fails closed. Empty members denies all client reads; future real Firebase UIDs can be attached when Mom-I-am-OK integration is built.
+
+2. Set the non-secret GitHub production variables listed above. Do not put tokens, SIWC payloads, API keys or env-file contents in GitHub.
+3. Manually run **Deploy production** on main; there is no push-triggered deployment.
+4. Register the HTTPS webhook with the already-enabled secrets using owner tooling below.
+5. Check webhook status.
+6. Send one image in the private group. Check the proposal and three actions, correct city through its exact ForceReply, cancel one discovery and confirm another. Verify one canonical confirmed Place with deterministic WGS84 coordinates in Firestore; confirming the same POI again must reuse its Place. This is the “map update”; no map/UI/OsmAnd is present.
+
+The development agent does not execute any step involving owner credentials or cloud writes. Existing client rules already deny empty membership; the updated rules additionally check list type and are locally emulator-tested. The workflow deploys functions only, preserving its existing scope.
 
 Manually run **Deploy production** on main. Full checks and Gitleaks run before Google authentication. Pinned Firebase CLI 15.32.1 deploys only `functions:places:placesWebhook`; no rules/indexes/hosting deployment is bundled. Compiled application code, vendored compiled workspace packages, tested production dependency lock and MIT license are allowlisted into `.deploy/functions`; Git/credentials/tests/local env files are excluded. Only validated non-secret function parameters are added. `RELEASE.json` records the exact source commit. Cloud Build installs production dependencies; production does not compile TypeScript. GitHub gets short-lived WIF credentials, never secret payloads. No deployment artifact is uploaded to GitHub.
 
@@ -72,16 +92,24 @@ npm run webhook -- set https://europe-west3-mom-im-ok-places.cloudfunctions.net/
 npm run webhook -- status
 ```
 
-Registration sets `secret_token`, `allowed_updates: ['message']`, `max_connections: 10`, and preserves pending updates. Use the actual deployed URL if it differs. Status prints only safe URL/count/error-presence metadata, never Telegram error descriptions. Removal for rollback is `npm run webhook -- remove`. Restore a previous reviewed source commit through the same manual deployment workflow; no filesystem release switching remains.
+Registration sets `secret_token`, `allowed_updates: ['message', 'callback_query']`, `max_connections: 10`, and preserves pending updates. Use the actual deployed URL if it differs. Status prints only safe URL/count/error-presence metadata, never Telegram error descriptions. Removal for rollback is `npm run webhook -- remove`. Restore a previous reviewed source commit through the same manual deployment workflow; no filesystem release switching remains.
 
 ## Processing and recovery guarantees
 
-Every delivery validates POST, JSON type and bounded body size, and checks the constant-time secret header before application parsing. Google/Firebase's HTTP framework may parse the body before user code; the application ignores `req.body` and uses bounded `rawBody` only after authentication. Chat/user allowlists precede media/command projection. Conversation, captions, raw updates and bytes are never logged/persisted. Only photos/supported image documents and `/help` / `/area` are accepted.
+Every delivery validates POST, JSON type and bounded body size, and checks the constant-time secret header before application parsing. Google/Firebase's HTTP framework may parse the body before user code; the application ignores `req.body` and uses bounded `rawBody` only after authentication. The configured group and human-sender checks precede media/command/callback projection. Conversation, captions, raw updates and bytes are never logged/persisted. Only photos/supported image documents, `/help` / `/area`, safe proposal callbacks and exact owned active city-prompt replies are accepted. Other text replies are discarded before ingress storage.
 
-`workspaces/{workspace}/pendingIngress/{hash}` retains image file IDs, source message ID, quiet deadline and ownership metadata, not update contents. Albums settle after 1.5 seconds of quiet, with up to ten deduplicated file IDs. Once processing is claimed, membership is sealed; unusually late members are preserved as separate single-image discoveries instead of being silently lost. Duplicates of completed work return 200; busy/failed work returns 503 so Telegram retries. Ingress/image leases expire after 330 seconds, beyond the 300-second handler bound; expired owners are fenced before subsequent writes. Completed discovery IDs are durable idempotency records. External OpenAI requests and Telegram replies cannot be exactly-once: a crash after an external effect may repeat an inference/reply on retry. Telegram retry retention is finite; if deliveries ultimately expire, resend affected images. There is no scheduler/queue sweeping abandoned pending documents; a subsequent delivery/resend drives recovery. Inbox metadata is retained to preserve deduplication; no TTL is configured.
+`workspaces/{workspace}/pendingIngress/{hash}` retains image file IDs, source message ID, first image sender ID for prompt ownership, quiet deadline and lease metadata, not update contents. Albums settle after 1.5 seconds of quiet, with up to ten deduplicated file IDs. Once processing is claimed, membership is sealed; unusually late members are preserved as separate single-image discoveries instead of being silently lost. Duplicates of completed work return 200; busy/failed work returns 503 so Telegram retries. Ingress/image leases expire after 330 seconds, beyond the 300-second handler bound; expired owners are fenced before subsequent writes. Completed discovery IDs are durable idempotency records. External OpenAI requests and Telegram replies cannot be exactly-once: a crash after an external effect may repeat an inference/reply on retry. Telegram retry retention is finite; if deliveries ultimately expire, resend affected images. There is no scheduler/queue sweeping abandoned pending documents; a subsequent delivery/resend drives recovery. Inbox metadata is retained to preserve deduplication; no TTL is configured.
 
 SIWC refresh uses a 120-second Firestore transactional lease, a bounded 25-second acquisition wait and 20-second token exchange. Latest session is reread after acquisition; the non-secret lease record retains the exact successfully saved Secret Manager version name, and subsequent reads use that immutable version to avoid `latest` alias propagation races (initial state falls back to `latest`); valid tokens avoid refresh. Successful replacement tokens are saved as a new secret version. Known temporary HTTP failures preserve the previous version and release ownership. Terminal invalid grants, missing rotating replacements, uncertain network outcomes, crashes during refresh or failed durable writes block further refresh with a safe reauthorization diagnostic. This conservative marker prevents replaying a possibly consumed token after lease expiry. Owner suspension/drain/import clears it. Access tokens last roughly an hour; refresh tokens have a rolling roughly 30-day lifetime, so long idle periods can require local reauthorization. No always-on refresh scheduler is added.
 
-Model selection is validated once per cold instance before its first image inference, with failed validation retried on later deliveries; no catalog query occurs per successful image batch. Auth/model/config/schema/programming failures remain visible through fixed diagnostics and never activate Gemini. No live Gemini test/activation, search/geocoding, confirmation UI, chains/branches, Android/OsmAnd or exports are added.
+Model selection is validated once per cold instance before its first image inference, with failed validation retried on later deliveries; no catalog query occurs per successful image batch. Auth/model/config/schema/programming failures remain visible through fixed diagnostics and never activate Gemini. The geographic/confirmation implementation is exercised only with fixtures and local emulators. No live Gemini activation, hosted search, public geocoding, Telegram sends or deployment were tested by the agent. Chains/branches, Android/OsmAnd, exports and a map UI remain future work.
 
 References rechecked 2026-10-05: [Functions scaling/runtime](https://firebase.google.com/docs/functions/manage-functions), [Functions deployment IAM](https://cloud.google.com/functions/docs/reference/iam/roles), [Google GitHub auth / ADC](https://github.com/google-github-actions/auth), [Secret Manager IAM](https://cloud.google.com/secret-manager/docs/access-control), [version consistency](https://cloud.google.com/secret-manager/docs/consistency), [Telegram webhook](https://core.telegram.org/bots/api#setwebhook), [OpenAI sessions](https://developers.openai.com/siwc/token-sharing-open-source/profiles-and-sessions). The existing [Mom-I-am-OK backend workflow](https://github.com/dd64ru/Mom-I-am-OK/blob/main/.github/workflows/release-production-backend.yml) informed manual WIF/ADC deployment; its legacy text logging/webhook handling was not copied.
+
+## Development verification and known limits
+
+Run `npm run check` for formatting, TypeScript, mocked protocol/workflow tests and static infrastructure checks. `npm run test:rules` additionally runs local demo-project Firestore rules and real transaction race tests with Java 21; it creates synthetic emulator data only. CI runs both. `npm audit --omit=dev` currently reports six moderate Google Cloud SDK-chain findings, zero high/critical. The underlying uuid advisory concerns v3/v5/v6 with caller-supplied buffers; reviewed installed Google transports use v4. No forced major SDK upgrade or unrelated dependency churn was performed. These remain production audit findings, not dev-only findings.
+
+Use the existing full-history `bash scripts/check-secrets.sh`. Standalone production packaging is validated locally with `packageFunctions` before committing (public compiled source/vendor packages/lock/LICENSE only) and a production-only install/import. The CLI entry requires a clean checkout and records HEAD; the exported function permits a local pre-commit staging validation. Never commit generated `.deploy` env files.
+
+Hosted search may be disabled for the selected SIWC model/account. A tool/options HTTP 400 yields no web evidence; deterministic lookup may still use one high-confidence vision clue with an area. Auth and other failures remain fail-closed. Nominatim name/locality matching is conservative; ambiguous venues, missing OSM/China coverage and unsupported categories require city correction or stay unresolved. A single request has bounded time/body/client search-count but no supported SIWC output-token billing cap. External Telegram sends can repeat/orphan after a crash before their message ID is committed; stale tokens cannot change canonical state. See [Telegram recovery](../docs/telegram.md) and [provider limits](../docs/geography.md).

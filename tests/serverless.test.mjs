@@ -23,7 +23,7 @@ class MemoryDocuments {
     return next.result;
   }
 }
-const policy = { chatId: -100, userIds: new Set([11, 22]) };
+const policy = { chatId: -100 };
 const message = {
   message_id: 1,
   chat: { id: -100, type: 'supergroup' },
@@ -109,6 +109,7 @@ test('webhook ignores ordinary text/captions/outsiders and projects only allowli
       calls++;
       assert.deepEqual(accepted, {
         kind: 'image',
+        userId: 11,
         fileId: 'image',
         messageId: 1,
         albumId: undefined,
@@ -120,7 +121,7 @@ test('webhook ignores ordinary text/captions/outsiders and projects only allowli
     { text: 'PRIVATE_CONVERSATION' },
     { caption: 'PRIVATE_CAPTION' },
     { photo: [{ file_id: 'image' }], chat: { id: -999, type: 'supergroup' } },
-    { photo: [{ file_id: 'image' }], from: { id: 99, is_bot: false } },
+    { photo: [{ file_id: 'image' }], from: { id: 99, is_bot: true } },
     {
       text: '/find place',
       entities: [{ type: 'bot_command', offset: 0, length: 5 }],

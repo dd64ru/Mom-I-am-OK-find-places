@@ -26,6 +26,9 @@ const Fields = Identity.extend({
   }).optional(),
   media_group_id: z.string().max(128).optional(),
   text: z.string().max(4096).optional(),
+  reply_to_message: z
+    .object({ message_id: z.number().int().safe().nonnegative() })
+    .optional(),
   entities: z
     .array(
       z.object({
@@ -46,12 +49,54 @@ export function projectUpdate(
   const update = raw as Record<string, unknown>;
   if (!Number.isSafeInteger(update.update_id) || Number(update.update_id) < 0)
     return;
+  if (update.callback_query !== undefined) {
+    const callback = z
+      .object({
+        id: z.string().min(1).max(128),
+        from: z.object({
+          id: z.number().int().safe().positive(),
+          is_bot: z.boolean(),
+        }),
+        message: z.object({
+          message_id: z.number().int().safe().nonnegative(),
+          date: z.number().int().positive(),
+          chat: Identity.shape.chat,
+        }),
+        data: z.string().max(64),
+        inline_message_id: z.never().optional(),
+      })
+      .safeParse(update.callback_query);
+    if (
+      !callback.success ||
+      callback.data.from.is_bot ||
+      callback.data.message.chat.id !== policy.chatId
+    )
+      return;
+    const match = /^p:([a-f0-9]{32}):([cex])$/.exec(callback.data.data);
+    if (!match)
+      return {
+        kind: 'callback',
+        callbackId: callback.data.id,
+        token: '',
+        action: 'cancel',
+        messageId: callback.data.message.message_id,
+        userId: callback.data.from.id,
+      };
+    return {
+      kind: 'callback',
+      callbackId: callback.data.id,
+      token: match[1]!,
+      action:
+        match[2] === 'c' ? 'confirm' : match[2] === 'e' ? 'city' : 'cancel',
+      messageId: callback.data.message.message_id,
+      userId: callback.data.from.id,
+    };
+  }
   const identity = Identity.safeParse(update.message);
   if (
     !identity.success ||
     identity.data.chat.id !== policy.chatId ||
-    identity.data.from.is_bot ||
-    !policy.userIds.has(identity.data.from.id)
+    identity.data.from.is_bot
   )
     return;
   const parsed = Fields.safeParse(update.message);

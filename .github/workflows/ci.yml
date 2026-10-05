@@ -16,3 +16,4 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: JAVA_HOME="$JAVA_HOME_21_X64" PATH="$JAVA_HOME_21_X64/bin:$PATH" npm run test:rules

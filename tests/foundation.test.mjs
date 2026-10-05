@@ -15,7 +15,7 @@ import {
   OpenAiFailure,
   OpenAiVision,
 } from '@places/providers';
-const policy = { chatId: -100123, userIds: new Set([11, 22]) };
+const policy = { chatId: -100123 };
 const base = {
   message_id: 1,
   date: 0,
@@ -37,7 +37,7 @@ test('privacy gate ignores ordinary text, unknown commands, outsiders and comman
     },
     {
       ...base,
-      from: { ...base.from, id: 99 },
+      from: { ...base.from, is_bot: true },
       photo: [{ file_id: 'outside' }],
     },
     {
@@ -57,7 +57,13 @@ test('privacy gate ignores ordinary text, unknown commands, outsiders and comman
       policy,
       'places_bot',
     ),
-    { kind: 'image', fileId: 'large', messageId: 1, albumId: undefined },
+    {
+      kind: 'image',
+      fileId: 'large',
+      messageId: 1,
+      userId: 11,
+      albumId: undefined,
+    },
   );
   assert.equal(
     classify(
@@ -144,12 +150,10 @@ test('configuration fails closed and blank optional example values are accepted'
   const c = loadConfig({
     WORKSPACE_ID: 'shared',
     TELEGRAM_CHAT_ID: '-100123',
-    TELEGRAM_USER_IDS: '11,22',
     OPENAI_MODEL: 'chosen-model',
     GEMINI_MODEL: '',
   });
   assert.equal(c.GEMINI_FALLBACK_ENABLED, 'false');
-  assert.equal(c.userIds.size, 2);
 });
 test('OAuth uses stable host, PKCE and dynamic registration; rejects bad state without network', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'places-session-'));

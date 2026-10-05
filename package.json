@@ -29,7 +29,10 @@
     "deploy:package": "node scripts/package-functions.mjs",
     "webhook": "node --env-file-if-exists=.env scripts/webhook-cli.mjs",
     "siwc:import": "node scripts/import-session.mjs",
-    "presiwc:import": "npm run build"
+    "presiwc:import": "npm run build",
+    "workspace:init": "node scripts/workspace-init.mjs",
+    "preworkspace:init": "npm run build",
+    "test:rules": "METADATA_SERVER_DETECTION=none firebase emulators:exec --only firestore --project demo-places-tests \"node --test scripts/rules-tests.mjs\""
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

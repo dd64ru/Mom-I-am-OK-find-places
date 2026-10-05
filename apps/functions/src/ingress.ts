@@ -5,6 +5,7 @@ export interface IngressRecord {
   phase: 'pending' | 'processing' | 'done';
   sealed?: boolean;
   messageId: number;
+  userId?: number;
   fileIds: string[];
   quietAt: number;
   owner?: string;
@@ -27,7 +28,9 @@ export class Ingress {
     const source =
       accepted.kind === 'image'
         ? (accepted.albumId ?? `message-${accepted.messageId}`)
-        : `command-${accepted.messageId}`;
+        : accepted.kind === 'callback'
+          ? `callback-${accepted.callbackId}`
+          : `${accepted.kind}-${accepted.messageId}`;
     let id = ingressId(this.workspace, chat, source);
     const record = await this.docs.change(this.path(id), (raw) => {
       const state = raw as unknown as IngressRecord | undefined;
@@ -47,6 +50,7 @@ export class Ingress {
         phase: 'pending',
         messageId: accepted.messageId,
         fileIds: [],
+        ...(accepted.kind === 'image' ? { userId: accepted.userId } : {}),
         quietAt: this.now(),
       };
       if (file) next.fileIds.push(file);

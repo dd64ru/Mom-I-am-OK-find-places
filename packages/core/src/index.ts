@@ -1,5 +1,7 @@
 import {
   DiscoverySchema,
+  VerificationSchema,
+  CandidateSchema,
   type Place,
   type Chain,
   type Workspace,
@@ -7,6 +9,7 @@ import {
   type Candidate,
   type Discovery,
   type Reference,
+  type Verification,
 } from '@places/schemas';
 export interface ImageInput {
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
@@ -24,21 +27,38 @@ export interface VisionProvider {
   ): Promise<VisionResult>;
 }
 export interface SearchProvider {
-  verify(recognition: Recognition, areaHint?: string): Promise<Reference[]>;
+  verify(recognition: Recognition, areaHint?: string): Promise<Verification>;
 }
 export interface PoiProvider {
   resolve(
     recognition: Recognition,
-    evidence: readonly Reference[],
+    verification: Verification,
     areaHint?: string,
   ): Promise<Candidate[]>;
-  branches(chain: Chain, area: string): Promise<Candidate[]>;
+}
+export interface Completion {
+  discovery: Discovery;
+  place?: Place;
+  changed: boolean;
 }
 export interface PlacesRepository {
   getWorkspace(id: string): Promise<Workspace | undefined>;
+  initWorkspace(workspace: Workspace): Promise<Workspace>;
   setArea(workspaceId: string, area: string): Promise<void>;
   getDiscovery(workspaceId: string, id: string): Promise<Discovery | undefined>;
   createDiscovery(discovery: Discovery): Promise<Discovery>;
+  reviseDiscovery(
+    workspaceId: string,
+    id: string,
+    revision: number,
+    patch: Partial<Discovery>,
+  ): Promise<Discovery | undefined>;
+  finishDiscovery(
+    workspaceId: string,
+    id: string,
+    revision: number,
+    action: 'confirm' | 'cancel',
+  ): Promise<Completion>;
   savePlace(place: Place): Promise<void>;
   getPlace(workspaceId: string, id: string): Promise<Place | undefined>;
   saveChain(workspaceId: string, chain: Chain): Promise<void>;
@@ -73,31 +93,88 @@ export class DiscoveryService {
       input.images,
       workspace.areaHint,
     );
-    let candidates: Candidate[] = [];
-    if (this.verification) {
-      const evidence = await this.verification.search.verify(
-        recognition,
-        workspace.areaHint,
-      );
-      candidates = await this.verification.poi.resolve(
-        recognition,
-        evidence,
-        workspace.areaHint,
-      );
-    }
-    // Even one high-confidence provider candidate needs explicit user confirmation.
-    // Confirmed Place writes are deliberately not exposed by the ingestion path.
-    return this.repository.createDiscovery(
+    // Persist vision before network verification so retries/city correction never repeat it.
+    const discovery = await this.repository.createDiscovery(
       DiscoverySchema.parse({
         id: input.id,
         workspaceId: input.workspaceId,
         source: input.source,
         recognition,
-        candidates,
+        candidates: [],
         visionProvider: provider,
         status: 'needs_confirmation',
+        revision: 0,
         createdAt: new Date().toISOString(),
       }),
     );
+    return this.verification ? this.resolve(discovery) : discovery;
   }
+  async resolve(discovery: Discovery): Promise<Discovery> {
+    if (
+      !this.verification ||
+      ['confirmed', 'cancelled'].includes(discovery.status)
+    )
+      return discovery;
+    const workspace = await this.repository.getWorkspace(discovery.workspaceId);
+    if (!workspace) throw new Error('workspace_missing');
+    const area = discovery.cityOverride ?? workspace.areaHint;
+    const verified = VerificationSchema.parse(
+      await this.verification.search.verify(discovery.recognition, area),
+    );
+    const candidates = (
+      await this.verification.poi.resolve(discovery.recognition, verified, area)
+    ).map((c) => CandidateSchema.parse(c));
+    // Ambiguous deterministic matches need clarification; no arbitrary first-result selection.
+    const selected = candidates.length === 1 ? candidates : [];
+    return (
+      (await this.repository.reviseDiscovery(
+        discovery.workspaceId,
+        discovery.id,
+        discovery.revision,
+        {
+          candidates: selected,
+          status:
+            selected.length || !discovery.recognition.clues.length
+              ? 'needs_confirmation'
+              : 'awaiting_city',
+        },
+      )) ??
+      (await this.repository.getDiscovery(discovery.workspaceId, discovery.id))!
+    );
+  }
+  async requestCity(discovery: Discovery): Promise<Discovery | undefined> {
+    return this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      { status: 'awaiting_city', candidates: [] },
+    );
+  }
+  async correctCity(
+    discovery: Discovery,
+    city: string,
+  ): Promise<Discovery | undefined> {
+    const normalized = normalizeCity(city);
+    if (!normalized || discovery.status !== 'awaiting_city') return;
+    const updated = await this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      { cityOverride: normalized, candidates: [] },
+    );
+    return updated ? this.resolve(updated) : undefined;
+  }
+  finish(discovery: Discovery, action: 'confirm' | 'cancel') {
+    return this.repository.finishDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      action,
+    );
+  }
+}
+export function normalizeCity(value: string): string | undefined {
+  if (value.length > 200 || /[\u0000-\u001f\u007f]/u.test(value)) return;
+  const city = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
+  return city && city.length <= 200 ? city : undefined;
 }

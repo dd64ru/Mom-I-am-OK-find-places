@@ -61,7 +61,7 @@ export const ChainSchema = z
 export const WorkspaceSchema = z
   .object({
     id: IdSchema,
-    members: z.array(z.string().min(1)).min(1),
+    members: z.array(z.string().min(1)),
     settings: z.object({ locale: z.string().default('en') }).strict(),
     areaHint: z.string().min(1).max(200).optional(),
     createdAt: Timestamp,
@@ -98,7 +98,15 @@ export const CandidateSchema = z
     coordinates: CoordinatesSchema,
     address: AddressSchema,
     chainId: IdSchema.optional(),
-    references: z.array(ReferenceSchema).min(1),
+    references: z.array(ReferenceSchema).min(1).max(25),
+    resolution: z.literal('deterministic_poi'),
+    providerIdentity: z
+      .object({
+        provider: z.string().min(1).max(64),
+        id: z.string().min(1).max(128),
+      })
+      .strict()
+      .optional(),
     confidence: Confidence,
   })
   .strict();
@@ -110,8 +118,17 @@ export const DiscoverySchema = z
     recognition: RecognitionSchema,
     candidates: z.array(CandidateSchema).max(20),
     visionProvider: z.string(),
-    status: z.literal('needs_confirmation'),
+    status: z.enum([
+      'needs_confirmation',
+      'awaiting_city',
+      'confirmed',
+      'cancelled',
+    ]),
+    cityOverride: z.string().min(1).max(200).optional(),
+    revision: z.number().int().nonnegative().default(0),
+    confirmedPlaceId: IdSchema.optional(),
     createdAt: Timestamp,
+    updatedAt: Timestamp.optional(),
   })
   .strict();
 export type Place = z.infer<typeof PlaceSchema>;
@@ -121,3 +138,26 @@ export type Recognition = z.infer<typeof RecognitionSchema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
 export type Discovery = z.infer<typeof DiscoverySchema>;
 export type Reference = z.infer<typeof ReferenceSchema>;
+
+// No coordinates or model-supplied URLs in textual verification output.
+export const VerifiedTextSchema = z
+  .object({
+    canonicalName: z.string().min(1).max(300),
+    nativeName: z.string().min(1).max(300).optional(),
+    aliases: z.array(z.string().min(1).max(300)).max(10),
+    category: z.string().min(1).max(100),
+    city: z.string().min(1).max(200).optional(),
+    district: z.string().min(1).max(200).optional(),
+    country: z.string().min(1).max(100).optional(),
+    addressClue: z.string().min(1).max(300).optional(),
+    confidence: Confidence,
+  })
+  .strict();
+export const VerificationSchema = z
+  .object({
+    status: z.enum(['verified', 'unavailable', 'no_evidence']),
+    candidates: z.array(VerifiedTextSchema).max(3),
+    references: z.array(ReferenceSchema).max(20),
+  })
+  .strict();
+export type Verification = z.infer<typeof VerificationSchema>;

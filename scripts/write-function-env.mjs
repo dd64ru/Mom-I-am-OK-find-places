@@ -1,9 +1,9 @@
 import { writeFile } from 'node:fs/promises';
+import { nominatimEndpoint } from '@places/providers';
 import { loadConfig } from '../apps/worker/dist/index.js';
 const names = [
   'WORKSPACE_ID',
   'TELEGRAM_CHAT_ID',
-  'TELEGRAM_USER_IDS',
   'TELEGRAM_BOT_USERNAME',
   'OPENAI_MODEL',
   'OPENAI_REASONING_EFFORT',
@@ -22,10 +22,13 @@ try {
     )
   )
     throw new Error();
+  const endpoint = nominatimEndpoint(
+    process.env.NOMINATIM_ENDPOINT || 'https://nominatim.openstreetmap.org',
+  );
   await writeFile(
     '.deploy/functions/.env.mom-im-ok-places',
     names.map((name) => `${name}=${values[name]}`).join('\n') +
-      '\nGEMINI_FALLBACK_ENABLED=false\n',
+      `\nNOMINATIM_ENDPOINT=${endpoint}\nGEMINI_FALLBACK_ENABLED=false\n`,
   );
 } catch {
   console.error(

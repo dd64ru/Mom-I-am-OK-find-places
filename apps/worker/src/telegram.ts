@@ -1,12 +1,32 @@
 import { MAX_IMAGE_BYTES, imageFromBytes } from './images.js';
 import type { Message } from 'grammy/types';
-import type { ImageInput } from '@places/core';
+import { normalizeCity, type ImageInput } from '@places/core';
 export interface TelegramPolicy {
   chatId: number;
-  userIds: ReadonlySet<number>;
 }
 export type AcceptedMessage =
-  | { kind: 'image'; fileId: string; messageId: number; albumId?: string }
+  | {
+      kind: 'image';
+      fileId: string;
+      messageId: number;
+      userId: number;
+      albumId?: string;
+    }
+  | {
+      kind: 'callback';
+      callbackId: string;
+      token: string;
+      action: 'confirm' | 'city' | 'cancel';
+      messageId: number;
+      userId: number;
+    }
+  | {
+      kind: 'cityReply';
+      messageId: number;
+      promptId: number;
+      userId: number;
+      city: string;
+    }
   | {
       kind: 'command';
       command: 'help' | 'area';
@@ -18,12 +38,7 @@ export function classify(
   policy: TelegramPolicy,
   botUsername: string,
 ): AcceptedMessage | undefined {
-  if (
-    message.chat.id !== policy.chatId ||
-    !message.from ||
-    message.from.is_bot ||
-    !policy.userIds.has(message.from.id)
-  )
+  if (message.chat.id !== policy.chatId || !message.from || message.from.is_bot)
     return;
   if (!['group', 'supergroup'].includes(message.chat.type)) return;
   const photo = message.photo?.at(-1);
@@ -32,6 +47,7 @@ export function classify(
       kind: 'image',
       fileId: photo.file_id,
       messageId: message.message_id,
+      userId: message.from.id,
       albumId: message.media_group_id,
     };
   if (
@@ -44,8 +60,25 @@ export function classify(
       kind: 'image',
       fileId: message.document.file_id,
       messageId: message.message_id,
+      userId: message.from.id,
       albumId: message.media_group_id,
     };
+  if (
+    message.text &&
+    message.reply_to_message &&
+    !message.text.startsWith('/')
+  ) {
+    const city = normalizeCity(message.text);
+    if (city)
+      return {
+        kind: 'cityReply',
+        messageId: message.message_id,
+        promptId: message.reply_to_message.message_id,
+        userId: message.from.id,
+        city,
+      };
+    return;
+  }
   if (
     !message.text ||
     message.entities?.[0]?.type !== 'bot_command' ||

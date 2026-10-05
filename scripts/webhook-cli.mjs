@@ -44,7 +44,7 @@ async function main() {
     body = {
       url: url.href,
       secret_token: await read('TELEGRAM_WEBHOOK_SECRET'),
-      allowed_updates: ['message'],
+      allowed_updates: ['message', 'callback_query'],
       max_connections: 10,
       drop_pending_updates: false,
     };

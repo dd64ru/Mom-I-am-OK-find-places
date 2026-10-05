@@ -70,7 +70,6 @@ const WorkerSchema = CommonSchema.extend({
   ...TelegramSecretSettings,
   WORKSPACE_ID: IdSchema,
   TELEGRAM_CHAT_ID: z.string().regex(/^-\d+$/),
-  TELEGRAM_USER_IDS: z.string().regex(/^\d+(,\d+)*$/),
   GEMINI_FALLBACK_ENABLED: z.enum(['true', 'false']).default('false'),
   GEMINI_MODEL: z
     .string()
@@ -110,17 +109,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       `invalid_configuration:${[...new Set(parsed.error.issues.map((i) => i.path.join('.')))].join(',')}`,
     );
   const d = parsed.data;
-  const users = d.TELEGRAM_USER_IDS.split(',').map(Number);
   const chatId = Number(d.TELEGRAM_CHAT_ID);
-  if (
-    !Number.isSafeInteger(chatId) ||
-    users.some((u) => !Number.isSafeInteger(u) || u <= 0)
-  )
-    throw new Error('invalid_telegram_ids');
+  if (!Number.isSafeInteger(chatId)) throw new Error('invalid_telegram_ids');
   return {
     ...d,
     directory: resolve(d.OPENAI_SESSION_DIR),
     chatId,
-    userIds: new Set(users),
   };
 }

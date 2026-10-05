@@ -11,11 +11,11 @@ npm ci
 npm run check
 ```
 
-`check` runs Prettier, TypeScript checking, builds, focused smoke tests and infrastructure static checks. There is no separate linter. Tests use fixtures and fake transports, not production services.
+`check` runs Prettier, TypeScript checking, builds, fixture/mocked workflow tests and infrastructure static checks. There is no separate linter. Tests use fixtures and fake transports, not production services.
 
 Operational commands `oauth`, `models`, `vision:smoke` and `telegram:ids` automatically build current TypeScript. They are owner-only local/Cloud Shell setup tools; Node 22 is used by production. Copy `.env.example` privately and reuse the owner's already-authorized profile for pre-import diagnostics. Never provide real credentials to Codex or CI.
 
-Production is now an authenticated **Firebase Functions v2 Telegram webhook** in `europe-west3`, with zero minimum instances. SIWC is stored/rotated explicitly through Secret Manager with a Firestore cross-instance lease. See [migration, deployment and owner setup](infra/README.md). No cloud cleanup/deployment was performed here and no workspace/member documents are created by this task.
+Production is now an authenticated **Firebase Functions v2 Telegram webhook** in `europe-west3`, with zero minimum instances. SIWC is stored/rotated explicitly through Secret Manager with a Firestore cross-instance lease. See [migration, deployment and owner setup](infra/README.md). No cloud writes or deployment are performed by development checks. The owner initializes an empty-members workspace after review; no Firebase Auth prerequisite exists.
 
 ## Repository
 
@@ -32,15 +32,19 @@ Production is now an authenticated **Firebase Functions v2 Telegram webhook** in
 
 ## What runs today
 
-The configured webhook serves one allowed group, accepts photos and supported image documents from allowed users, groups albums, downloads bounded images, calls OpenAI vision, and writes a **pending discovery** to Firestore. It replies with possible names/confidence. `/help` and `/area <city or region>` are supported. The primary model is validated against the signed-in account catalog once per cold instance before its first inference; unavailable models fail processing with `openai_model_unavailable`. Gemini is an opt-in emergency fallback only for Responses HTTP 502/503/504 service outages, with its actual use recorded. Authentication, permissions, configuration, model, schema, programming, quota and unclassified transport errors fail closed without switching providers. Ordinary conversation and image captions are ignored, never sent to AI, stored or logged. No conversational assistant behavior exists.
+The webhook accepts images/albums from any human in one configured private group. Vision recognition is followed by bounded SIWC Responses web-search verification and deterministic Nominatim POI resolution. A proposal offers **Confirm / Change city / Cancel**. Change city uses an owned, expiring ForceReply and reruns only verification/geocoding. Explicit confirmation transactionally creates/reuses one canonical WGS84 Place in Firestore. This is the current “map update”; a real map/UI, Android/OsmAnd, branch lookup and exports come later.
 
-Canonical confirmed places and chains have real schemas and repository operations. Recognition alone never creates a geographic point. Search and POI verification ports exist, but no real search/geocoding provider is wired; consequently the adapter currently saves no confirmed places. User confirmation, chain linking, `/find`, `/branches`, `/map`, `/undo`, exports and Android/OsmAnd sync remain future work.
+`/help` and `/area <city or region>` are supported. Ordinary conversation, unknown commands and captions are ignored. Opaque callback tokens are mapped to durable interaction records; discovery revisions fence stale actions, while terminal transactions prevent duplicate Places or inconsistent confirm/cancel races. Albums retain Firestore-backed debounce/leases and bounded images. See [Telegram behavior](docs/telegram.md).
 
-Firestore-backed album debounce, processing leases and completed discovery IDs replace in-memory polling state. Only accepted image IDs/source metadata are persisted; image bytes remain transient. See [Telegram behavior](docs/telegram.md) for retry and late-album limits.
+Model availability is validated against the signed-in account once per cold instance. Gemini remains opt-in outage-only vision fallback for HTTP 502/503/504. Auth/config/model/schema/programming errors fail closed. Search uses the existing sole durable SIWC refresh owner, never an API key. Coordinates must come from deterministic POI results, never AI. Public Nominatim has strict [usage restrictions](https://operations.osmfoundation.org/policies/nominatim/): this deliberately selected low-volume venue workflow uses a cache, one global in-flight gate, 1.5-second spacing, fifty new requests/day and visible OSM attribution. See [geographic verification and limitations](docs/geography.md).
+
+Telegram-only workspaces legitimately use `members: []`. `npm run workspace:init -- --id "$WORKSPACE_ID"` is an explicit owner-ADC command, idempotent for compatible existing workspaces and refusing conflicts. Empty membership grants no client reads; later real Mom-I-am-OK Firebase UIDs can enable member reads. No fake Firebase users are created.
+
+In addition to `npm run check`, `npm run test:rules` uses a **local demo-project Firestore emulator** (Java 21 required) to exercise client rules and real transaction races. It uses synthetic identities and no live credentials. Production packaging, audit and full-history secret scanning are described in [operations](infra/README.md).
 
 ## Existing external infrastructure
 
-Already created by the owner: project `mom-im-ok-places`, Firestore `(default)`, Firebase Authentication with Google enabled, Secret Manager secrets `TELEGRAM_BOT_TOKEN` and `GEMINI_API_KEY`, Blaze billing, and public GitHub repository `dd64ru/Mom-I-am-OK-find-places`. These are supplied facts, not resources provisioned or verified by this implementation. No production deployment, Android registration, secret access or live-service validation was performed by the development agent. The owner subsequently completed real SIWC authorization, model listing and a real vision smoke test outside this environment. The owner subsequently ran the GCE bootstrap and deleted its VM and retained disk. The serverless migration script assesses the remaining resources; this change did not mutate cloud state.
+The owner reports project `mom-im-ok-places`, europe-west3 Firestore, prepared serverless IAM/WIF and imported Secret Manager SIWC/webhook/bot secrets. Old GCE resources are gone. No production function is deployed yet, and no workspace or Firebase Auth users exist. These are owner-verified facts, not live checks performed by the development agent. Follow the reviewed owner-only setup sequence; existing SIWC import does not need repeating for this code change.
 
 Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [next infrastructure setup](infra/README.md).
 

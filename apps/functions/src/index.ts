@@ -6,12 +6,20 @@ const parameters = Object.fromEntries(
   [
     'WORKSPACE_ID',
     'TELEGRAM_CHAT_ID',
-    'TELEGRAM_USER_IDS',
     'TELEGRAM_BOT_USERNAME',
     'OPENAI_MODEL',
     'OPENAI_REASONING_EFFORT',
     'OPENAI_HOST_ID',
-  ].map((name) => [name, defineString(name)]),
+    'NOMINATIM_ENDPOINT',
+  ].map((name) => [
+    name,
+    defineString(
+      name,
+      name === 'NOMINATIM_ENDPOINT'
+        ? { default: 'https://nominatim.openstreetmap.org' }
+        : {},
+    ),
+  ]),
 );
 export const functionOptions = {
   region: 'europe-west3',

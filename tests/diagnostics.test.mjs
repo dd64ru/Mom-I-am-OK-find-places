@@ -28,7 +28,6 @@ const validWorkerEnv = {
   ...validVisionEnv,
   WORKSPACE_ID: 'shared',
   TELEGRAM_CHAT_ID: '-100123',
-  TELEGRAM_USER_IDS: '11,22',
 };
 const png = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const jpeg = Buffer.from([255, 216, 255, 0]);

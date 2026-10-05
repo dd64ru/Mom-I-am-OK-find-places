@@ -16,6 +16,8 @@ import {
   OpenAiVision,
   GeminiVision,
   FallbackVision,
+  OpenAiSearch,
+  NominatimPoi,
 } from '@places/providers';
 import {
   loadConfig,
@@ -24,28 +26,8 @@ import {
   type AcceptedMessage,
 } from '@places/worker';
 import { Ingress } from './ingress.js';
-// Small API adapter sanitizes every Telegram failure; no grammy errors/raw responses escape.
-class TelegramApi {
-  constructor(private readonly token: string) {}
-  async call(method: 'getFile' | 'sendMessage', body: Record<string, unknown>) {
-    try {
-      const response = await fetch(
-        `https://api.telegram.org/bot${this.token}/${method}`,
-        {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(body),
-          signal: AbortSignal.timeout(20_000),
-        },
-      );
-      const json = await response.json();
-      if (!response.ok || json.ok !== true) throw new Error();
-      return json.result;
-    } catch {
-      throw new Error('telegram_request_failed');
-    }
-  }
-}
+import { TelegramApi } from './telegram-api.js';
+import { TelegramInteractions } from './interactions.js';
 export function createRuntime(env: NodeJS.ProcessEnv) {
   const config = loadConfig({ ...env, SECRET_SOURCE: 'google' });
   const username = env.TELEGRAM_BOT_USERNAME;
@@ -84,15 +66,67 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
     }));
   const repository = new FirestoreRepository(db),
     ingress = new Ingress(docs, config.WORKSPACE_ID);
-  const policy = { chatId: config.chatId, userIds: config.userIds };
+  const policy = { chatId: config.chatId };
+  const search = new OpenAiSearch(
+    oauth,
+    config.OPENAI_MODEL,
+    config.OPENAI_REASONING_EFFORT,
+    vision,
+  );
+  const poi = new NominatimPoi(docs, env.NOMINATIM_ENDPOINT || undefined);
+  const unusedVision: VisionProvider = {
+    name: 'stored-recognition',
+    recognize: async () => {
+      throw new Error('city_edit_must_not_run_vision');
+    },
+  };
   return {
     policy,
     username,
     secret: () => secrets.read('TELEGRAM_WEBHOOK_SECRET'),
     async accept(accepted: AcceptedMessage) {
+      const api = new TelegramApi(await secrets.read('TELEGRAM_BOT_TOKEN'));
+      const interactionService = new DiscoveryService(
+        repository,
+        unusedVision,
+        { search, poi },
+      );
+      const interactions = new TelegramInteractions(
+        docs,
+        repository,
+        interactionService,
+        api,
+        config.WORKSPACE_ID,
+        config.chatId,
+      );
+      const promptToken =
+        accepted.kind === 'cityReply'
+          ? await interactions.canReply(accepted)
+          : undefined;
+      if (accepted.kind === 'cityReply' && !promptToken) return 'done' as const;
+      if (accepted.kind === 'callback') {
+        // Acknowledge on every delivery, including duplicates/busy callbacks.
+        await api.call('answerCallbackQuery', {
+          callback_query_id: accepted.callbackId,
+          text: 'Received. Expired or already handled actions will be ignored.',
+        });
+        if (!(await interactions.canCallback(accepted))) return 'done' as const;
+      }
       const id = await ingress.receive(config.chatId, accepted);
       return ingress.run(id, async (record, assertOwned) => {
-        const api = new TelegramApi(await secrets.read('TELEGRAM_BOT_TOKEN'));
+        if (accepted.kind === 'callback') {
+          await assertOwned();
+          await interactions.callback(accepted, true);
+          return;
+        }
+        if (accepted.kind === 'cityReply') {
+          await imageSlot(docs, async (assertSlot) => {
+            await assertOwned();
+            await assertSlot();
+            await interactions.cityReply(accepted, promptToken!);
+          });
+          return;
+        }
         if (accepted.kind === 'command') {
           await assertOwned();
           if (
@@ -108,7 +142,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
           } else
             await api.call('sendMessage', {
               chat_id: config.chatId,
-              text: 'Send place images or albums. /area <city or region> sets a hint (up to 200 characters). Identification is provisional.',
+              text: 'Send a photo, album or JPEG/PNG/WebP document. I verify the place and propose Confirm / Change city / Cancel. Reply to the city prompt if asked. /area <city or region> sets an optional workspace hint (up to 200 characters). Only confirmation saves a Place.',
             });
           return;
         }
@@ -123,7 +157,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
               const file = await api.call('getFile', { file_id: fileId });
               if (
                 typeof file?.file_path !== 'string' ||
-                (file.file_size ?? 0) > MAX_IMAGE_BYTES
+                Number(file.file_size ?? 0) > MAX_IMAGE_BYTES
               )
                 throw new Error('image_download_failed');
               const image = await downloadImage(
@@ -147,7 +181,28 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 return result;
               },
             };
-            result = await new DiscoveryService(repository, fenced).ingest({
+            result = await new DiscoveryService(repository, fenced, {
+              search: {
+                async verify(recognition, area) {
+                  budget.throwIfAborted();
+                  const result = await search.verify(recognition, area);
+                  budget.throwIfAborted();
+                  await assertOwned();
+                  await assertSlot();
+                  return result;
+                },
+              },
+              poi: {
+                async resolve(recognition, verified, area) {
+                  budget.throwIfAborted();
+                  const result = await poi.resolve(recognition, verified, area);
+                  budget.throwIfAborted();
+                  await assertOwned();
+                  await assertSlot();
+                  return result;
+                },
+              },
+            }).ingest({
               id,
               workspaceId: config.WORKSPACE_ID,
               images,
@@ -159,17 +214,15 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             });
           }
           await assertOwned();
-          const names = result.recognition.clues.map(
-            (c) =>
-              `${c.name.slice(0, 200)} (${Math.round(c.confidence * 100)}%)`,
+          if (result.revision === 0)
+            result = await interactionService.resolve(result);
+          await assertOwned();
+          await assertSlot();
+          await interactions.propose(
+            result,
+            record.userId ?? accepted.userId,
+            record.messageId,
           );
-          await api.call('sendMessage', {
-            chat_id: config.chatId,
-            text: names.length
-              ? `Possible places:\n${names.join('\n')}\nGeographic verification and confirmation are pending.`
-              : 'No place evidence identified.',
-            reply_parameters: { message_id: record.messageId },
-          });
         });
       });
     },
