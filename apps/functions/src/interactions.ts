@@ -62,6 +62,10 @@ export class TelegramInteractions {
       });
       return;
     }
+    if (discovery.status === 'awaiting_city' && !discovery.cityOverride) {
+      await this.prompt(discovery, userId, replyTo);
+      return;
+    }
     const token = this.token(discovery);
     const state = await this.docs.change<Interaction>(
       this.path(token),
@@ -123,8 +127,6 @@ export class TelegramInteractions {
         result: undefined,
       }));
     }
-    if (discovery.status === 'awaiting_city' && !discovery.cityOverride)
-      await this.prompt(discovery, userId, replyTo);
   }
   private async prompt(discovery: Discovery, userId: number, replyTo: number) {
     const token = this.token(discovery, 'prompt');

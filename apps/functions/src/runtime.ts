@@ -32,6 +32,7 @@ import {
 } from '@places/worker';
 import { Ingress } from './ingress.js';
 import { TelegramApi } from './telegram-api.js';
+import { ProcessingStatus } from './processing-status.js';
 import { TelegramInteractions } from './interactions.js';
 export function createRuntime(env: NodeJS.ProcessEnv) {
   const telemetry = new PipelineTelemetry((event) =>
@@ -98,6 +99,9 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
     new GooglePlacesPoi(
       googlePlacesAdc(config.GOOGLE_CLOUD_PROJECT),
       config.GOOGLE_CLOUD_PROJECT,
+      fetch,
+      Date.now,
+      (event) => console.info(JSON.stringify(event)),
     ),
     new NominatimPoi(docs, env.NOMINATIM_ENDPOINT || undefined),
     telemetry,
@@ -175,6 +179,13 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             });
           return;
         }
+        const status = new ProcessingStatus(
+          docs,
+          api,
+          config.WORKSPACE_ID,
+          config.chatId,
+        );
+        await status.start(id, record.messageId);
         await imageSlot(docs, async (assertSlot) => {
           const budget = AbortSignal.timeout(200_000);
           let result = await repository.getDiscovery(config.WORKSPACE_ID, id);
@@ -260,6 +271,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             result = await interactionService.resolve(result);
           await assertOwned();
           await assertSlot();
+          await status.complete(id);
           await interactions.propose(
             result,
             record.userId ?? accepted.userId,

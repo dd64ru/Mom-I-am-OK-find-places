@@ -289,9 +289,23 @@ export const VerifiedTextSchema = z
     confidence: Confidence,
   })
   .strict();
+export const LocalityIntentSchema = z
+  .object({
+    canonicalName: z.string().min(1).max(200),
+    aliases: z.array(z.string().min(1).max(200)).max(10),
+    countryCode: z
+      .string()
+      .regex(/^[A-Z]{2}$/)
+      .optional(),
+    confidence: Confidence,
+  })
+  .strict();
 export const VerificationSchema = z
   .object({
     status: z.enum(['verified', 'unavailable', 'no_evidence']),
+    localityIntent: LocalityIntentSchema.extend({
+      input: z.string().min(1).max(200),
+    }).optional(),
     candidates: z.array(VerifiedTextSchema).max(3),
     references: z.array(ReferenceSchema).max(20),
   })

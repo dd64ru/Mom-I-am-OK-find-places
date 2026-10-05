@@ -1169,7 +1169,7 @@ test('Nominatim oversized responses and invalid endpoints fail closed; malicious
     { status: 'unresolved', reason: 'no_match' },
   );
 });
-test('web-search protocol rejects a second search operation and fabricated model-only source text', async () => {
+test('web-search protocol rejects a third search operation and fabricated model-only source text', async () => {
   const original = globalThis.fetch;
   try {
     const search = new OpenAiSearch(
@@ -1181,7 +1181,7 @@ test('web-search protocol rejects a second search operation and fabricated model
     globalThis.fetch = async () =>
       new Response(
         [
-          ...['first', 'second'].map(
+          ...['first', 'second', 'third'].map(
             (id) =>
               `data: ${JSON.stringify({ type: 'response.output_item.added', item: { type: 'web_search_call', id } })}\n\n`,
           ),

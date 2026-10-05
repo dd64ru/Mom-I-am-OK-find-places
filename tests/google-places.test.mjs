@@ -246,6 +246,7 @@ test('China hierarchy resolves a municipal city above district and a Guangzhou c
     'resolved',
   );
   const evidence = clone(verification);
+  evidence.candidates[0].category = 'university';
   evidence.candidates[0].city = 'Guangzhou';
   evidence.candidates[0].cityAliases = ['广州', '广州市', 'Гуанчжоу'];
   evidence.candidates[0].addressClue = undefined;
@@ -669,7 +670,15 @@ for (const [clue, address] of [
   test(`bounded house-number and street normalization: ${clue} / ${address}`, async () => {
     const evidence = clone(verification);
     evidence.candidates[0].addressClue = clue;
-    const place = { ...row, formattedAddress: address + ', Shanghai, China' };
+    const place = {
+      ...row,
+      formattedAddress: address + ', Shanghai, China',
+      addressComponents: row.addressComponents.map((c) =>
+        c.types.includes('street_number')
+          ? { ...c, longText: '158', shortText: '158' }
+          : c,
+      ),
+    };
     assert.equal(
       (await googleFixture({ places: [place] }).resolve(recognition, evidence))
         .status,

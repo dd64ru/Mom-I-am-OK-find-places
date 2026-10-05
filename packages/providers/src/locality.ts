@@ -26,35 +26,62 @@ export function selectLocality(
   recognition: Recognition,
   verification: Verification,
   context: GeographicContext,
+  allowMultiple = false,
 ): Decision {
   if (!recognition.clues.length)
     return { status: 'unresolved', reason: 'no_place_evidence' };
+  const intent =
+    context.cityOverride &&
+    verification.localityIntent?.input === context.cityOverride &&
+    verification.localityIntent.confidence >= 0.9
+      ? verification.localityIntent
+      : undefined;
+  const overrideAliases = intent
+    ? [intent.canonicalName, ...intent.aliases, context.cityOverride!]
+    : context.cityOverride
+      ? [context.cityOverride]
+      : [];
+  const intentMatches = (aliases: string[]) =>
+    overrideAliases.some((a) => matches(a, aliases));
   let verified =
     verification.status === 'verified' && verification.references.length
       ? verification.candidates.filter((c) => c.confidence >= 0.8)
       : [];
   if (context.cityOverride && verified.length) {
     const matching = verified.filter(
-      (c) => c.city && matches(context.cityOverride!, names(c)),
+      (c) =>
+        c.city &&
+        intentMatches(names(c)) &&
+        (!intent?.countryCode ||
+          !c.countryCode ||
+          intent.countryCode === c.countryCode),
     );
     if (matching.length) verified = matching;
     else if (verified.some((c) => c.city))
       return { status: 'unresolved', reason: 'locality_conflict' };
   }
   if (verified.length > 1) {
-    if (context.cityOverride)
+    if (!allowMultiple && context.cityOverride)
+      return { status: 'unresolved', reason: 'insufficient_evidence' };
+    if (
+      context.cityOverride &&
+      !verified.every((c) => c.city && intentMatches(names(c)))
+    )
       return { status: 'unresolved', reason: 'insufficient_evidence' };
     const localities = new Set(
       verified.map((c) =>
         c.city ? `${normalizedLocality(c.city)}:${c.countryCode ?? ''}` : '',
       ),
     );
-    return localities.size > 1 || localities.has('')
-      ? { status: 'city_unknown', reason: 'ambiguous_locality' }
-      : { status: 'unresolved', reason: 'insufficient_evidence' };
+    if (!allowMultiple && localities.size === 1 && !localities.has(''))
+      return { status: 'unresolved', reason: 'insufficient_evidence' };
+    if (localities.size > 1 || localities.has(''))
+      return { status: 'city_unknown', reason: 'ambiguous_locality' };
   }
   const vision = recognition.clues.filter((c) => c.confidence >= 0.85);
-  const clue = verified[0] ?? (vision.length === 1 ? vision[0] : undefined);
+  const clue =
+    verified[0] ??
+    (vision.length === 1 || allowMultiple ? vision[0] : undefined);
   if (!clue) return { status: 'unresolved', reason: 'insufficient_evidence' };
   const geographic = verified[0];
   if (context.cityOverride)
@@ -63,9 +90,14 @@ export function selectLocality(
       clue,
       locality: {
         // A cited canonical locality can translate the user's spelling, not substitute another city.
-        name: geographic?.city ?? context.cityOverride,
-        aliases: geographic?.city ? names(geographic) : [context.cityOverride],
-        countryCode: geographic?.countryCode,
+        name: intent?.canonicalName ?? geographic?.city ?? context.cityOverride,
+        aliases: [
+          ...new Set([
+            ...overrideAliases,
+            ...(geographic?.city ? names(geographic) : []),
+          ]),
+        ],
+        countryCode: intent?.countryCode ?? geographic?.countryCode,
         source: 'explicit',
       },
     };
@@ -81,7 +113,9 @@ export function selectLocality(
       },
     };
   const visionArea =
-    vision.length === 1 ? vision[0]?.areaHint?.trim() : undefined;
+    vision.length && new Set(vision.map((c) => c.areaHint?.trim())).size === 1
+      ? vision[0]?.areaHint?.trim()
+      : undefined;
   if (visionArea)
     return {
       status: 'ready',
@@ -89,7 +123,7 @@ export function selectLocality(
       locality: {
         name: visionArea,
         aliases: [visionArea],
-        countryCode: geographic?.countryCode,
+        countryCode: intent?.countryCode ?? geographic?.countryCode,
         source: 'vision',
       },
     };
