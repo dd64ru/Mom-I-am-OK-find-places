@@ -44,6 +44,7 @@ export function projectUpdate(
   raw: unknown,
   policy: TelegramPolicy,
   username: string,
+  allowCityText = false,
 ): AcceptedMessage | undefined {
   if (!raw || typeof raw !== 'object') return;
   const update = raw as Record<string, unknown>;
@@ -101,7 +102,7 @@ export function projectUpdate(
     return;
   const parsed = Fields.safeParse(update.message);
   if (!parsed.success) return;
-  return classify(parsed.data as Message, policy, username);
+  return classify(parsed.data as Message, policy, username, allowCityText);
 }
 export interface Delivery {
   method: string;
@@ -116,6 +117,9 @@ export async function handleWebhook(
     policy: TelegramPolicy;
     username: string;
     accept: (message: AcceptedMessage) => Promise<'done' | 'retry'>;
+    resolveCityText?: (
+      message: Extract<AcceptedMessage, { kind: 'cityText' }>,
+    ) => Promise<Extract<AcceptedMessage, { kind: 'cityReply' }> | undefined>;
   },
 ): Promise<{ status: number; body: string }> {
   try {
@@ -143,12 +147,23 @@ export async function handleWebhook(
     } catch {
       return { status: 400, body: 'invalid_update' };
     }
-    const accepted = projectUpdate(
+    let accepted = projectUpdate(
       update,
       dependencies.policy,
       dependencies.username,
     );
-    if (!accepted) return { status: 200, body: 'ignored' };
+    if (!accepted && dependencies.resolveCityText) {
+      const text = projectUpdate(
+        update,
+        dependencies.policy,
+        dependencies.username,
+        true,
+      );
+      if (text?.kind === 'cityText')
+        accepted = await dependencies.resolveCityText(text);
+    }
+    if (!accepted || accepted.kind === 'cityText')
+      return { status: 200, body: 'ignored' };
     const result = await dependencies.accept(accepted);
     return result === 'done'
       ? { status: 200, body: 'ok' }

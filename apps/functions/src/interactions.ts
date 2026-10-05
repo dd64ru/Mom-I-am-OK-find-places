@@ -1,3 +1,4 @@
+import { CitySessions } from './city-sessions.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DiscoveryService, type PlacesRepository } from '@places/core';
 import type {
@@ -65,6 +66,13 @@ export class TelegramInteractions {
     statusId = discovery.id,
   ): Promise<void | { failureReason: ProviderFailureReason }> {
     if (discovery.status === 'failed') {
+      await new CitySessions(
+        this.docs,
+        this.repository,
+        this.workspace,
+        this.chat,
+        this.now,
+      ).deactivateDiscovery(discovery.id);
       await new ProcessingStatus(
         this.docs,
         this.api,
@@ -171,11 +179,18 @@ export class TelegramInteractions {
         return { value: { ...next }, result: next };
       },
     );
+    await new CitySessions(
+      this.docs,
+      this.repository,
+      this.workspace,
+      this.chat,
+      this.now,
+    ).deactivateDiscovery(discovery.id, token, discovery.revision);
     let messageId = state.messageId;
     if (!messageId) {
       const message = await this.api.call('sendMessage', {
         chat_id: this.chat,
-        text: 'В каком городе находится это место? Ответь прямо на это сообщение (до 200 символов, в течение 10 минут).',
+        text: 'В каком городе находится это место? Ответь на это сообщение или напиши город следующим сообщением (до 200 символов, в течение 10 минут).',
         reply_parameters: { message_id: replyTo },
         reply_markup: {
           force_reply: true,
@@ -193,6 +208,19 @@ export class TelegramInteractions {
       value: raw ?? { token },
       result: undefined,
     }));
+    await new CitySessions(
+      this.docs,
+      this.repository,
+      this.workspace,
+      this.chat,
+      this.now,
+    ).register(state.userId!, {
+      token,
+      messageId,
+      discoveryId: discovery.id,
+      revision: discovery.revision,
+      expiresAt: state.expiresAt,
+    });
   }
   async canReply(
     reply: Extract<AcceptedMessage, { kind: 'cityReply' }>,
@@ -208,6 +236,14 @@ export class TelegramInteractions {
       this.path(token),
       (raw) => ({ result: raw as unknown as Interaction | undefined }),
     );
+    if (state && state.expiresAt <= this.now())
+      await new CitySessions(
+        this.docs,
+        this.repository,
+        this.workspace,
+        this.chat,
+        this.now,
+      ).deactivate(reply.userId, token);
     if (
       !state ||
       state.expiresAt <= this.now() ||
@@ -270,14 +306,28 @@ export class TelegramInteractions {
     return state ? { state, owner } : undefined;
   }
   private async done(token: string, owner: string) {
-    await this.docs.change(this.path(token), (raw) => {
-      if (raw?.owner !== owner || Number(raw.leaseUntil) <= this.now())
-        throw new Error('interaction_lease_lost');
-      return {
-        value: { ...raw, phase: 'done', leaseUntil: 0 },
-        result: undefined,
-      };
-    });
+    const completed = await this.docs.change<Interaction>(
+      this.path(token),
+      (raw) => {
+        if (raw?.owner !== owner || Number(raw.leaseUntil) <= this.now())
+          throw new Error('interaction_lease_lost');
+        return {
+          value: { ...raw, phase: 'done', leaseUntil: 0 },
+          result: raw as unknown as Interaction,
+        };
+      },
+    );
+    const sessions = new CitySessions(
+      this.docs,
+      this.repository,
+      this.workspace,
+      this.chat,
+      this.now,
+    );
+    if (completed.replyId !== undefined && completed.userId)
+      await sessions.deactivate(completed.userId, token);
+    if (completed.action === 'confirm' || completed.action === 'cancel')
+      await sessions.deactivateDiscovery(completed.discoveryId);
   }
   private async release(token: string, owner: string) {
     await this.docs.change(this.path(token), (raw) =>

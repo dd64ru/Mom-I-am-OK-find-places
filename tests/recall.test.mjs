@@ -171,7 +171,7 @@ test('explicit score margin prevents exact result winning over a close partial b
     'resolved',
   );
 });
-test('structured query variants recover on second request, stop after confidence and never exceed three', async () => {
+test('structured query variants recover on second request, stop after confidence and never exceed two per phase', async () => {
   const { r, v } = evidence();
   v.candidates[0].aliases = ['Alimentari', 'Alimentari Restaurant'];
   const calls = [];
@@ -186,8 +186,8 @@ test('structured query variants recover on second request, stop after confidence
   assert.notEqual(calls[0].textQuery, calls[1].textQuery);
   const none = [];
   await provider([], [], none).resolve(r, v);
-  assert.equal(none.length, 3);
-  assert.equal(new Set(none.map((c) => c.textQuery)).size, 3);
+  assert.equal(none.length, 2);
+  assert.equal(new Set(none.map((c) => c.textQuery)).size, 2);
   for (const q of none) {
     assert.ok(q.textQuery.length <= 800);
     assert.match(q.textQuery, /Shanghai/);
@@ -227,7 +227,7 @@ for (const input of [
     ];
     assert.deepEqual(
       await provider([]).resolve(r, conflicting, { cityOverride: input }),
-      { status: 'unresolved', reason: 'locality_conflict' },
+      { status: 'unresolved', reason: 'no_match' },
     );
   });
 test('semantic city intent is general, high confidence and bound to this exact city reply', async () => {
@@ -424,6 +424,7 @@ test('Google diagnostics contain only bounded counts/fixed codes, no source cont
       Object.keys(event).sort(),
       [
         'event',
+        'phase',
         'query',
         'returned',
         'complete',
@@ -437,7 +438,7 @@ test('Google diagnostics contain only bounded counts/fixed codes, no source cont
       ].sort(),
     );
     for (const [key, value] of Object.entries(event))
-      if (!['event', 'result', 'rejected'].includes(key))
+      if (!['event', 'phase', 'result', 'rejected'].includes(key))
         assert.ok(Number.isInteger(value) && value >= 0 && value <= 10);
     for (const value of Object.values(event.rejected))
       assert.ok(Number.isInteger(value) && value >= 0 && value <= 10);

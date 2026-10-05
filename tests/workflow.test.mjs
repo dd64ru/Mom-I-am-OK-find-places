@@ -9,8 +9,11 @@ import {
   storedCandidate,
 } from '@places/schemas';
 import { DiscoveryService } from '@places/core';
+import { CitySessions } from '../apps/functions/dist/city-sessions.js';
 import {
   GooglePlacesFailure,
+  GooglePlacesPoi,
+  PipelineTelemetry,
   FallbackPoi,
   FirestoreRepository,
   NominatimPoi,
@@ -32,6 +35,8 @@ import {
   verification as googleVerification,
   googleFixture,
   row as googleRow,
+  token as googleToken,
+  project as googleProject,
 } from './fixtures/google-places.mjs';
 
 // Serialize mock transactions and enforce Firestore's read-before-write rule.
@@ -164,6 +169,14 @@ async function setup(options = {}) {
         },
       },
       poi: {
+        ...(options.poi?.firstPass
+          ? {
+              firstPass: async (...args) => {
+                calls.poi++;
+                return options.poi.firstPass(...args);
+              },
+            }
+          : {}),
         refresh: async (identity) => options.poi.refresh(identity),
         resolve: async (_recognition, _verified, context) => {
           calls.poi++;
@@ -217,6 +230,7 @@ async function setup(options = {}) {
     sent,
     interactions,
     ingest,
+    now: () => clock,
     advance: (ms) => {
       clock += ms;
     },
@@ -1717,7 +1731,7 @@ test('Google proposal retry refreshes transient display from stored Place ID wit
   await f.interactions.propose(saved, 11, 1);
   assert.equal(refreshes, 1);
   assert.equal(f.calls.vision, 1);
-  assert.equal(f.calls.search, 1);
+  assert.equal(f.calls.search, 0);
   assert.equal(f.calls.poi, 1);
   assert.match(f.sent[0].body.text, /Fixture Café/);
   assert.match(f.sent[0].body.text, /Источник: Google Maps/);
@@ -1993,7 +2007,11 @@ test('terminal image failure and invalid internal POI adaptation stop retries wi
     await ingress.run(id, process);
     await ingress.run(id, process);
     await status.failure(id);
-    assert.deepEqual(f.calls, { vision: 1, search: 1, poi: 1 });
+    assert.deepEqual(f.calls, {
+      vision: 1,
+      search: outcome.firstPass ? 0 : 1,
+      poi: 1,
+    });
     assert.equal(
       (await f.repository.getDiscovery('fixture', id)).failureReason,
       expected,
@@ -2019,6 +2037,7 @@ test('terminal ID refresh failure persists failed state rather than repeatedly r
     recognition: googleRecognition,
     verified: googleVerification,
     poi: {
+      firstPass: (...args) => googleFixture().firstPass(...args),
       resolve: (...args) => googleFixture().resolve(...args),
       refresh: async () => {
         refreshes++;
@@ -2036,7 +2055,7 @@ test('terminal ID refresh failure persists failed state rather than repeatedly r
     1,
   );
   assert.equal(refreshes, 1);
-  assert.deepEqual(f.calls, { vision: 1, search: 1, poi: 1 });
+  assert.deepEqual(f.calls, { vision: 1, search: 0, poi: 1 });
   assert.equal(f.sent.filter((m) => m.body.text?.startsWith('⚠️')).length, 1);
   assert.equal(
     f.sent.some((m) => m.body.reply_markup?.inline_keyboard),
@@ -2081,5 +2100,559 @@ test('long opaque Google identity deduplicates in Firestore while all unknown/pr
   assert.equal(
     PlaceSchema.safeParse({ ...first.place, future: true }).success,
     false,
+  );
+});
+
+function alimentariRecognition(confidence = 0.62) {
+  return {
+    visibleText: ['PRIVATE_VISIBLE_TEXT'],
+    clues: [
+      { name: 'Grande Alimentari', aliases: [], category: 'cafe', confidence },
+    ],
+  };
+}
+const noEvidence = { status: 'no_evidence', candidates: [], references: [] };
+function alimentariProvider(rows, requests = [], events = []) {
+  return new GooglePlacesPoi(
+    async () => googleToken,
+    googleProject,
+    async (_url, init) => {
+      requests.push(JSON.parse(init.body));
+      return Response.json({
+        places: typeof rows === 'function' ? rows(requests.length) : rows,
+      });
+    },
+    Date.now,
+    (event) => events.push(event),
+    new PipelineTelemetry((event) => events.push(event)),
+  );
+}
+const alimentariRow = {
+  ...googleRow,
+  displayName: { text: 'Alimentari Grande' },
+};
+const guangzhouRow = {
+  ...alimentariRow,
+  id: 'guangzhou-google-id',
+  formattedAddress: '18 Fixture Rd, Guangzhou, China',
+  location: { latitude: 23.13, longitude: 113.26 },
+  addressComponents: googleRow.addressComponents.map((c) =>
+    c.types.includes('locality')
+      ? { ...c, longText: 'Guangzhou', shortText: 'Guangzhou' }
+      : c,
+  ),
+};
+function sessions(f) {
+  return new CitySessions(f.docs, f.repository, 'fixture', -100, f.now);
+}
+function cityText(messageId = 9, city = 'шанхай', userId = 11) {
+  return { kind: 'cityText', messageId, city, userId };
+}
+function cityDelivery(messageId = 9, city = 'шанхай', extra = {}) {
+  return {
+    method: 'POST',
+    contentType: 'application/json',
+    secret: 'fixture-header',
+    rawBody: Buffer.from(
+      JSON.stringify(update({ message_id: messageId, text: city, ...extra })),
+    ),
+  };
+}
+function cityDependencies(f) {
+  const ingress = new Ingress(f.docs, 'fixture');
+  return {
+    policy,
+    username: 'fixture_bot',
+    secret: async () => 'fixture-header',
+    resolveCityText: (text) => sessions(f).resolve(text),
+    accept: async (reply) => {
+      const token = await f.interactions.canReply(reply);
+      if (!token) return 'done';
+      const id = await ingress.receive(-100, reply);
+      return ingress.run(id, () => f.interactions.cityReply(reply, token));
+    },
+  };
+}
+
+test('Grande Alimentari regression: low-confidence cityless signage actually queries Google first, resolves reordered name and skips web search', async () => {
+  for (const confidence of [0, 0.2, 0.62, 0.84]) {
+    const requests = [],
+      events = [];
+    const f = await setup({
+      recognition: alimentariRecognition(confidence),
+      verify: () =>
+        assert.fail('confident Google first pass must skip enrichment'),
+      poi: new FallbackPoi(
+        alimentariProvider([alimentariRow], requests, events),
+        {
+          resolve: async () =>
+            assert.fail('must not use OSM on Google success'),
+        },
+      ),
+    });
+    const d = await f.ingest('alimentari-first');
+    assert.equal(d.status, 'needs_confirmation');
+    assert.equal(d.liveCandidate.address.city, 'Shanghai');
+    assert.equal(d.liveCandidate.providerIdentity.id, googleRow.id);
+    assert.deepEqual(f.calls, { vision: 1, search: 0, poi: 1 });
+    assert.equal(requests.length, 1);
+    assert.equal(requests[0].textQuery, 'Grande Alimentari');
+    assert.equal('regionCode' in requests[0], false);
+    const plan = events.find((e) => e.event === 'place_search_plan');
+    assert.equal(plan.localityKnown, false);
+    assert.equal(plan.confidenceHigh, 0);
+    assert.equal(plan.phase, 'google_first_pass');
+    assert.equal(
+      events.filter((e) => e.stage === 'google_places').length,
+      requests.length,
+    );
+    assert.ok(
+      events
+        .filter((e) => e.stage === 'google_places')
+        .every((e) => e.phase === 'google_first_pass'),
+    );
+    await f.interactions.propose(d, 11, 1);
+    assert.equal(
+      f.sent.some((m) => m.body.reply_markup?.force_reply),
+      false,
+    );
+    assert.match(f.sent.at(-1).body.text, /Источник: Google Maps/);
+    await f.service.finish(d, 'confirm');
+    const persisted = JSON.stringify([...f.db.values.values()]);
+    for (const forbidden of [
+      'Alimentari Grande',
+      alimentariRow.formattedAddress,
+      'latitude',
+      'longitude',
+      'attributions',
+    ])
+      assert.equal(persisted.includes(forbidden), false);
+    const logged = JSON.stringify(events);
+    for (const forbidden of [
+      'Grande Alimentari',
+      'Shanghai',
+      googleRow.id,
+      googleToken,
+      'PRIVATE_VISIBLE_TEXT',
+      alimentariRow.formattedAddress,
+    ])
+      assert.equal(logged.includes(forbidden), false);
+  }
+});
+
+test('two same-name cities require disambiguation; plain-text city consumes one session and resolves Shanghai with no new vision or needless enrichment', async () => {
+  const requests = [],
+    events = [];
+  const f = await setup({
+    recognition: alimentariRecognition(),
+    verified: noEvidence,
+    poi: new FallbackPoi(
+      alimentariProvider([alimentariRow, guangzhouRow], requests, events),
+      { resolve: async () => ({ status: 'unresolved', reason: 'no_match' }) },
+    ),
+  });
+  await f.interactions.propose(await f.ingest('two-cities'), 11, 1);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', 'two-cities')).status,
+    'awaiting_city',
+  );
+  assert.equal(requests.length, 4);
+  assert.equal(f.calls.search, 1);
+  assert.deepEqual(
+    events
+      .filter((e) => e.event === 'google_places_filter')
+      .map((e) => e.phase),
+    [
+      'google_first_pass',
+      'google_first_pass',
+      'google_enriched_pass',
+      'google_enriched_pass',
+    ],
+  );
+  const prompt = f.sent.find((m) => m.body.reply_markup?.force_reply);
+  assert.ok(prompt);
+  const deps = cityDependencies(f);
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  const d = await f.repository.getDiscovery('fixture', 'two-cities');
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(d.candidates[0].providerIdentity.id, googleRow.id);
+  assert.equal(requests.length, 5);
+  assert.equal(f.calls.search, 1);
+  assert.equal(f.calls.vision, 1);
+  assert.equal(
+    f.sent.filter((m) => m.body.text === '🔎 Уточняю место…').length,
+    1,
+  );
+  assert.ok(f.sent.some((m) => m.method === 'deleteMessage'));
+  assert.deepEqual(
+    f.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts,
+    [],
+  );
+  assert.equal(
+    (await handleWebhook(cityDelivery(10, 'PRIVATE_CONVERSATION'), deps)).body,
+    'ignored',
+  );
+});
+
+test('Google requests and optional enrichment stay bounded; absence of clues performs no misleading provider IO', async () => {
+  const requests = [],
+    events = [];
+  const f = await setup({
+    recognition: alimentariRecognition(),
+    verified: noEvidence,
+    poi: new FallbackPoi(alimentariProvider([], requests, events), {
+      resolve: async () => ({ status: 'unresolved', reason: 'no_match' }),
+    }),
+  });
+  const d = await f.ingest('bounded-empty');
+  assert.equal(d.status, 'unresolved');
+  assert.equal(requests.length, 4);
+  assert.equal(f.calls.search, 1);
+  assert.equal(events.filter((e) => e.stage === 'google_places').length, 4);
+  assert.equal(events.filter((e) => e.event === 'place_search_plan').length, 2);
+  const noneRequests = [],
+    noneEvents = [];
+  const g = await setup({
+    recognition: { visibleText: [], clues: [] },
+    verify: () => assert.fail('nothing to enrich'),
+    poi: new FallbackPoi(alimentariProvider([], noneRequests, noneEvents), {
+      resolve: async () => assert.fail('nothing to look up'),
+    }),
+  });
+  await g.ingest('no-clues');
+  assert.equal(noneRequests.length, 0);
+  assert.equal(
+    noneEvents.some((e) => e.stage === 'google_places'),
+    false,
+  );
+  assert.equal(
+    noneEvents.find((e) => e.event === 'place_search_plan').queriesPlanned,
+    0,
+  );
+});
+
+test('weak/generic name and explicit provider country, city and house-number conflicts cannot be saved by first-result ranking', async () => {
+  const badRows = [
+    { ...alimentariRow, displayName: { text: 'Unrelated Cafe' } },
+    { ...alimentariRow, types: ['train_station'] },
+    {
+      ...alimentariRow,
+      addressComponents: alimentariRow.addressComponents.map((c) =>
+        c.types.includes('locality')
+          ? { ...c, longText: 'Guangzhou', shortText: 'Guangzhou' }
+          : c,
+      ),
+    },
+  ];
+  for (const bad of badRows)
+    assert.notEqual(
+      (
+        await alimentariProvider([bad]).firstPass(alimentariRecognition(), {
+          cityOverride: 'Shanghai',
+        })
+      ).status,
+      'resolved',
+    );
+  const v = {
+    ...googleVerification,
+    candidates: [
+      {
+        ...googleVerification.candidates[0],
+        canonicalName: 'Grande Alimentari',
+        nativeName: undefined,
+        aliases: [],
+        addressClue: '18 Fixture Road',
+      },
+    ],
+  };
+  for (const bad of [
+    {
+      ...alimentariRow,
+      addressComponents: alimentariRow.addressComponents.map((c) =>
+        c.types.includes('country') ? { ...c, shortText: 'JP' } : c,
+      ),
+    },
+    {
+      ...alimentariRow,
+      formattedAddress: '180 Fixture Rd, Shanghai',
+      addressComponents: alimentariRow.addressComponents.map((c) =>
+        c.types.includes('street_number')
+          ? { ...c, longText: '180', shortText: '180' }
+          : c,
+      ),
+    },
+  ])
+    assert.notEqual(
+      (
+        await alimentariProvider([bad]).resolve(alimentariRecognition(), v, {
+          cityOverride: 'Shanghai',
+        })
+      ).status,
+      'resolved',
+    );
+});
+
+test('plain-text city session rejects outsiders, bots, commands, long/empty text and wrong replies; no raw ordinary text is persisted', async () => {
+  const f = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  await f.interactions.propose(await f.ingest('privacy-city'), 11, 1);
+  const deps = cityDependencies(f),
+    before = JSON.stringify([...f.docs.values.values()]);
+  for (const [text, extra] of [
+    ['Shanghai', { from: { id: 22, is_bot: false } }],
+    ['Shanghai', { from: { id: 11, is_bot: true } }],
+    ['Shanghai', { chat: { id: -999, type: 'supergroup' } }],
+    ['/unknown', {}],
+    ['x'.repeat(201), {}],
+    [' ', {}],
+    ['Shanghai', { reply_to_message: { message_id: 999 } }],
+  ])
+    assert.equal(
+      (await handleWebhook(cityDelivery(9, text, extra), deps)).status,
+      200,
+    );
+  assert.equal(JSON.stringify([...f.docs.values.values()]), before);
+  assert.equal(f.calls.search, 1);
+  assert.equal(
+    await sessions(f).resolve(cityText(9, 'Shanghai', 22)),
+    undefined,
+  );
+});
+
+test('multiple active prompts never guess; explicit Reply works and leaves the other single prompt available', async () => {
+  const f = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  await f.interactions.propose(await f.ingest('multi-one'), 11, 1);
+  await f.interactions.propose(await f.ingest('multi-two'), 11, 2);
+  assert.equal(await sessions(f).resolve(cityText(9, 'Shanghai')), undefined);
+  const prompt = f.sent.find((m) => m.body.reply_markup?.force_reply),
+    promptId = f.sent.indexOf(prompt) + 101;
+  const explicit = {
+    kind: 'cityReply',
+    messageId: 9,
+    promptId,
+    userId: 11,
+    city: 'Shanghai',
+  };
+  const token = await f.interactions.canReply(explicit);
+  assert.ok(token);
+  await f.interactions.cityReply(explicit, token);
+  const plain = await sessions(f).resolve(cityText(10, 'Shanghai'));
+  assert.ok(plain);
+  assert.notEqual(plain.promptId, promptId);
+  assert.equal(
+    f.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts.length,
+    1,
+  );
+});
+
+test('plain-text city binding is one logical reply, survives transient retry and shows one processing status', async () => {
+  let fail = true;
+  const f = await setup({
+    resolve: (ctx) => {
+      if (!ctx.cityOverride) return [];
+      if (fail) throw Error('fixture_transient');
+      return [candidate];
+    },
+  });
+  const original = await f.ingest('retry-plain');
+  const waiting = await f.service.requestCity(original);
+  await f.interactions.propose(waiting, 11, 1);
+  const first = await sessions(f).resolve(cityText(9, 'Shanghai'));
+  assert.ok(first);
+  assert.equal(
+    await sessions(f).resolve(cityText(10, 'PRIVATE_ORDINARY_TEXT')),
+    undefined,
+  );
+  const deps = cityDependencies(f);
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    503,
+  );
+  assert.equal(
+    await sessions(f).resolve(cityText(10, 'PRIVATE_ORDINARY_TEXT')),
+    undefined,
+  );
+  fail = false;
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  assert.equal(f.calls.vision, 1);
+  assert.equal(
+    f.sent.filter((m) => m.body.text === '🔎 Уточняю место…').length,
+    1,
+  );
+  assert.deepEqual(
+    f.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts,
+    [],
+  );
+  assert.equal(
+    JSON.stringify([...f.docs.values.values()]).includes(
+      'PRIVATE_ORDINARY_TEXT',
+    ),
+    false,
+  );
+});
+
+test('city pointers deactivate on expiry, supersession and terminal failure; terminal plain-text retries perform no new search', async () => {
+  const f = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  await f.interactions.propose(await f.ingest('expired-pointer'), 11, 1);
+  f.advance(10 * 60 * 1000 + 1);
+  assert.equal(await sessions(f).resolve(cityText()), undefined);
+  assert.deepEqual(
+    f.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts,
+    [],
+  );
+  const g = await setup({
+    poi: {
+      resolve: async (_r, _v, ctx) => {
+        if (ctx.cityOverride)
+          throw new GooglePlacesFailure('google_places_invalid_json');
+        return { status: 'city_unknown', reason: 'missing_locality' };
+      },
+    },
+  });
+  await g.interactions.propose(await g.ingest('terminal-plain'), 11, 1);
+  const deps = cityDependencies(g);
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  const calls = { ...g.calls };
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  assert.deepEqual(g.calls, calls);
+  assert.equal(g.sent.filter((m) => m.method === 'editMessageText').length, 1);
+  assert.deepEqual(
+    g.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts,
+    [],
+  );
+  const h = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  const old = await h.ingest('superseded-pointer');
+  await h.interactions.propose(old, 11, 1);
+  const newer = await h.service.requestCity(old);
+  await h.interactions.propose(newer, 22, 2);
+  await h.interactions.propose(old, 11, 1);
+  assert.equal(
+    await sessions(h).resolve(cityText(9, 'Shanghai', 11)),
+    undefined,
+  );
+  assert.ok(await sessions(h).resolve(cityText(10, 'Shanghai', 22)));
+});
+
+test('city-session reservation handles concurrent text and preserves a prompt registered during an older lookup', async () => {
+  const f = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  await f.interactions.propose(await f.ingest('concurrent-city'), 11, 1);
+  const results = await Promise.all([
+    sessions(f).resolve(cityText(9, 'Shanghai')),
+    sessions(f).resolve(cityText(10, 'Guangzhou')),
+  ]);
+  assert.equal(results.filter(Boolean).length, 1);
+  assert.ok(
+    await sessions(f).resolve(
+      cityText(results.find(Boolean).messageId, 'Shanghai'),
+    ),
+  );
+  const g = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  const one = await g.ingest('lookup-old'),
+    two = await g.ingest('lookup-new');
+  await g.interactions.propose(one, 11, 1);
+  let enter, release;
+  const entered = new Promise((resolve) => (enter = resolve)),
+    blocked = new Promise((resolve) => (release = resolve));
+  const original = g.repository.getDiscovery.bind(g.repository);
+  g.repository.getDiscovery = async (...args) => {
+    const result = await original(...args);
+    if (args[1] === 'lookup-old') {
+      enter();
+      await blocked;
+    }
+    return result;
+  };
+  const pending = sessions(g).resolve(cityText(9, 'Shanghai'));
+  await entered;
+  await g.interactions.propose(two, 11, 2);
+  release();
+  assert.equal(await pending, undefined);
+  assert.equal(
+    g.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts.length,
+    2,
+  );
+  assert.equal(await sessions(g).resolve(cityText(10, 'Shanghai')), undefined);
+});
+
+test('cancelled city state cannot consume ordinary text, and same-city branch ambiguity does not auto-prompt for an unhelpful city', async () => {
+  const f = await setup({
+    outcome: { status: 'city_unknown', reason: 'missing_locality' },
+  });
+  const d = await f.ingest('cancelled-city');
+  await f.interactions.propose(d, 11, 1);
+  await f.service.finish(d, 'cancel');
+  assert.equal(await sessions(f).resolve(cityText()), undefined);
+  assert.deepEqual(
+    f.docs.values.get('workspaces/fixture/citySessions/-100_11').prompts,
+    [],
+  );
+  const requests = [];
+  const poi = alimentariProvider(
+    [alimentariRow, { ...alimentariRow, id: 'same-city-branch' }],
+    requests,
+  );
+  assert.deepEqual(await poi.firstPass(alimentariRecognition()), {
+    status: 'unresolved',
+    reason: 'ambiguous_poi',
+  });
+  assert.equal(requests.length, 2);
+});
+
+test('search telemetry accepts fixed phase enums only and unknown-city pagination remains city ambiguity', async () => {
+  const events = [],
+    telemetry = new PipelineTelemetry((e) => events.push(e));
+  await telemetry.measure(
+    'google_places',
+    async () => ({ private: 'PRIVATE_CONTENT' }),
+    () => 'ok',
+    'PRIVATE_PHASE_TOKEN',
+  );
+  assert.equal('phase' in events[0], false);
+  assert.equal(JSON.stringify(events).includes('PRIVATE'), false);
+  const logs = [];
+  await assert.rejects(
+    new GooglePlacesPoi(
+      async () => googleToken,
+      googleProject,
+      async () => assert.fail('invalid phase must not request'),
+      Date.now,
+      (e) => logs.push(e),
+    ).resolve(alimentariRecognition(), noEvidence, {}, 'PRIVATE_PHASE_TOKEN'),
+    { message: 'google_places_request_failed' },
+  );
+  assert.deepEqual(logs, []);
+  assert.deepEqual(
+    await googleFixture({
+      places: [alimentariRow],
+      nextPageToken: 'fixture-page',
+    }).firstPass(alimentariRecognition()),
+    { status: 'city_unknown', reason: 'ambiguous_locality' },
   );
 });

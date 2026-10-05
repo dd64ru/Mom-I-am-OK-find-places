@@ -27,6 +27,7 @@ export type AcceptedMessage =
       userId: number;
       city: string;
     }
+  | { kind: 'cityText'; messageId: number; userId: number; city: string }
   | {
       kind: 'command';
       command: 'help' | 'area';
@@ -37,6 +38,7 @@ export function classify(
   message: Message,
   policy: TelegramPolicy,
   botUsername: string,
+  allowCityText = false,
 ): AcceptedMessage | undefined {
   if (message.chat.id !== policy.chatId || !message.from || message.from.is_bot)
     return;
@@ -78,6 +80,21 @@ export function classify(
         city,
       };
     return;
+  }
+  if (
+    allowCityText &&
+    message.text &&
+    !message.reply_to_message &&
+    !message.text.startsWith('/')
+  ) {
+    const city = normalizeCity(message.text);
+    if (city)
+      return {
+        kind: 'cityText',
+        messageId: message.message_id,
+        userId: message.from.id,
+        city,
+      };
   }
   if (
     !message.text ||

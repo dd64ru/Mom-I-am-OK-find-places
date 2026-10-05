@@ -1,3 +1,4 @@
+import { CitySessions } from './city-sessions.js';
 import { Firestore } from '@google-cloud/firestore';
 import {
   DiscoveryService,
@@ -93,6 +94,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             : result.status === 'no_evidence'
               ? 'no_match'
               : 'unresolved',
+        'web_enrichment',
       ),
   };
   const poi = new FallbackPoi(
@@ -102,6 +104,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
       fetch,
       Date.now,
       (event) => console.info(JSON.stringify(event)),
+      telemetry,
     ),
     new NominatimPoi(docs, env.NOMINATIM_ENDPOINT || undefined),
     telemetry,
@@ -117,7 +120,15 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
     policy,
     username,
     secret: () => secrets.read('TELEGRAM_WEBHOOK_SECRET'),
+    resolveCityText: (text: Extract<AcceptedMessage, { kind: 'cityText' }>) =>
+      new CitySessions(
+        docs,
+        repository,
+        config.WORKSPACE_ID,
+        config.chatId,
+      ).resolve(text),
     async accept(accepted: AcceptedMessage) {
+      if (accepted.kind === 'cityText') return 'done' as const;
       const api = new TelegramApi(await secrets.read('TELEGRAM_BOT_TOKEN'));
       const interactionService = new DiscoveryService(
         repository,
@@ -254,6 +265,14 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 },
               },
               poi: {
+                async firstPass(recognition, context) {
+                  budget.throwIfAborted();
+                  const result = await poi.firstPass(recognition, context);
+                  budget.throwIfAborted();
+                  await assertOwned();
+                  await assertSlot();
+                  return result;
+                },
                 async resolve(recognition, verified, context) {
                   budget.throwIfAborted();
                   const result = await poi.resolve(

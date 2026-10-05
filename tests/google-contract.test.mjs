@@ -373,7 +373,10 @@ test('transport safeguard is separate from external contract validity and logs n
     await assert.rejects(provider.resolve(recognition, verification), {
       message: code,
     });
-    assert.equal(events[0].topLevel, path);
+    assert.equal(
+      events.find((e) => e.event === 'google_places_parse').topLevel,
+      path,
+    );
     assert.equal(JSON.stringify(events).includes('PRIVATE_BODY'), false);
   }
 });

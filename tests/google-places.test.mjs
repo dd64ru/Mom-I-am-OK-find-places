@@ -154,7 +154,7 @@ for (const [scenario, mutate, reason] of [
     );
   });
 }
-test('explicit correction conflicts fail closed without lookup; stale workspace never overrides verified city', async () => {
+test('explicit correction is checked against actual provider geography; stale workspace never overrides verified city', async () => {
   let requests = 0;
   const provider = googleFixture(undefined, async () => {
     requests++;
@@ -164,9 +164,9 @@ test('explicit correction conflicts fail closed without lookup; stale workspace 
     await provider.resolve(recognition, verification, {
       cityOverride: 'Guangzhou',
     }),
-    { status: 'unresolved', reason: 'locality_conflict' },
+    { status: 'unresolved', reason: 'locality_mismatch' },
   );
-  assert.equal(requests, 0);
+  assert.equal(requests, 2);
   assert.equal(
     (
       await provider.resolve(recognition, verification, {
@@ -400,7 +400,7 @@ test('final resolution telemetry records fixed provider/success/failure enums wi
   const events = [],
     telemetry = new PipelineTelemetry((event) => events.push(event));
   await new FallbackPoi(
-    googleFixture(),
+    googleFixture(undefined, undefined, telemetry),
     { resolve: async () => assert.fail('no OSM on Google success') },
     telemetry,
   ).resolve(recognition, verification);
@@ -596,7 +596,7 @@ test('structured pipeline telemetry contains only fixed enums, status and bounde
       city: 'PRIVATE_CITY',
     }));
   const fallback = new FallbackPoi(
-    googleFixture({ places: [] }),
+    googleFixture({ places: [] }, undefined, telemetry),
     { resolve: async () => noMatch },
     telemetry,
   );
@@ -615,7 +615,13 @@ test('structured pipeline telemetry contains only fixed enums, status and bounde
     assert.deepEqual(
       Object.keys(event).sort(),
       event.event === 'place_pipeline_stage'
-        ? ['durationMs', 'event', 'stage', 'status']
+        ? [
+            'durationMs',
+            'event',
+            ...(event.phase ? ['phase'] : []),
+            'stage',
+            'status',
+          ].sort()
         : ['durationMs', 'event', 'provider', 'result'],
     );
   }
@@ -638,6 +644,7 @@ test('structured pipeline telemetry contains only fixed enums, status and bounde
       'image_download',
       'vision',
       'web_verification',
+      'google_places',
       'google_places',
       'nominatim',
       'vision',

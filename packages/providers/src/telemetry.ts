@@ -15,12 +15,15 @@ const statuses = [
   'unresolved',
   'city_unknown',
 ] as const;
+export type SearchPhase =
+  'google_first_pass' | 'web_enrichment' | 'google_enriched_pass';
 type Stage = (typeof stages)[number];
 type Status = (typeof statuses)[number];
 export type PipelineEvent =
   | {
       event: 'place_pipeline_stage';
       stage: Stage;
+      phase?: SearchPhase;
       durationMs: number;
       status: Status;
     }
@@ -60,7 +63,15 @@ export class PipelineTelemetry {
     stage: Stage,
     operation: () => Promise<T>,
     status: (value: T) => Status = () => 'ok',
+    phase?: SearchPhase,
   ): Promise<T> {
+    const safePhase =
+      phase &&
+      ['google_first_pass', 'web_enrichment', 'google_enriched_pass'].includes(
+        phase,
+      )
+        ? phase
+        : undefined;
     const start = this.now();
     try {
       const value = await operation();
@@ -69,6 +80,7 @@ export class PipelineTelemetry {
         this.log({
           event: 'place_pipeline_stage',
           stage,
+          ...(safePhase ? { phase: safePhase } : {}),
           durationMs: this.duration(start),
           status: code,
         });
@@ -78,6 +90,7 @@ export class PipelineTelemetry {
         this.log({
           event: 'place_pipeline_stage',
           stage,
+          ...(safePhase ? { phase: safePhase } : {}),
           durationMs: this.duration(start),
           status: 'error',
         });

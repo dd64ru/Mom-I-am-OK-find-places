@@ -27,6 +27,44 @@ export class FallbackPoi implements PoiProvider {
       throw new GooglePlacesFailure('google_places_configuration_invalid');
     return this.primary.refresh(identity);
   }
+  firstPass(
+    recognition: Recognition,
+    context?: GeographicContext,
+  ): Promise<PoiResolution> {
+    // First-pass ambiguity gets enrichment before ordinary no-match OSM fallback.
+    return this.telemetry.resolve(async () => {
+      try {
+        return adaptResolution(
+          await (this.primary.firstPass
+            ? this.primary.firstPass(recognition, context)
+            : this.primary.resolve(
+                recognition,
+                { status: 'no_evidence', candidates: [], references: [] },
+                context,
+              )),
+        );
+      } catch (error) {
+        if (
+          !(error instanceof GooglePlacesFailure) ||
+          error.code !== 'google_places_transient_failure'
+        )
+          throw error;
+        this.diagnostic('google_places_fallback_used');
+        return this.telemetry.measure(
+          'nominatim',
+          async () =>
+            adaptResolution(
+              await this.fallback.resolve(
+                recognition,
+                { status: 'no_evidence', candidates: [], references: [] },
+                context,
+              ),
+            ),
+          resolutionStatus,
+        );
+      }
+    });
+  }
   resolve(
     recognition: Recognition,
     verification: Verification,
@@ -35,13 +73,8 @@ export class FallbackPoi implements PoiProvider {
     return this.telemetry.resolve(async () => {
       let result: PoiResolution;
       try {
-        result = await this.telemetry.measure(
-          'google_places',
-          async () =>
-            adaptResolution(
-              await this.primary.resolve(recognition, verification, context),
-            ),
-          resolutionStatus,
+        result = adaptResolution(
+          await this.primary.resolve(recognition, verification, context),
         );
       } catch (error) {
         if (

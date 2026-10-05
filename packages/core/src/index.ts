@@ -48,6 +48,10 @@ export interface SearchProvider {
   ): Promise<Verification>;
 }
 export interface PoiProvider {
+  firstPass?(
+    recognition: Recognition,
+    context?: GeographicContext,
+  ): Promise<PoiResolution>;
   refresh?(identity: { provider: string; id: string }): Promise<PlaceDisplay>;
   resolve(
     recognition: Recognition,
@@ -142,18 +146,42 @@ export class DiscoveryService {
     };
     let resolution: PoiResolution;
     try {
-      const verified = VerificationSchema.parse(
-        await this.verification.search.verify(discovery.recognition, context),
-      );
-      const adapted = PoiResolutionSchema.safeParse(
-        await this.verification.poi.resolve(
-          discovery.recognition,
-          verified,
-          context,
-        ),
-      );
-      if (!adapted.success) throw new ProviderFailure('poi_adaptation_failed');
-      resolution = adapted.data;
+      const adapt = (raw: unknown) => {
+        const parsed = PoiResolutionSchema.safeParse(raw);
+        if (!parsed.success) throw new ProviderFailure('poi_adaptation_failed');
+        return parsed.data;
+      };
+      const first = this.verification.poi.firstPass
+        ? adapt(
+            await this.verification.poi.firstPass(
+              discovery.recognition,
+              context,
+            ),
+          )
+        : undefined;
+      if (
+        first?.status === 'resolved' ||
+        (first?.status === 'unresolved' && first.reason === 'no_place_evidence')
+      ) {
+        resolution = first;
+      } else {
+        const verified = VerificationSchema.parse(
+          await this.verification.search.verify(discovery.recognition, context),
+        );
+        const enriched = adapt(
+          await this.verification.poi.resolve(
+            discovery.recognition,
+            verified,
+            context,
+          ),
+        );
+        resolution =
+          first?.status === 'city_unknown' &&
+          enriched.status === 'unresolved' &&
+          ['no_match', 'insufficient_evidence'].includes(enriched.reason)
+            ? first
+            : enriched;
+      }
     } catch (error) {
       return this.recordFailure(discovery, error);
     }

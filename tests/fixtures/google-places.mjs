@@ -60,12 +60,14 @@ export const row = {
 };
 export const token = 'fixture-access-token';
 export const project = 'fixture-project';
-export function googleFixture(body = { places: [row] }, request) {
+export function googleFixture(body = { places: [row] }, request, telemetry) {
   return new GooglePlacesPoi(
     async () => token,
     project,
     request ??
       (async () => new Response(JSON.stringify(body), { status: 200 })),
     () => Date.parse('2026-01-01T00:00:00.000Z'),
+    undefined,
+    telemetry,
   );
 }
