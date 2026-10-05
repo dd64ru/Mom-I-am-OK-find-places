@@ -192,6 +192,7 @@ export class TelegramInteractions {
     replyTo: number,
     statusId: string,
     editMessageId?: number,
+    controlsOnly = false,
   ) {
     const rootToken = this.token(discovery, 'multi');
     const existing = await this.docs.change(this.path(rootToken), (raw) => ({
@@ -200,36 +201,42 @@ export class TelegramInteractions {
     if (existing && !editMessageId) return;
     const selected = new Set(discovery.selectedCandidateIndices ?? []);
     const cards: string[] = [],
+      overview: string[] = [],
       keyboard: { text: string; callback_data: string }[][] = [];
     const tokens = [rootToken];
     for (let index = 0; index < discovery.candidates.length; index++) {
-      const candidate = await this.service.displayCandidate(discovery, index);
-      if (!candidate) {
-        const current = await this.repository.getDiscovery(
-          this.workspace,
-          discovery.id,
-        );
-        if (current?.status === 'failed')
-          return this.propose(current, userId, replyTo, statusId);
-        return;
-      }
       const token = this.token(discovery, `selection-${index}`);
       tokens.push(token);
-      const link =
-        candidate.references.find((r) => r.provider === 'google-places')?.url ??
-        '';
-      const relation =
-        candidate.relationship === 'likely_exact'
-          ? 'Вероятно место с фото'
-          : candidate.relationship?.startsWith('related_')
-            ? 'Связанная точка сети (предположение)'
-            : 'Возможный вариант';
-      cards.push(
-        `${index + 1}. ${candidate.canonicalName.slice(0, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city?.slice(0, 40) ?? 'не указан'}\n${candidate.address.formatted.slice(0, 80)}\n${link}\nИсточник: Google Maps${(candidate.attributions ?? []).map((a) => '\n' + renderAttribution(a)).join('')}`,
-      );
+      if (!controlsOnly) {
+        const candidate = await this.service.displayCandidate(discovery, index);
+        if (!candidate) {
+          const current = await this.repository.getDiscovery(
+            this.workspace,
+            discovery.id,
+          );
+          if (current?.status === 'failed')
+            return this.propose(current, userId, replyTo, statusId);
+          return;
+        }
+        const link =
+          candidate.references.find((r) => r.provider === 'google-places')
+            ?.url ?? '';
+        const relation =
+          candidate.relationship === 'likely_exact'
+            ? 'Вероятно место с фото'
+            : candidate.relationship?.startsWith('related_')
+              ? 'Связанная точка сети (предположение)'
+              : 'Возможный вариант';
+        overview.push(
+          `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
+        );
+        cards.push(
+          `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${(candidate.address.city ? compact(candidate.address.city, 40) : undefined) ?? 'не указан'}\n${compact(candidate.address.formatted, 80)}\n${link}\nИсточник: Google Maps${(candidate.attributions ?? []).map((a) => '\n' + renderAttribution(a, true)).join('')}`,
+        );
+      }
       keyboard.push([
         {
-          text: `${selected.has(index) ? '☑️' : '☐'} ${index + 1}. ${candidate.canonicalName.slice(0, 40)}`,
+          text: `${selected.has(index) ? '☑️' : '☐'} ${index + 1}`,
           callback_data: `p:${token}:s`,
         },
       ]);
@@ -249,20 +256,54 @@ export class TelegramInteractions {
       { text: '✏️ Изменить город', callback_data: `p:${rootToken}:e` },
       { text: '❌ Отмена', callback_data: `p:${rootToken}:x` },
     ]);
-    const text = `Нашёл несколько возможных мест. Уверенность выбора низкая — проверь на карте. Выбрано: ${selected.size}. Места сохраняются только после «Добавить выбранные».\n\n${cards.join('\n\n')}`;
-    if (text.length > 4000) throw new Error('telegram_shortlist_too_large');
-    const sent = await this.api.call(
-      editMessageId ? 'editMessageText' : 'sendMessage',
-      {
+    const intro =
+      'Нашёл несколько возможных мест. Проверь варианты на карте. Места сохраняются только после «Добавить выбранные».';
+    let messageId = editMessageId;
+    if (controlsOnly) {
+      await this.api.call('editMessageReplyMarkup', {
         chat_id: this.chat,
-        ...(editMessageId
-          ? { message_id: editMessageId }
-          : { reply_parameters: { message_id: replyTo } }),
-        text,
+        message_id: messageId,
         reply_markup: { inline_keyboard: keyboard },
-      },
-    );
-    const messageId = editMessageId ?? sent.message_id;
+      });
+    } else {
+      // Long credits use numbered continuation messages belonging to this menu.
+      // Only the final message has controls; no provider text is persisted.
+      const pages = telegramPages(`${intro}\n\n${cards.join('\n\n')}`);
+      const continuations = pages.length > 1 ? pages : [];
+      for (let page = 0; page < continuations.length; page++) {
+        const path = this.path(this.token(discovery, `multi-text-${page}`));
+        const sentAlready = await this.docs.change(path, (raw) => ({
+          result: raw?.messageId,
+        }));
+        if (sentAlready) continue;
+        const sent = await this.api.call('sendMessage', {
+          chat_id: this.chat,
+          reply_parameters: { message_id: replyTo },
+          text: continuations[page],
+          link_preview_options: { is_disabled: true },
+        });
+        await this.docs.change(path, (raw) => ({
+          value: raw ?? { messageId: sent.message_id },
+          result: undefined,
+        }));
+      }
+      const sent = await this.api.call(
+        editMessageId ? 'editMessageText' : 'sendMessage',
+        {
+          chat_id: this.chat,
+          ...(editMessageId
+            ? { message_id: editMessageId }
+            : { reply_parameters: { message_id: replyTo } }),
+          text:
+            pages.length > 1
+              ? `${intro}\n\n${overview.join('\n')}\n\nАдреса, Maps-ссылки и источники — в сообщениях выше.`
+              : pages[0],
+          link_preview_options: { is_disabled: true },
+          reply_markup: { inline_keyboard: keyboard },
+        },
+      );
+      messageId = editMessageId ?? Number(sent.message_id);
+    }
     for (const [i, token] of tokens.entries())
       await this.docs.change(this.path(token), (raw) => ({
         value: raw ?? {
@@ -549,6 +590,7 @@ export class TelegramInteractions {
             callback.messageId,
             discovery.id,
             state.messageId,
+            true,
           );
         }
       } else if (callback.action === 'city') {
@@ -707,13 +749,15 @@ function resolutionMessage(discovery: Discovery): string {
   return `${reasons[discovery.resolutionReason ?? ''] ?? 'Не удалось уверенно определить это место.'} Место не сохранено. Можно изменить город или отменить.`;
 }
 
-export function renderAttribution(value: {
-  provider: string;
-  providerUri?: string;
-}) {
-  const provider = value.provider
-    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
-    .slice(0, 1000);
+export function renderAttribution(
+  value: {
+    provider: string;
+    providerUri?: string;
+  },
+  full = false,
+) {
+  const provider = value.provider.replace(/[\u0000-\u001f\u007f]/gu, ' ');
+  const label = full ? provider : provider.slice(0, 1000);
   try {
     const url = new URL(value.providerUri ?? '');
     if (
@@ -722,9 +766,45 @@ export function renderAttribution(value: {
       !url.password &&
       url.href.length < 1500
     )
-      return provider + ' ' + url.href;
+      return label + (full ? '\n' : ' ') + url.href;
   } catch {
     /* Not every documented URI is a safe clickable web URL. */
   }
-  return provider;
+  return label;
+}
+
+// UTF-16 budgets are conservative for Telegram, including non-BMP text.
+function compact(value: string, budget: number) {
+  if (value.length <= budget) return value;
+  let end = budget - 1;
+  if (/[\uD800-\uDBFF]/u.test(value[end - 1] ?? '')) end--;
+  return value.slice(0, end) + '…';
+}
+function telegramPages(text: string): string[] {
+  const budget = 3800; // Reserve space for the continuation label.
+  const pages: string[] = [];
+  let page = '';
+  for (let line of text.split('\n')) {
+    while (line.length > budget) {
+      if (page) {
+        pages.push(page);
+        page = '';
+      }
+      let end = budget;
+      if (/[\uD800-\uDBFF]/u.test(line[end - 1] ?? '')) end--;
+      pages.push(line.slice(0, end));
+      line = line.slice(end);
+    }
+    if (page.length + line.length + 1 > budget) {
+      pages.push(page);
+      page = '';
+    }
+    page += (page ? '\n' : '') + line;
+  }
+  if (page) pages.push(page);
+  return pages.length === 1
+    ? pages
+    : pages.map(
+        (p, i) => `Варианты и источники (${i + 1}/${pages.length})\n${p}`,
+      );
 }

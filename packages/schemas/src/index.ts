@@ -372,7 +372,10 @@ export const DiscoverySchema = z
   .refine(
     (d) =>
       d.status === 'failed'
-        ? !!d.failureReason && d.candidates.length === 0 && !d.confirmedPlaceId
+        ? !!d.failureReason &&
+          d.candidates.length === 0 &&
+          !d.confirmedPlaceId &&
+          !d.confirmedPlaceIds
         : d.failureReason === undefined,
     'invalid_terminal_failure_state',
   )

@@ -773,10 +773,16 @@ export class GooglePlacesPoi implements PoiProvider {
           ? venueNameEvidence(signage, row.displayName.text).nameEvidence
           : undefined;
         const signExact =
-          signageMatch === 'exact' || signageMatch === 'reordered';
+          signageMatch === 'exact' ||
+          signageMatch === 'reordered' ||
+          signageMatch === 'distinctive_equivalent';
+        const signPartial =
+          signageMatch === 'strong_partial' || signageMatch === 'bounded_typo';
         const related =
           !!chain &&
-          (signage ? !signExact : identityStrength(evidence.nameEvidence) < 2);
+          (signage
+            ? !signExact && !signPartial
+            : identityStrength(evidence.nameEvidence) < 2);
         const relationship = related
           ? ('related_chain_location' as const)
           : (
@@ -835,10 +841,10 @@ export class GooglePlacesPoi implements PoiProvider {
             decision:
               identityDecision(evidence) === 'rejected_hard_conflict'
                 ? 'rejected_hard_conflict'
-                : weakEligible || related
-                  ? 'eligible_weak_alternative'
-                  : related
-                    ? 'eligible_related_location'
+                : related
+                  ? 'eligible_related_location'
+                  : weakEligible
+                    ? 'eligible_weak_alternative'
                     : identityDecision(evidence),
             seenInMultipleQueries: slot.queries.size > 1,
           });
@@ -1057,17 +1063,20 @@ export class GooglePlacesPoi implements PoiProvider {
     attempt: GoogleAttempt,
   ): Promise<PoiResolution | undefined> {
     if (attempt.relatedExpanded) return;
+    const eligibleSeeds = [...attempt.candidates.values()].filter(
+      (p) => !context.cityOverride || p.evidence.localityState === 'match',
+    );
     const clue = r.clues.find(
       (c) =>
         c.possibleChain &&
-        [...attempt.candidates.values()].some(
+        eligibleSeeds.some(
           (p) =>
             p.candidate.address.city &&
             supportedChainName(c.possibleChain!, p.candidate.canonicalName),
         ),
     );
     if (!clue?.possibleChain) return;
-    const city = [...attempt.candidates.values()].find(
+    const city = eligibleSeeds.find(
       (p) =>
         p.candidate.address.city &&
         supportedChainName(clue.possibleChain!, p.candidate.canonicalName),
@@ -1083,7 +1092,7 @@ export class GooglePlacesPoi implements PoiProvider {
       return;
     attempt.relatedExpanded = true;
     attempt.relatedQuery = `${clue.possibleChain} locations, ${city}`;
-    const seed = [...attempt.candidates.values()].find(
+    const seed = eligibleSeeds.find(
       (p) => p.candidate.address.city === city,
     )!.candidate;
     const normalized: Verification = {

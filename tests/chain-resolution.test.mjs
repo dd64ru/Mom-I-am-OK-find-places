@@ -237,3 +237,168 @@ test('legacy single confirmation parses; multi-confirmed associations backfill e
     true,
   );
 });
+
+for (const [signage, display, expectedEvidence, expectedRelationship] of [
+  ['Grand Juniper', 'Juniper', 'distinctive_equivalent', 'likely_exact'],
+  ['Junipera', 'Junipera Riverside', 'strong_partial', 'plausible_exact'],
+  ['Juniperra', 'Junipera', 'bounded_typo', 'plausible_exact'],
+  [
+    'Juniper Garden',
+    'Juniper Riverside Bistro',
+    'weak',
+    'related_chain_location',
+  ],
+])
+  test(`signage ${expectedEvidence} with supported chain remains ${expectedRelationship}`, async () => {
+    const { venueNameEvidence } =
+      await import('../packages/providers/dist/place-matching.js');
+    assert.equal(
+      venueNameEvidence(signage, display).nameEvidence,
+      expectedEvidence,
+    );
+    const chain =
+      expectedEvidence === 'strong_partial' ||
+      expectedEvidence === 'bounded_typo'
+        ? 'Junipera'
+        : 'Juniper';
+    const events = [];
+    const poi = new GooglePlacesPoi(
+      async () => 'fixture-token',
+      'fixture-project',
+      async () => Response.json({ places: [row('venue', display)] }),
+      Date.now,
+      (e) => events.push(e),
+    );
+    const result = await poi.firstPass(
+      {
+        visibleText: [],
+        clues: [
+          {
+            name: chain,
+            signage,
+            possibleChain: chain,
+            aliases: [],
+            category: 'restaurant',
+            confidence: 0.5,
+          },
+        ],
+      },
+      { cityOverride: 'Vesper' },
+    );
+    assert.equal(result.status, 'resolved');
+    assert.equal(result.candidate.relationship, expectedRelationship);
+    const decisions = events.filter(
+      (e) => e.event === 'google_places_candidate',
+    );
+    assert.ok(decisions.length);
+    if (expectedRelationship === 'related_chain_location')
+      assert.ok(
+        decisions.every((e) => e.decision === 'eligible_related_location'),
+      );
+    else
+      assert.ok(
+        decisions.every((e) => e.decision !== 'eligible_related_location'),
+      );
+    assert.doesNotMatch(
+      JSON.stringify(events),
+      /Juniper|Vesper|fixture-token|20 Road/u,
+    );
+  });
+
+for (const [label, context, intent, expected] of [
+  [
+    'unknown cross-script explicit locality',
+    { cityOverride: 'Веспер' },
+    undefined,
+    0,
+  ],
+  [
+    'positively normalized explicit locality',
+    { cityOverride: 'Веспер' },
+    {
+      input: 'Веспер',
+      canonicalName: 'Vesper',
+      aliases: ['Веспер'],
+      confidence: 0.95,
+      countryCode: 'FR',
+    },
+    1,
+  ],
+  ['no explicit locality', {}, undefined, 1],
+])
+  test(`${label}: provider city scopes expansion only with required corroboration`, async () => {
+    const f = fixture(),
+      attempt = f.poi.beginAttempt();
+    const verification = {
+      ...noEvidence,
+      ...(intent ? { localityIntent: intent } : {}),
+    };
+    const first = await attempt.firstPass(recognition, context, verification);
+    const result = await attempt.resolve(recognition, verification, context);
+    assert.equal(result.status, 'alternatives');
+    assert.equal(result.candidates[0].address.city, 'Vesper');
+    assert.equal(
+      f.requests.filter((q) => q.textQuery === 'Juniper locations, Vesper')
+        .length,
+      expected,
+    );
+    assert.ok(f.requests.length <= 4 + expected);
+    assert.equal(first.status, 'alternatives');
+  });
+
+test('Discovery invariants reject failed confirmations, duplicate/mismatched IDs and missing selections while accepting legacy documents', () => {
+  const base = {
+    id: 'invariants',
+    workspaceId: 'fixture',
+    source: { provider: 'fixture', observedAt: '2026-01-01T00:00:00.000Z' },
+    recognition,
+    candidates: [],
+    visionProvider: 'fixture',
+    status: 'failed',
+    failureReason: 'poi_adaptation_failed',
+    createdAt: '2026-01-01T00:00:00.000Z',
+  };
+  assert.equal(DiscoverySchema.safeParse(base).success, true);
+  for (const patch of [
+    { confirmedPlaceId: 'p1' },
+    { confirmedPlaceIds: ['p1'] },
+  ])
+    assert.equal(
+      DiscoverySchema.safeParse({ ...base, ...patch }).success,
+      false,
+    );
+  const candidate = {
+    resolution: 'deterministic_poi',
+    providerIdentity: { provider: 'google-places', id: 'fixture' },
+    references: [
+      {
+        provider: 'google-places',
+        externalId: 'fixture',
+        observedAt: base.createdAt,
+      },
+    ],
+  };
+  const confirmed = {
+    ...base,
+    failureReason: undefined,
+    status: 'confirmed',
+    candidates: [candidate],
+    confirmedPlaceId: 'p1',
+  };
+  assert.equal(DiscoverySchema.safeParse(confirmed).success, true);
+  assert.equal(
+    DiscoverySchema.safeParse({ ...confirmed, confirmedPlaceIds: ['p1'] })
+      .success,
+    true,
+  );
+  for (const patch of [
+    { confirmedPlaceIds: ['p1', 'p1'] },
+    { confirmedPlaceIds: ['p2', 'p1'] },
+    { selectedCandidateIndices: [1] },
+    { selectedCandidateIndices: [0, 0] },
+  ])
+    assert.equal(
+      DiscoverySchema.safeParse({ ...confirmed, ...patch }).success,
+      false,
+    );
+});

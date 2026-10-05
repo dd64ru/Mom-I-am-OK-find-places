@@ -219,6 +219,7 @@ async function setup(options = {}) {
   let messageId = 100;
   const api = {
     call: async (method, body) => {
+      options.telegramFailure?.(method);
       sent.push({ method, body });
       return { message_id: ++messageId };
     },
@@ -2994,7 +2995,9 @@ for (const [official, locality, tier, wording] of [
 function multiButton(f, action = 'select', index = 0) {
   const message = f.sent.findLast(
     (m) =>
-      ['sendMessage', 'editMessageText'].includes(m.method) &&
+      ['sendMessage', 'editMessageText', 'editMessageReplyMarkup'].includes(
+        m.method,
+      ) &&
       m.body.reply_markup?.inline_keyboard
         ?.flat()
         .some((b) => b.callback_data.endsWith(':a')),
@@ -3025,17 +3028,20 @@ function multiButton(f, action = 'select', index = 0) {
 function selectionButton(f, index = 0) {
   return multiButton(f, 'select', index);
 }
-async function shortlistWorkflow(count = 3) {
-  const rows = Array.from({ length: count }, (_, i) => i).map((i) => ({
-    ...googleRow,
-    id: `fixture-shortlist-${i}`,
-    displayName: { text: `Juniper Museum Branch ${i}` },
-    types: ['museum'],
-  }));
+async function shortlistWorkflow(count = 3, transform = (row) => row) {
+  const rows = Array.from({ length: count }, (_, i) => i)
+    .map((i) => ({
+      ...googleRow,
+      id: `fixture-shortlist-${i}`,
+      displayName: { text: `Juniper Museum Branch ${i}` },
+      types: ['museum'],
+    }))
+    .map(transform);
   const events = [],
     requests = [];
   let refreshes = 0,
-    failRefresh = false;
+    failRefresh = false,
+    failMarkup = false;
   const poi = new GooglePlacesPoi(
     async () => googleToken,
     googleProject,
@@ -3052,6 +3058,10 @@ async function shortlistWorkflow(count = 3) {
     (e) => events.push(e),
   );
   const f = await setup({
+    telegramFailure: (method) => {
+      if (failMarkup && method === 'editMessageReplyMarkup')
+        throw new Error('telegram_request_failed');
+    },
     recognition: {
       visibleText: ['PRIVATE_USER_TEXT'],
       clues: [
@@ -3074,6 +3084,9 @@ async function shortlistWorkflow(count = 3) {
     events,
     requests,
     refreshes: () => refreshes,
+    setMarkupFailure: (value) => {
+      failMarkup = value;
+    },
     setRefreshFailure: (value) => {
       failRefresh = value;
     },
@@ -3186,13 +3199,14 @@ test('multi-selection retries, competing choices, expiry and cancellation are re
   assert.equal(d.candidates.length, 3);
   const next = selectionButton(f, 1);
   f.setRefreshFailure(true);
+  f.setMarkupFailure(true);
   await assert.rejects(f.interactions.callback(next), {
-    message: 'google_places_transient_failure',
+    message: 'telegram_request_failed',
   });
   d = await f.repository.getDiscovery('fixture', f.d.id);
   const indices = d.selectedCandidateIndices;
   assert.equal(await f.interactions.canCallback(next), true);
-  f.setRefreshFailure(false);
+  f.setMarkupFailure(false);
   await f.interactions.callback(next);
   assert.deepEqual(
     (await f.repository.getDiscovery('fixture', f.d.id))
@@ -3349,4 +3363,226 @@ test('linguistic city normalization runs before Google first pass without venue 
     'needs_confirmation',
   );
   assert.deepEqual(events, ['normalize', 'google']);
+});
+
+for (const [kind, normalizeLocality, expected] of [
+  ['undefined', async () => undefined, 'unavailable'],
+  [
+    'exception',
+    async () => {
+      throw new Error('PRIVATE_CITY_TOKEN_OUTPUT');
+    },
+    'unavailable',
+  ],
+  [
+    'low confidence',
+    async (city) => ({
+      input: city,
+      canonicalName: 'Vesper',
+      aliases: [],
+      confidence: 0.4,
+    }),
+    'invalid',
+  ],
+  [
+    'invalid binding',
+    async () => ({
+      input: 'OTHER_PRIVATE_CITY',
+      canonicalName: 'Vesper',
+      aliases: [],
+      confidence: 0.95,
+    }),
+    'invalid',
+  ],
+])
+  test(`normalization ${kind} does not cause webhook retry and deterministic search uses raw city without aliases`, async () => {
+    const f = await setup();
+    let searched = 0;
+    const service = new DiscoveryService(
+      f.repository,
+      {
+        name: 'fixture',
+        recognize: async () => ({ provider: 'fixture', recognition }),
+      },
+      {
+        search: {
+          normalizeLocality,
+          verify: async () => assert.fail('no venue verification needed'),
+        },
+        poi: {
+          firstPass: async (_r, context, normalization) => {
+            searched++;
+            assert.equal(context.cityOverride, 'Веспер');
+            assert.equal(normalization.localityIntent, undefined);
+            return { status: 'resolved', candidate };
+          },
+          resolve: async () => assert.fail('no second pass'),
+        },
+      },
+    );
+    const pending = await f.repository.createDiscovery({
+      id: 'normalization-failure',
+      workspaceId: 'fixture',
+      source: { provider: 'fixture', observedAt: time },
+      recognition,
+      candidates: [],
+      visionProvider: 'fixture',
+      status: 'awaiting_city',
+      revision: 0,
+      createdAt: time,
+    });
+    const logs = [],
+      old = console.info;
+    console.info = (value) => logs.push(value);
+    let outcome;
+    try {
+      outcome = await handleWebhook(
+        {
+          method: 'POST',
+          contentType: 'application/json',
+          secret: 'fixture-header',
+          rawBody: Buffer.from(
+            JSON.stringify(update({ photo: [{ file_id: 'fixture' }] })),
+          ),
+        },
+        {
+          policy,
+          username: 'fixture_bot',
+          secret: async () => 'fixture-header',
+          accept: async () => {
+            const d = await service.correctCity(pending, 'Веспер');
+            assert.equal(d.status, 'needs_confirmation');
+            return 'done';
+          },
+        },
+      );
+    } finally {
+      console.info = old;
+    }
+    assert.equal(outcome.status, 200);
+    assert.equal(searched, 1);
+    assert.deepEqual(logs.map(JSON.parse), [
+      { event: 'locality_normalization', outcome: expected },
+    ]);
+  });
+
+test('eight-candidate Google request counts: initial reconstruction 8; toggle/all/clear/confirm each 0', async () => {
+  const f = await shortlistWorkflow(8);
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', f.d.id),
+    11,
+    1,
+  );
+  assert.equal(f.refreshes(), 8);
+  const beforeText = f.sent
+    .filter((m) => m.method === 'sendMessage' && m.body.reply_markup)
+    .map((m) => m.body.text);
+  const textSearchRequests = f.requests.length;
+  f.setRefreshFailure(true); // Controls and confirmation must work even when Details is unavailable.
+  for (const action of ['select', 'all', 'clear', 'all', 'confirm']) {
+    const before = f.refreshes();
+    await f.interactions.callback(multiButton(f, action));
+    assert.equal(f.refreshes() - before, 0, `${action} must not refresh`);
+    assert.equal(f.requests.length, textSearchRequests);
+  }
+  assert.deepEqual(
+    f.sent
+      .filter((m) => m.method === 'sendMessage' && m.body.reply_markup)
+      .map((m) => m.body.text),
+    beforeText,
+  );
+  assert.equal(f.sent.filter((m) => m.method === 'editMessageText').length, 0);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).confirmedPlaceIds
+      .length,
+    8,
+  );
+  assert.ok(
+    f.sent.some((m) =>
+      m.body.reply_markup?.inline_keyboard
+        ?.flat()
+        .some((b) => b.text === '✅ Добавить выбранные (8)'),
+    ),
+  );
+});
+
+test('maximum shortlist with long non-BMP names/addresses/credits has bounded continuation messages, usable Maps links and all eight controls', async () => {
+  const f = await shortlistWorkflow(8, (row) => ({
+    ...row,
+    displayName: { text: row.displayName.text + ' 🏛️'.repeat(500) },
+    formattedAddress: 'Long street 🗺️'.repeat(800),
+    attributions: Array.from({ length: 3 }, (_, i) => ({
+      provider: `Credit ${i} ` + '🧭'.repeat(2500),
+      providerUri: `https://example.org/credit-${i}/` + 'a'.repeat(1200),
+    })),
+  }));
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', f.d.id),
+    11,
+    1,
+  );
+  assert.equal(f.refreshes(), 8);
+  const texts = f.sent
+    .filter((m) => m.method === 'sendMessage')
+    .map((m) => m.body.text);
+  assert.ok(texts.length > 1);
+  for (const text of texts) {
+    assert.ok(text.length <= 4000, text.length);
+    assert.equal(text.isWellFormed(), true);
+  }
+  const combined = texts.join('\n');
+  assert.match(combined, /Источник: Google Maps/u);
+  for (const row of f.rows) {
+    const maps = f.d.candidates
+      .find((c) => c.providerIdentity.id === row.id)
+      .references.find((r) => r.provider === 'google-places').url;
+    assert.ok(texts.some((text) => text.includes(maps)));
+    for (const credit of row.attributions)
+      assert.ok(combined.includes(credit.providerUri));
+  }
+  const buttons = f.sent.at(-1).body.reply_markup.inline_keyboard.flat();
+  assert.equal(buttons.filter((b) => b.callback_data.endsWith(':s')).length, 8);
+  for (const b of buttons) {
+    assert.ok(b.text.length < 64);
+    assert.ok(Buffer.byteLength(b.callback_data) <= 64);
+    assert.doesNotMatch(b.callback_data, /Juniper|Credit|fixture-shortlist/u);
+  }
+  const initialMessages = f.sent.length;
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', f.d.id),
+    11,
+    1,
+  );
+  assert.equal(f.sent.length, initialMessages);
+  await f.interactions.callback(multiButton(f, 'all'));
+  await f.interactions.callback(multiButton(f, 'confirm'));
+  assert.equal(f.refreshes(), 8);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).confirmedPlaceIds
+      .length,
+    8,
+  );
+  assert.doesNotMatch(
+    JSON.stringify([...f.db.values.values(), ...f.docs.values.values()]),
+    /Long street|Credit|🧭|🏛️|attributions/u,
+  );
+});
+
+test('confirmed and cancelled Discoveries ignore stale selection state and callbacks', async () => {
+  for (const action of ['confirm', 'cancel']) {
+    const f = await shortlistWorkflow();
+    await f.interactions.propose(f.d, 11, 1);
+    await f.interactions.callback(multiButton(f, 'all'));
+    const stale = selectionButton(f);
+    await f.interactions.callback(multiButton(f, action));
+    const before = structuredClone([...f.db.values]);
+    await f.interactions.callback(stale);
+    const terminal = await f.repository.getDiscovery('fixture', f.d.id);
+    assert.equal((await f.service.finish(terminal, 'confirm')).changed, false);
+    assert.deepEqual([...f.db.values], before);
+    assert.equal(
+      [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+      action === 'confirm' ? 3 : 0,
+    );
+  }
 });

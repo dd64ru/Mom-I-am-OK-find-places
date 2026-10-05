@@ -158,12 +158,37 @@ export class DiscoveryService {
         if (!parsed.success) throw new ProviderFailure('poi_adaptation_failed');
         return parsed.data;
       };
-      const intent =
-        context.cityOverride && this.verification.search.normalizeLocality
-          ? await this.verification.search.normalizeLocality(
-              context.cityOverride,
-            )
-          : undefined;
+      let intent: Verification['localityIntent'];
+      if (context.cityOverride && this.verification.search.normalizeLocality) {
+        let outcome: 'ok' | 'unavailable' | 'invalid' = 'unavailable';
+        try {
+          const raw = await this.verification.search.normalizeLocality(
+            context.cityOverride,
+          );
+          if (raw !== undefined) {
+            const parsed =
+              VerificationSchema.shape.localityIntent.safeParse(raw);
+            if (
+              parsed.success &&
+              parsed.data &&
+              parsed.data.confidence >= 0.9 &&
+              parsed.data.input === context.cityOverride
+            ) {
+              intent = parsed.data;
+              outcome = 'ok';
+            } else outcome = 'invalid';
+          }
+        } catch {
+          // Auxiliary linguistic enrichment must never block deterministic search.
+        }
+        try {
+          console.info(
+            JSON.stringify({ event: 'locality_normalization', outcome }),
+          );
+        } catch {
+          /* best effort */
+        }
+      }
       const normalization: Verification = {
         status: 'no_evidence',
         candidates: [],
