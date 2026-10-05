@@ -160,7 +160,7 @@ def cloud(*args, **kwargs):
     raise AssertionError('unexpected cloud operation')
 m.cloud = cloud
 shutil.which = lambda _: '/fixture/gcloud'
-urllib.request.urlopen = lambda *a, **k: io.BytesIO(json.dumps({'id': 123, 'owner': {'id': 456}}).encode())
+urllib.request.urlopen = lambda *a, **k: io.BytesIO(json.dumps({'id': 1404706412, 'owner': {'id': 26544806}}).encode())
 with contextlib.redirect_stdout(io.StringIO()):
     try:
         m.main('--apply')

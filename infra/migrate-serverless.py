@@ -10,6 +10,7 @@ import sys
 PROJECT = 'mom-im-ok-places'
 REGION = 'europe-west3'
 REPOSITORY = 'dd64ru/Mom-I-am-OK-find-places'
+REPOSITORY_ID, REPOSITORY_OWNER_ID = '1404706412', '26544806'
 RUNTIME = f'places-runtime@{PROJECT}.iam.gserviceaccount.com'
 DEPLOY = f'places-deploy@{PROJECT}.iam.gserviceaccount.com'
 POOL, PROVIDER = 'places-github', 'github-main'
@@ -19,6 +20,29 @@ SECRETS = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_WEBHOOK_SECRET', 'O
 
 def fail(code):
     raise RuntimeError(code)
+
+
+def wif_configuration(repo):
+    # Pin public immutable identities: a renamed/recreated/transferred repository needs review.
+    if str(repo.get('id')) != REPOSITORY_ID or str(repo.get('owner', {}).get('id')) != REPOSITORY_OWNER_ID:
+        fail('github_repository_identity_requires_owner_review')
+    mapping = {'google.subject': 'assertion.sub', 'attribute.repository_id': 'assertion.repository_id', 'attribute.repository_owner_id': 'assertion.repository_owner_id', 'attribute.ref': 'assertion.ref', 'attribute.environment': 'assertion.environment', 'attribute.event_name': 'assertion.event_name'}
+    trust = f"attribute.repository_id == '{REPOSITORY_ID}' && attribute.repository_owner_id == '{REPOSITORY_OWNER_ID}' && attribute.ref == 'refs/heads/main' && attribute.environment == 'production' && attribute.event_name == 'workflow_dispatch'"
+    legacy_mapping = {'google.subject': 'assertion.sub', 'attribute.repository_id': 'assertion.repository_id'}
+    legacy_trust = f"assertion.repository_id == '{REPOSITORY_ID}' && assertion.repository_owner_id == '{REPOSITORY_OWNER_ID}' && assertion.repository == '{REPOSITORY}' && assertion.ref == 'refs/heads/main' && assertion.sub == 'repo:{REPOSITORY}:environment:production'"
+    return mapping, trust, legacy_mapping, legacy_trust
+
+
+def wif_provider_state(provider, mapping, trust, legacy_mapping, legacy_trust):
+    if provider is None:
+        return 'create'
+    if provider.get('disabled') or provider.get('oidc') != {'issuerUri': 'https://token.actions.githubusercontent.com'} or any(key in provider for key in ['aws', 'saml']):
+        fail('existing_wif_provider_mismatch')
+    if provider.get('attributeMapping') == mapping and provider.get('attributeCondition') == trust:
+        return 'reuse'
+    if provider.get('attributeMapping') == legacy_mapping and provider.get('attributeCondition') == legacy_trust:
+        return 'upgrade'
+    fail('existing_wif_provider_mismatch')
 
 
 def canonical_build_email(build, project_number):
@@ -158,12 +182,10 @@ def main(mode):
     # Verify numeric identity from public GitHub metadata, not a name-only trust.
     import urllib.request
     repo = json.load(urllib.request.urlopen('https://api.github.com/repos/' + REPOSITORY, timeout=20))
-    trust = f"assertion.repository_id == '{repo['id']}' && assertion.repository_owner_id == '{repo['owner']['id']}' && assertion.repository == '{REPOSITORY}' && assertion.ref == 'refs/heads/main' && assertion.sub == 'repo:{REPOSITORY}:environment:production'"
-    mapping = {'google.subject': 'assertion.sub', 'attribute.repository_id': 'assertion.repository_id'}
+    mapping, trust, legacy_mapping, legacy_trust = wif_configuration(repo)
     if pool and (pool.get('state') != 'ACTIVE' or pool.get('disabled')):
         fail('existing_wif_pool_inactive')
-    if provider and (provider.get('attributeCondition') != trust or provider.get('attributeMapping') != mapping or provider.get('oidc', {}).get('issuerUri') != 'https://token.actions.githubusercontent.com' or provider.get('disabled')):
-        fail('existing_wif_provider_mismatch')
+    provider_state = wif_provider_state(provider, mapping, trust, legacy_mapping, legacy_trust)
     if pool and any(not p['name'].endswith('/providers/' + PROVIDER) for p in cloud('iam', 'workload-identity-pools', 'providers', 'list', '--location=global', '--workload-identity-pool=' + POOL)):
         fail('unexpected_provider_in_dedicated_pool')
     principal = f'principalSet://iam.googleapis.com/projects/{number}/locations/global/workloadIdentityPools/{POOL}/attribute.repository_id/{repo["id"]}'
@@ -171,7 +193,7 @@ def main(mode):
         sa_policy = cloud('iam', 'service-accounts', 'get-iam-policy', DEPLOY)
         if any(b['role'] == 'roles/iam.workloadIdentityUser' and (b['members'] != [principal] or b.get('condition')) for b in sa_policy.get('bindings', [])):
             fail('existing_federation_binding_mismatch')
-    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': bool(provider), 'mode': mode}))
+    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': provider_state == 'reuse', 'wifProviderAction': provider_state, 'mode': mode}))
     if mode == '--plan':
         return
     # All legacy preflight checks above are read-only; only apply mutates resources.
@@ -230,8 +252,9 @@ def main(mode):
         binding((['iam', 'service-accounts'], build_email), deploy_member, 'roles/iam.serviceAccountUser')
     if not pool:
         cloud('iam', 'workload-identity-pools', 'create', POOL, '--location=global')
-    if not provider:
-        cloud('iam', 'workload-identity-pools', 'providers', 'create-oidc', PROVIDER, '--location=global', '--workload-identity-pool=' + POOL, '--issuer-uri=https://token.actions.githubusercontent.com', '--attribute-mapping=google.subject=assertion.sub,attribute.repository_id=assertion.repository_id', '--attribute-condition=' + trust)
+    if provider_state != 'reuse':
+        operation = 'update-oidc' if provider_state == 'upgrade' else 'create-oidc'
+        cloud('iam', 'workload-identity-pools', 'providers', operation, PROVIDER, '--location=global', '--workload-identity-pool=' + POOL, '--issuer-uri=https://token.actions.githubusercontent.com', '--attribute-mapping=' + ','.join(key + '=' + value for key, value in mapping.items()), '--attribute-condition=' + trust)
     binding((['iam', 'service-accounts'], DEPLOY), principal, 'roles/iam.workloadIdentityUser')
     print(json.dumps({'GCP_PROJECT_ID': PROJECT, 'GCP_WIF_PROVIDER': f'projects/{number}/locations/global/workloadIdentityPools/{POOL}/providers/{PROVIDER}', 'GCP_DEPLOY_SERVICE_ACCOUNT': DEPLOY, 'region': REGION, 'buildAccount': build_email, 'functionNotDeployed': True, 'secretsHaveNoNewPayloads': True}))
 

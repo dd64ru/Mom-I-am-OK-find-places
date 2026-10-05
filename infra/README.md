@@ -20,7 +20,7 @@ From an authenticated owner Cloud Shell checkout of current `main`:
 python3 infra/migrate-serverless.py --plan
 ```
 
-Plan reads resource/IAM metadata and public GitHub repository identifiers; it never reads secret payloads or mutates cloud resources. It verifies the database location, VM/disk absence, old network/firewall/role shapes, and existing repository/main/production WIF trust. Review its safe summary, then run:
+Plan reads resource/IAM metadata and public GitHub repository identifiers; it never reads secret payloads or mutates cloud resources. It verifies the database location, VM/disk absence, old network/firewall/role shapes, and existing repository/main/production WIF trust. Its `wifProviderAction` is `create`, `reuse` or `upgrade`. Review its safe summary, then run:
 
 ```sh
 python3 infra/migrate-serverless.py --apply
@@ -31,6 +31,16 @@ Apply removes only the recognized abandoned firewall/subnet/network, Compute rea
 Serverless APIs, artifact retention and deployment IAM are prepared. Deploy gets `cloudfunctions.developer`, `serviceUsageConsumer` and a small Firebase metadata/function-invoker policy role; `actAs` applies to the runtime and effective build account, not all accounts. No Compute/IAP/SSH or direct secret access is retained. The current effective Cloud Build default is inspected: it receives Google's documented `cloudbuild.builds.builder` role; legacy Google-managed build identities do not receive an unsupported `actAs` binding. An effective build identity with Owner/Editor requires owner review. These deployment/build privileges are trusted: deploying code can indirectly use runtime permissions even though CI has no secret accessor role.
 
 Migration is not a cross-service transaction; already-completed steps can remain after an interruption. Reinspect and rerun. Do not widen permissions merely to suppress a failure. The script does not disable shared APIs, delete service accounts/WIF, or touch unrelated resources.
+
+### GitHub OIDC trust and legacy provider upgrade
+
+GitHub repositories created after July 15, 2026 use immutable default OIDC subjects containing owner/repository IDs. This repository was created October 4, 2026. Authorization must not depend on the former exact `repo:dd64ru/Mom-I-am-OK-find-places:environment:production` subject. See [GitHub's documented OIDC claims and immutable subjects](https://docs.github.com/en/actions/reference/security/oidc).
+
+The provider still maps `google.subject = assertion.sub`, but production authorization uses explicit mapped attributes: `repository_id == 1404706412`, `repository_owner_id == 26544806`, `ref == refs/heads/main`, `environment == production`, and `event_name == workflow_dispatch`. The last condition restricts access to the existing manual deployment event, including rejection of `pull_request_target` even when its ref is main. Other repositories, owners, branches, tags, environments, PR events and name-only claims are rejected. Public GitHub metadata must agree with the pinned immutable IDs; changed identity requires owner review.
+
+An exactly matching current provider is reused. Only the exact legacy mapping/condition produced by the previous migration, with the same GitHub issuer and no disabled/custom-audience configuration, is eligible for `upgrade`. Plan reports this without writes. Owner-run apply uses `gcloud iam workload-identity-pools providers update-oidc` to replace the mapping and condition in place. It preserves pool/provider IDs, deploy account, repository-ID principalSet and the `GCP_WIF_PROVIDER` variable. No legacy-sub alternative is retained in the final condition. Any other mapping, condition or issuer fails closed with `existing_wif_provider_mismatch`; unrelated IAM remains subject to the existing migration guards.
+
+After reviewing this fix, update the owner Cloud Shell checkout with `git pull --ff-only`, run `python3 infra/migrate-serverless.py --plan` and verify `wifProviderAction: upgrade` (or `reuse` if already upgraded). Then run `python3 infra/migrate-serverless.py --apply`, followed by plan to verify `reuse`. This migration does not deploy the function or register the Telegram webhook.
 
 ## One-time IDs, secrets and SIWC import
 
