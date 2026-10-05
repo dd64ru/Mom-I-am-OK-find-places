@@ -22,7 +22,8 @@ interface Interaction {
   userId?: number;
   replyId?: number;
   city?: string;
-  action?: 'confirm' | 'city' | 'cancel';
+  action?: 'confirm' | 'city' | 'cancel' | 'select';
+  selectionIndex?: number;
   owner?: string;
   leaseUntil?: number;
 }
@@ -94,6 +95,8 @@ export class TelegramInteractions {
       await this.prompt(discovery, userId, replyTo);
       return;
     }
+    if (discovery.status === 'needs_selection')
+      return this.shortlist(discovery, userId, replyTo, statusId);
     const token = this.token(discovery);
     const state = await this.docs.change<Interaction>(
       this.path(token),
@@ -162,6 +165,76 @@ export class TelegramInteractions {
                 : resolutionMessage(discovery)
               ).slice(0, 4000),
             });
+      await this.docs.change(this.path(token), (raw) => ({
+        value: { ...raw, messageId: message.message_id },
+        result: undefined,
+      }));
+    }
+  }
+  private async shortlist(
+    discovery: DiscoveryView,
+    userId: number,
+    replyTo: number,
+    statusId: string,
+  ) {
+    for (let index = 0; index < discovery.candidates.length; index++) {
+      const token = this.token(discovery, `selection-${index}`);
+      const state = await this.docs.change<Interaction>(
+        this.path(token),
+        (raw) => {
+          const next: Interaction = {
+            discoveryId: discovery.id,
+            revision: discovery.revision,
+            expiresAt: this.now() + LIFETIME,
+            phase: 'active',
+            selectionIndex: index,
+          };
+          return {
+            value: raw ?? { ...next },
+            result: (raw ?? next) as unknown as Interaction,
+          };
+        },
+      );
+      if (state.messageId || state.phase !== 'active') continue;
+      const candidate = await this.service.displayCandidate(discovery, index);
+      if (!candidate) {
+        const current = await this.repository.getDiscovery(
+          this.workspace,
+          discovery.id,
+        );
+        if (current?.status === 'failed')
+          return this.propose(current, userId, replyTo, statusId);
+        return;
+      }
+      const link =
+        candidate.references.find((r) => r.provider === 'google-places')?.url ??
+        '';
+      const attribution = [
+        'Источник: Google Maps',
+        ...(candidate.attributions ?? []).map(renderAttribution),
+      ].join('\n');
+      const message = await this.api.call('sendMessage', {
+        chat_id: this.chat,
+        reply_parameters: { message_id: replyTo },
+        text: `Нашёл возможные варианты. Уверенность низкая — проверь на карте и выбери. Выбор ещё не сохраняет место.\n\n${index + 1}. ${candidate.canonicalName.slice(0, 300)}\n${link}\n${candidate.address.city ?? ''}\n${candidate.address.formatted.slice(0, 1500)}\n${attribution}`.slice(
+          0,
+          4000,
+        ),
+        reply_markup: {
+          inline_keyboard: [
+            [
+              {
+                text: `Выбрать вариант ${index + 1}`,
+                callback_data: `p:${token}:s`,
+              },
+            ],
+            [
+              { text: '✏️ Изменить город', callback_data: `p:${token}:e` },
+              { text: '❌ Отмена', callback_data: `p:${token}:x` },
+            ],
+          ],
+        },
+      });
       await this.docs.change(this.path(token), (raw) => ({
         value: { ...raw, messageId: message.message_id },
         result: undefined,
@@ -361,7 +434,12 @@ export class TelegramInteractions {
     if (state.phase === 'active')
       return (
         discovery.revision === state.revision &&
-        !['confirmed', 'cancelled', 'failed'].includes(discovery.status)
+        !['confirmed', 'cancelled', 'failed'].includes(discovery.status) &&
+        (callback.action !== 'select' ||
+          (state.selectionIndex !== undefined &&
+            discovery.status === 'needs_selection')) &&
+        (callback.action !== 'confirm' ||
+          discovery.status === 'needs_confirmation')
       );
     return (
       state.action === callback.action &&
@@ -370,7 +448,11 @@ export class TelegramInteractions {
         (discovery.revision === state.revision + 1 &&
           (callback.action === 'city'
             ? discovery.status === 'awaiting_city'
-            : ['confirmed', 'cancelled', 'failed'].includes(discovery.status))))
+            : callback.action === 'select'
+              ? discovery.status === 'needs_confirmation'
+              : ['confirmed', 'cancelled', 'failed'].includes(
+                  discovery.status,
+                ))))
     );
   }
   async callback(
@@ -401,7 +483,23 @@ export class TelegramInteractions {
         await this.done(callback.token, owner);
         return;
       }
-      if (callback.action === 'city') {
+      if (callback.action === 'select') {
+        if (
+          discovery.revision === state.revision &&
+          state.selectionIndex !== undefined
+        )
+          discovery = await this.service.selectAlternative(
+            discovery,
+            state.selectionIndex,
+          );
+        if (
+          discovery?.revision === state.revision + 1 &&
+          discovery.status === 'needs_confirmation'
+        ) {
+          await this.close(state.messageId);
+          await this.propose(discovery, callback.userId, callback.messageId);
+        }
+      } else if (callback.action === 'city') {
         if (discovery.revision === state.revision)
           discovery = await this.service.requestCity(discovery);
         if (

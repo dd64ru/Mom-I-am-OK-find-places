@@ -21,6 +21,7 @@ export type CandidateDecision =
   | 'accepted_partial_with_category'
   | 'rejected_hard_conflict'
   | 'ambiguous_competition'
+  | 'shortlist_required'
   | 'accepted_partial_uncorroborated'
   | 'insufficient_identity';
 export const hardConflict = (e: CandidateEvidence) =>
@@ -101,4 +102,15 @@ export type GoogleDecisionEvent = {
   runnerUpRankPermille: number;
   decision: CandidateDecision;
   candidateConfidence: CandidateConfidence | undefined;
+};
+
+export type GoogleCandidateEvent = Omit<
+  GoogleDecisionEvent,
+  'event' | 'runnerUpRankPermille' | 'decision'
+> & {
+  event: 'google_places_candidate';
+  candidateSlot: number;
+  providerRank: number;
+  seenInMultipleQueries: boolean;
+  decision: CandidateDecision | 'eligible_weak_alternative';
 };

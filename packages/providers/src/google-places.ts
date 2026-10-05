@@ -34,6 +34,7 @@ import {
   isAccepted,
   type CandidateEvidence,
   type GoogleDecisionEvent,
+  type GoogleCandidateEvent,
 } from './google-candidate-decision.js';
 export const GOOGLE_PLACES_ENDPOINT =
   'https://places.googleapis.com/v1/places:searchText';
@@ -237,7 +238,7 @@ export type GoogleFilterEvent = {
   countryCompatible: number;
   addressCompatible: number;
   accepted: number;
-  result: 'resolved' | 'ambiguous' | 'no_match';
+  result: 'resolved' | 'alternatives' | 'ambiguous' | 'no_match';
   rejected: {
     no_name_match: number;
     category_conflict: number;
@@ -258,6 +259,19 @@ export type GoogleSearchPlanEvent = {
   localityKnown: boolean;
   queriesPlanned: number;
 };
+type GoogleAttempt = {
+  truncated: boolean;
+  candidates: Map<
+    string,
+    { candidate: Candidate; evidence: CandidateEvidence }
+  >;
+  slots: Map<string, { slot: number; queries: Set<string> }>;
+};
+const newAttempt = (): GoogleAttempt => ({
+  candidates: new Map(),
+  slots: new Map(),
+  truncated: false,
+});
 export class GooglePlacesPoi implements PoiProvider {
   constructor(
     private readonly accessToken: () => Promise<string>,
@@ -269,7 +283,8 @@ export class GooglePlacesPoi implements PoiProvider {
         | GoogleFilterEvent
         | GoogleParseEvent
         | GoogleSearchPlanEvent
-        | GoogleDecisionEvent,
+        | GoogleDecisionEvent
+        | GoogleCandidateEvent,
     ) => void = () => {},
     private readonly telemetry = new PipelineTelemetry(),
   ) {
@@ -448,6 +463,22 @@ export class GooglePlacesPoi implements PoiProvider {
     return display.data;
   }
 
+  beginAttempt(): PoiProvider {
+    const attempt = newAttempt();
+    return {
+      firstPass: (r, c) =>
+        this.resolve(
+          r,
+          { status: 'no_evidence', candidates: [], references: [] },
+          c,
+          'google_first_pass',
+          attempt,
+        ),
+      resolve: (r, v, c) =>
+        this.resolve(r, v, c, 'google_enriched_pass', attempt),
+      refresh: (identity) => this.refresh(identity),
+    };
+  }
   firstPass(recognition: Recognition, context: GeographicContext = {}) {
     return this.resolve(
       recognition,
@@ -461,6 +492,7 @@ export class GooglePlacesPoi implements PoiProvider {
     verification: Verification,
     context: GeographicContext = {},
     phase: GooglePhase = 'google_enriched_pass',
+    attempt = newAttempt(),
   ): Promise<PoiResolution> {
     if (!['google_first_pass', 'google_enriched_pass'].includes(phase))
       throw new GooglePlacesFailure('google_places_request_failed');
@@ -504,13 +536,11 @@ export class GooglePlacesPoi implements PoiProvider {
     }
     if (!queries.length)
       return { status: 'unresolved', reason: 'no_place_evidence' };
-    const candidates = new Map<
-      string,
-      { candidate: Candidate; evidence: CandidateEvidence }
-    >();
+    const candidates = attempt.candidates;
     let categoryMatched = false,
       geographyMatched = false,
-      truncated = false;
+      truncated = false,
+      ineligibleIdentity = false;
     for (const [queryIndex, query] of queries.entries()) {
       const loaded = await this.load(GOOGLE_PLACES_ENDPOINT, {
         method: 'POST',
@@ -532,6 +562,11 @@ export class GooglePlacesPoi implements PoiProvider {
         throw new GooglePlacesFailure('google_places_top_level_invalid');
       }
       const rows = this.parseLog('ok', envelope.places, loaded.credential);
+      // Processing budget is separate from external response validity.
+      if (rows.length > 10) {
+        truncated = true;
+        attempt.truncated = true;
+      }
       const rejected = {
         no_name_match: 0,
         category_conflict: 0,
@@ -557,7 +592,7 @@ export class GooglePlacesPoi implements PoiProvider {
         rejected,
       };
       const excluded: CandidateEvidence[] = [];
-      for (const [rowIndex, row] of rows.entries()) {
+      for (const [rowIndex, row] of rows.slice(0, 10).entries()) {
         event.complete++;
         const comparisons = boundedClues
           .map((evidence) => {
@@ -648,6 +683,52 @@ export class GooglePlacesPoi implements PoiProvider {
             ),
           ),
         };
+        const slot = attempt.slots.get(row.id) ?? {
+          slot: attempt.slots.size + 1,
+          queries: new Set<string>(),
+        };
+        slot.queries.add(`${phase}:${queryIndex + 1}`);
+        attempt.slots.set(row.id, slot);
+        const weakEligible =
+          evidence.nameEvidence === 'weak' &&
+          evidence.categoryState !== 'conflict' &&
+          (evidence.localityState === 'match' ||
+            evidence.addressState === 'match' ||
+            evidence.verifiedWeb ||
+            ['compatible', 'related'].includes(evidence.categoryState));
+        try {
+          this.diagnostic({
+            event: 'google_places_candidate',
+            phase,
+            query: queryIndex + 1,
+            candidateSlot: slot.slot,
+            providerRank: evidence.providerRank,
+            nameEvidence: evidence.nameEvidence,
+            nameRankPermille: Math.round(evidence.nameRank * 1000),
+            localityState: evidence.localityState,
+            countryState: evidence.countryState,
+            addressState: evidence.addressState,
+            categoryState: evidence.categoryState,
+            finalRankPermille: Math.round(evidence.finalRank * 1000),
+            candidateConfidence:
+              identityDecision(evidence) === 'rejected_hard_conflict'
+                ? undefined
+                : weakEligible
+                  ? 'low'
+                  : isAccepted(identityDecision(evidence))
+                    ? candidateConfidence(evidence)
+                    : undefined,
+            decision:
+              identityDecision(evidence) === 'rejected_hard_conflict'
+                ? 'rejected_hard_conflict'
+                : weakEligible
+                  ? 'eligible_weak_alternative'
+                  : identityDecision(evidence),
+            seenInMultipleQueries: slot.queries.size > 1,
+          });
+        } catch {
+          /* best effort */
+        }
         const rowDecision = identityDecision(evidence);
         if (identityStrength(evidence.nameEvidence) >= 2) {
           event.nameStrong++;
@@ -662,7 +743,12 @@ export class GooglePlacesPoi implements PoiProvider {
         if (!geography.countryConflict && !geography.cityConflict)
           geographyMatched = true;
         if (rowDecision === 'rejected_hard_conflict') {
+          candidates.delete(row.id);
           excluded.push(evidence);
+          continue;
+        }
+        if (!isAccepted(rowDecision) && !weakEligible) {
+          ineligibleIdentity = true;
           continue;
         }
         if (geography.cityMatch) event.cityCompatible++;
@@ -716,7 +802,9 @@ export class GooglePlacesPoi implements PoiProvider {
           address: { formatted: row.formattedAddress ?? '', ...address },
           references: [...input.data.verification.references, reference],
           confidence: matchingClue.confidence,
-          candidateConfidence: candidateConfidence(evidence),
+          candidateConfidence: weakEligible
+            ? 'low'
+            : candidateConfidence(evidence),
           resolution: 'deterministic_poi',
           providerIdentity: { provider: 'google-places', id: row.id },
           ...(row.attributions?.length
@@ -735,21 +823,38 @@ export class GooglePlacesPoi implements PoiProvider {
         if (!previous || compareEvidence(evidence, previous.evidence) < 0)
           candidates.set(row.id, { candidate: parsed.data, evidence });
       }
-      if (event.accepted > 0 && envelope.nextPageToken) truncated = true;
+      if (candidates.size > 0 && envelope.nextPageToken) {
+        truncated = true;
+        attempt.truncated = true;
+      }
       const ranked = [...candidates.values()].sort((a, b) =>
         compareEvidence(a.evidence, b.evidence),
       );
       const best = ranked[0],
         runner = ranked[1];
       const topEvidence = best?.evidence ?? excluded.sort(compareEvidence)[0];
-      const decision = topEvidence
-        ? decideCandidate(topEvidence, runner?.evidence, truncated)
-        : 'insufficient_identity';
-      event.result = isAccepted(decision)
-        ? 'resolved'
-        : decision === 'ambiguous_competition'
-          ? 'ambiguous'
-          : 'no_match';
+      const decision =
+        best &&
+        (ranked.length > 1 ||
+          truncated ||
+          attempt.truncated ||
+          !isAccepted(identityDecision(best.evidence)))
+          ? ('shortlist_required' as const)
+          : topEvidence
+            ? decideCandidate(
+                topEvidence,
+                runner?.evidence,
+                truncated || attempt.truncated,
+              )
+            : 'insufficient_identity';
+      event.result =
+        decision === 'shortlist_required'
+          ? 'alternatives'
+          : isAccepted(decision)
+            ? 'resolved'
+            : decision === 'ambiguous_competition'
+              ? 'ambiguous'
+              : 'no_match';
       if (event.result === 'ambiguous') rejected.ambiguous_competition = 1;
       try {
         this.diagnostic(event);
@@ -769,36 +874,31 @@ export class GooglePlacesPoi implements PoiProvider {
               (runner?.evidence.finalRank ?? 0) * 1000,
             ),
             decision,
-            candidateConfidence: isAccepted(decision)
-              ? candidateConfidence(topEvidence)
-              : undefined,
+            candidateConfidence:
+              decision === 'shortlist_required'
+                ? 'low'
+                : isAccepted(decision)
+                  ? candidateConfidence(topEvidence)
+                  : undefined,
           });
       } catch {
         /* best effort */
       }
-      if (best && isAccepted(decision))
+      if (best && ranked.length === 1 && isAccepted(decision))
         return { status: 'resolved', candidate: best.candidate };
     }
-    const plausible = [...candidates.values()].filter(
-      (c) => identityStrength(c.evidence.nameEvidence) >= 2,
-    );
-    if (plausible.some((c) => isAccepted(identityDecision(c.evidence)))) {
-      const locations = new Set(
-        plausible.map(
-          (c) =>
-            `${normalizedLocality(c.candidate.address.city ?? '')}:${c.candidate.address.countryCode ?? ''}`,
-        ),
-      );
-      return !locality?.aliases.length &&
-        (truncated ||
-          locations.size > 1 ||
-          [...locations].some((key) => key.startsWith(':')))
-        ? { status: 'city_unknown', reason: 'ambiguous_locality' }
-        : { status: 'unresolved', reason: 'ambiguous_poi' };
-    }
-    if (candidates.size)
-      return { status: 'unresolved', reason: 'insufficient_evidence' };
+    const alternatives = [...candidates.values()]
+      .sort((a, b) => compareEvidence(a.evidence, b.evidence))
+      .slice(0, 3)
+      .map(({ candidate }) => ({
+        ...candidate,
+        candidateConfidence: 'low' as const,
+      }));
+    if (alternatives.length)
+      return { status: 'alternatives', candidates: alternatives };
 
+    if (ineligibleIdentity)
+      return { status: 'unresolved', reason: 'insufficient_evidence' };
     if (geographyMatched) return { status: 'unresolved', reason: 'no_match' };
     if (categoryMatched)
       return locality?.source === 'vision'

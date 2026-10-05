@@ -1,3 +1,4 @@
+import { assertGoogleAlternatives } from './fixtures/google-places.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -319,12 +320,11 @@ for (const uri of [
     assert.equal(text.includes(uri), /^https?:/u.test(uri));
   });
 test('next-page token has no invented maximum and prevents premature resolution', async () => {
-  assert.deepEqual(
+  assertGoogleAlternatives(
     await googleFixture({
       places: [{ ...row, addressComponents: undefined }],
       nextPageToken: 'x'.repeat(10001),
     }).resolve(recognition, verification),
-    { status: 'unresolved', reason: 'ambiguous_poi' },
   );
   assert.equal(
     (

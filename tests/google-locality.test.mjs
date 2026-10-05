@@ -1,3 +1,4 @@
+import { assertGoogleAlternatives } from './fixtures/google-places.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GooglePlacesPoi } from '@places/providers';
@@ -248,10 +249,7 @@ test('same-base branches never choose a city by provider ordering; city correcti
     [a, b],
     [b, a],
   ]) {
-    assert.deepEqual(await provider(rows).firstPass(recognition), {
-      status: 'city_unknown',
-      reason: 'ambiguous_locality',
-    });
+    assertGoogleAlternatives(await provider(rows).firstPass(recognition));
     const events = [],
       requests = [];
     const resolved = await provider(rows, events, requests).resolve(

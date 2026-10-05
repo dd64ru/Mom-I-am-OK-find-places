@@ -79,6 +79,7 @@ export class FirestoreRepository implements PlacesRepository {
       if (
         ![
           'needs_confirmation',
+          'needs_selection',
           'awaiting_city',
           'unresolved',
           'failed',

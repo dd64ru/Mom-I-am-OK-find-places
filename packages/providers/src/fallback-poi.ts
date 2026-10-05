@@ -22,6 +22,14 @@ export class FallbackPoi implements PoiProvider {
       code: 'google_places_fallback_used',
     ) => void = () => {},
   ) {}
+  beginAttempt(): PoiProvider {
+    return new FallbackPoi(
+      this.primary.beginAttempt?.() ?? this.primary,
+      this.fallback,
+      this.telemetry,
+      this.diagnostic,
+    );
+  }
   refresh(identity: { provider: string; id: string }) {
     if (!this.primary.refresh)
       throw new GooglePlacesFailure('google_places_configuration_invalid');
@@ -94,6 +102,7 @@ export class FallbackPoi implements PoiProvider {
       }
       if (
         result.status === 'resolved' ||
+        result.status === 'alternatives' ||
         ['locality_conflict', 'no_place_evidence'].includes(result.reason)
       )
         return result;

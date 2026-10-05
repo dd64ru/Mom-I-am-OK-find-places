@@ -1,3 +1,4 @@
+import { assertGoogleAlternatives } from './fixtures/google-places.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { venueNameEvidence } from '../packages/providers/dist/place-matching.js';
@@ -156,7 +157,7 @@ for (const types of [
       'resolved',
     );
   });
-test('two partial names in different cities ask city; explicit city resolves surviving branch', async () => {
+test('two partial names in different cities offer alternatives; explicit city resolves surviving branch', async () => {
   const shanghai = {
     ...alimentari,
     displayName: { text: 'Alimentari Riverside' },
@@ -175,10 +176,7 @@ test('two partial names in different cities ask city; explicit city resolves sur
     [shanghai, other],
     [other, shanghai],
   ]) {
-    assert.deepEqual(await provider(rows).firstPass(recognition()), {
-      status: 'city_unknown',
-      reason: 'ambiguous_locality',
-    });
+    assertGoogleAlternatives(await provider(rows).firstPass(recognition()));
     const resolved = await provider(rows).firstPass(recognition(), {
       cityOverride: 'Shanghai',
     });
@@ -186,7 +184,7 @@ test('two partial names in different cities ask city; explicit city resolves sur
     assert.equal(resolved.candidate.providerIdentity.id, row.id);
   }
 });
-test('strong identity beats weak Google-first competitor independently of provider order', async () => {
+test('strong identity ranks first among alternatives independently of provider order', async () => {
   const weak = {
     ...alimentari,
     id: 'weak-first',
@@ -197,8 +195,8 @@ test('strong identity beats weak Google-first competitor independently of provid
     [alimentari, weak],
   ]) {
     const result = await provider(rows).firstPass(recognition());
-    assert.equal(result.status, 'resolved');
-    assert.equal(result.candidate.providerIdentity.id, row.id);
+    assertGoogleAlternatives(result, 2);
+    assert.equal(result.candidates[0].providerIdentity.id, row.id);
   }
 });
 test('Google decision telemetry contains exactly fixed evidence enums and integer ranks, including hard rejections', async () => {
@@ -250,15 +248,18 @@ test('Google decision telemetry contains exactly fixed evidence enums and intege
   ])
     assert.equal(JSON.stringify(events).includes(value), false);
 });
-test('weak and generic-only provider names remain insufficient regardless of corroborators', async () => {
+test('unrelated generic-only identity stays unresolved; supported weak identity requires human selection', async () => {
   for (const name of ['Cafe', 'Alimentari Airport Branch']) {
     const result = await provider([
       { ...alimentari, displayName: { text: name } },
     ]).resolve(recognition(), noEvidence, { cityOverride: 'Shanghai' });
-    assert.deepEqual(result, {
-      status: 'unresolved',
-      reason: 'insufficient_evidence',
-    });
+    if (name === 'Alimentari Airport Branch')
+      assertGoogleAlternatives(result, 1);
+    else
+      assert.deepEqual(result, {
+        status: 'unresolved',
+        reason: 'insufficient_evidence',
+      });
   }
 });
 
@@ -280,7 +281,7 @@ test('partial branch ranking prioritizes explicit locality over typo rank', asyn
   );
 });
 
-test('weak Google identity retains bounded OSM fallback after enrichment, preserving weak UX when OSM has no match', async () => {
+test('weak relevant Google identity remains a human-selection alternative without OSM auto-selection', async () => {
   const { FallbackPoi } = await import('@places/providers');
   const weak = {
     ...alimentari,
@@ -293,16 +294,13 @@ test('weak Google identity retains bounded OSM fallback after enrichment, preser
       return { status: 'unresolved', reason: 'no_match' };
     },
   });
-  assert.equal(
-    (await fallback.firstPass(recognition())).reason,
-    'insufficient_evidence',
+  assertGoogleAlternatives(await fallback.firstPass(recognition()), 1);
+  assert.equal(calls, 0);
+  assertGoogleAlternatives(
+    await fallback.resolve(recognition(), noEvidence),
+    1,
   );
   assert.equal(calls, 0);
-  assert.deepEqual(await fallback.resolve(recognition(), noEvidence), {
-    status: 'unresolved',
-    reason: 'insufficient_evidence',
-  });
-  assert.equal(calls, 1);
 });
 
 test('unknown locality is neutral for all meaningful identity classes, but explicit conflict remains hard', () => {

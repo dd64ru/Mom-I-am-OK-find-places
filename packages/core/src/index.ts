@@ -48,6 +48,8 @@ export interface SearchProvider {
   ): Promise<Verification>;
 }
 export interface PoiProvider {
+  // A fresh, transient provider scope shares deduplication/diagnostics across phases.
+  beginAttempt?(): PoiProvider;
   firstPass?(
     recognition: Recognition,
     context?: GeographicContext,
@@ -144,6 +146,7 @@ export class DiscoveryService {
       cityOverride: discovery.cityOverride,
       workspaceAreaHint: workspace.areaHint,
     };
+    const poi = this.verification.poi.beginAttempt?.() ?? this.verification.poi;
     let resolution: PoiResolution;
     try {
       const adapt = (raw: unknown) => {
@@ -151,13 +154,8 @@ export class DiscoveryService {
         if (!parsed.success) throw new ProviderFailure('poi_adaptation_failed');
         return parsed.data;
       };
-      const first = this.verification.poi.firstPass
-        ? adapt(
-            await this.verification.poi.firstPass(
-              discovery.recognition,
-              context,
-            ),
-          )
+      const first = poi.firstPass
+        ? adapt(await poi.firstPass(discovery.recognition, context))
         : undefined;
       if (
         first?.status === 'resolved' ||
@@ -169,18 +167,20 @@ export class DiscoveryService {
           await this.verification.search.verify(discovery.recognition, context),
         );
         const enriched = adapt(
-          await this.verification.poi.resolve(
-            discovery.recognition,
-            verified,
-            context,
-          ),
+          await poi.resolve(discovery.recognition, verified, context),
         );
         resolution =
-          first?.status === 'city_unknown' &&
+          first?.status === 'alternatives' &&
           enriched.status === 'unresolved' &&
-          ['no_match', 'insufficient_evidence'].includes(enriched.reason)
+          ['no_match', 'insufficient_evidence', 'no_place_evidence'].includes(
+            enriched.reason,
+          )
             ? first
-            : enriched;
+            : first?.status === 'city_unknown' &&
+                enriched.status === 'unresolved' &&
+                ['no_match', 'insufficient_evidence'].includes(enriched.reason)
+              ? first
+              : enriched;
       }
     } catch (error) {
       return this.recordFailure(discovery, error);
@@ -194,15 +194,22 @@ export class DiscoveryService {
         candidates:
           resolution.status === 'resolved'
             ? [storedCandidate(resolution.candidate)]
-            : [],
+            : resolution.status === 'alternatives'
+              ? resolution.candidates.map(storedCandidate)
+              : [],
         status:
           resolution.status === 'resolved'
             ? 'needs_confirmation'
-            : resolution.status === 'city_unknown'
-              ? 'awaiting_city'
-              : 'unresolved',
+            : resolution.status === 'alternatives'
+              ? 'needs_selection'
+              : resolution.status === 'city_unknown'
+                ? 'awaiting_city'
+                : 'unresolved',
         resolutionReason:
-          resolution.status === 'resolved' ? undefined : resolution.reason,
+          resolution.status === 'resolved' ||
+          resolution.status === 'alternatives'
+            ? undefined
+            : resolution.reason,
       },
     );
     const next =
@@ -213,6 +220,9 @@ export class DiscoveryService {
       ))!;
     return {
       ...next,
+      ...(updated && resolution.status === 'alternatives'
+        ? { liveAlternatives: resolution.candidates }
+        : {}),
       ...(updated && resolution.status === 'resolved'
         ? { liveCandidate: resolution.candidate }
         : {}),
@@ -220,10 +230,18 @@ export class DiscoveryService {
   }
   async displayCandidate(
     discovery: DiscoveryView,
+    index = 0,
   ): Promise<PlaceDisplay | undefined> {
-    if (discovery.candidates.length !== 1) return;
+    if (
+      discovery.status !== 'needs_selection' &&
+      discovery.candidates.length !== 1
+    )
+      return;
+    if (discovery.liveAlternatives?.[index])
+      return discovery.liveAlternatives[index];
     if (discovery.liveCandidate) return discovery.liveCandidate;
-    const candidate = discovery.candidates[0]!;
+    const candidate = discovery.candidates[index];
+    if (!candidate) return;
     if ('coordinates' in candidate) return candidate;
     if (!this.verification?.poi.refresh)
       throw new Error('provider_refresh_unavailable');
@@ -284,6 +302,27 @@ export class DiscoveryService {
       { cityOverride: normalized, candidates: [] },
     );
     return updated ? this.resolve(updated) : undefined;
+  }
+  async selectAlternative(
+    discovery: Discovery,
+    index: number,
+  ): Promise<Discovery | undefined> {
+    if (
+      discovery.status !== 'needs_selection' ||
+      !Number.isInteger(index) ||
+      index < 0 ||
+      index >= discovery.candidates.length
+    )
+      return;
+    return this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      {
+        status: 'needs_confirmation',
+        candidates: [discovery.candidates[index]!],
+      },
+    );
   }
   finish(discovery: Discovery, action: 'confirm' | 'cancel') {
     return this.repository.finishDiscovery(

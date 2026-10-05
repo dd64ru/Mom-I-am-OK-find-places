@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { GooglePlacesPoi } from '@places/providers';
 export const recognition = {
   visibleText: ['PRIVATE_VISIBLE_TEXT'],
@@ -70,4 +71,16 @@ export function googleFixture(body = { places: [row] }, request, telemetry) {
     undefined,
     telemetry,
   );
+}
+
+export function assertGoogleAlternatives(result, count) {
+  assert.equal(result.status, 'alternatives');
+  assert.ok(result.candidates.length >= 1 && result.candidates.length <= 3);
+  if (count !== undefined) assert.equal(result.candidates.length, count);
+  assert.equal(
+    new Set(result.candidates.map((c) => c.providerIdentity.id)).size,
+    result.candidates.length,
+  );
+  assert.ok(result.candidates.every((c) => c.candidateConfidence === 'low'));
+  return result;
 }

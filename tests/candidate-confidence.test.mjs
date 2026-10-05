@@ -158,7 +158,7 @@ for (const [scenario, modify, expectedDecision] of [
   [
     'comparable branches',
     (r) => [r, { ...r, id: 'other-comparable-branch' }],
-    'ambiguous_competition',
+    'shortlist_required',
   ],
 ])
   test(`surfacing plausible candidates preserves ${scenario} veto`, async () => {
@@ -226,6 +226,9 @@ for (const [scenario, modify, expectedDecision] of [
     const decision = events.find((e) => e.event === 'google_places_decision');
     if (decision) {
       assert.equal(decision.decision, expectedDecision);
-      assert.equal(decision.candidateConfidence, undefined);
+      assert.equal(
+        decision.candidateConfidence,
+        expectedDecision === 'shortlist_required' ? 'low' : undefined,
+      );
     } else assert.equal(expectedDecision, 'insufficient_identity');
   });

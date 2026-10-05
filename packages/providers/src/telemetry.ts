@@ -10,6 +10,7 @@ const statuses = [
   'ok',
   'error',
   'resolved',
+  'alternatives',
   'no_match',
   'ambiguous',
   'unresolved',
@@ -116,12 +117,18 @@ export class PipelineTelemetry {
     const identity =
       value.status === 'resolved'
         ? value.candidate.providerIdentity?.provider
-        : undefined;
+        : value.status === 'alternatives'
+          ? 'google-places'
+          : undefined;
     const provider =
       identity === 'google-places' || identity === 'nominatim'
         ? identity
         : 'none';
-    if (['resolved', 'unresolved', 'city_unknown'].includes(value.status))
+    if (
+      ['resolved', 'alternatives', 'unresolved', 'city_unknown'].includes(
+        value.status,
+      )
+    )
       this.log({
         event: 'place_resolution',
         provider,

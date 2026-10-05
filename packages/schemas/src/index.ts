@@ -268,6 +268,23 @@ export const ResolutionReasonSchema = z.enum([
 ]);
 export const PoiResolutionSchema = z.discriminatedUnion('status', [
   z
+    .object({
+      status: z.literal('alternatives'),
+      candidates: z
+        .array(
+          CandidateSchema.refine(
+            (c) => c.providerIdentity?.provider === 'google-places',
+          ),
+        )
+        .min(1)
+        .max(3)
+        .refine(
+          (cs) =>
+            new Set(cs.map((c) => c.providerIdentity?.id)).size === cs.length,
+        ),
+    })
+    .strict(),
+  z
     .object({ status: z.literal('resolved'), candidate: CandidateSchema })
     .strict(),
   z
@@ -312,6 +329,7 @@ export const DiscoverySchema = z
     visionProvider: z.string(),
     status: z.enum([
       'needs_confirmation',
+      'needs_selection',
       'awaiting_city',
       'unresolved',
       'confirmed',
@@ -333,6 +351,16 @@ export const DiscoverySchema = z
         ? !!d.failureReason && d.candidates.length === 0 && !d.confirmedPlaceId
         : d.failureReason === undefined,
     'invalid_terminal_failure_state',
+  )
+  .refine(
+    (d) =>
+      d.status !== 'needs_selection' ||
+      (d.candidates.length >= 1 &&
+        d.candidates.length <= 3 &&
+        d.candidates.every(
+          (c) => c.providerIdentity?.provider === 'google-places',
+        )),
+    'invalid_selection_state',
   );
 export type Place = z.infer<typeof PlaceSchema>;
 export type Chain = z.infer<typeof ChainSchema>;
@@ -340,7 +368,10 @@ export type Workspace = z.infer<typeof WorkspaceSchema>;
 export type Recognition = z.infer<typeof RecognitionSchema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
 export type Discovery = z.infer<typeof DiscoverySchema>;
-export type DiscoveryView = Discovery & { liveCandidate?: Candidate };
+export type DiscoveryView = Discovery & {
+  liveCandidate?: Candidate;
+  liveAlternatives?: Candidate[];
+};
 export type Reference = z.infer<typeof ReferenceSchema>;
 
 // No coordinates or model-supplied URLs in textual verification output.

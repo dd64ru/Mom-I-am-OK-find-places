@@ -1,3 +1,4 @@
+import { assertGoogleAlternatives } from './fixtures/google-places.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -145,10 +146,7 @@ test('two similarly scored Google branches stay ambiguous independently of resul
     [a, b],
     [b, a],
   ])
-    assert.deepEqual(await provider(rows).resolve(r, v), {
-      status: 'unresolved',
-      reason: 'ambiguous_poi',
-    });
+    assertGoogleAlternatives(await provider(rows).resolve(r, v));
 });
 test('strong identity outranks partial evidence without a universal numeric margin', async () => {
   const { r, v } = evidence();
@@ -160,14 +158,14 @@ test('strong identity outranks partial evidence without a universal numeric marg
   };
   assert.equal(
     (await provider([exact, partial]).resolve(r, v)).status,
-    'resolved',
+    'alternatives',
   );
   const weak = clone(v);
   weak.candidates[0].category = 'place';
   delete weak.candidates[0].countryCode;
   assert.equal(
     (await provider([exact, partial]).resolve(r, weak)).status,
-    'resolved',
+    'alternatives',
   );
 });
 test('structured query variants recover on second request, stop after confidence and never exceed two per phase', async () => {
@@ -669,10 +667,7 @@ test('each plausible identity keeps its own category/address evidence; competing
           : c,
       ),
     };
-  assert.deepEqual(await provider([a, b]).resolve(r, v), {
-    status: 'unresolved',
-    reason: 'ambiguous_poi',
-  });
+  assertGoogleAlternatives(await provider([a, b]).resolve(r, v));
 });
 
 test('a truncated wrong-country response does not poison a later valid query; a city-only alias is not venue evidence', async () => {

@@ -1,3 +1,4 @@
+import { assertGoogleAlternatives } from './fixtures/google-places.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
@@ -123,9 +124,9 @@ for (const [scenario, mutate, reason] of [
     'no_match',
   ],
   [
-    'weak fuzzy name',
+    'unrelated name',
     (r) => {
-      r.displayName.text = 'Fixture Cafe Airport Branch';
+      r.displayName.text = 'Juniper Museum';
     },
     'insufficient_evidence',
   ],
@@ -253,18 +254,16 @@ test('China hierarchy resolves a municipal city above district and a Guangzhou c
   });
 });
 test('multiple candidates or a truncated page remain ambiguous; repeated identical IDs dedupe', async () => {
-  assert.deepEqual(
+  assertGoogleAlternatives(
     await googleFixture({
       places: [row, { ...row, id: 'fixture-google-place-2' }],
     }).resolve(recognition, verification),
-    { status: 'unresolved', reason: 'ambiguous_poi' },
   );
-  assert.deepEqual(
+  assertGoogleAlternatives(
     await googleFixture({
       places: [row],
       nextPageToken: 'fixture-next-page',
     }).resolve(recognition, verification),
-    { status: 'unresolved', reason: 'ambiguous_poi' },
   );
   assert.equal(
     (
@@ -490,7 +489,7 @@ test('ADC obtains refreshed short-lived tokens through the auth library and neve
     message: 'google_places_configuration_invalid',
   });
 });
-test('composed Google success avoids OSM; no-match and ambiguity use fallback without guessing', async () => {
+test('composed Google success and shortlist avoid OSM; no-match uses bounded fallback', async () => {
   let calls = 0;
   const fallback = {
     resolve: async () => {
@@ -513,11 +512,8 @@ test('composed Google success avoids OSM; no-match and ambiguity use fallback wi
     googleFixture({ places: [row, { ...row, id: 'fixture-google-place-2' }] }),
     fallback,
   );
-  assert.deepEqual(await ambiguous.resolve(recognition, verification), {
-    status: 'unresolved',
-    reason: 'ambiguous_poi',
-  });
-  assert.equal(calls, 2);
+  assertGoogleAlternatives(await ambiguous.resolve(recognition, verification));
+  assert.equal(calls, 1);
   const osmCandidate = {
     ...success.candidate,
     providerIdentity: { provider: 'nominatim', id: 'node/123' },
