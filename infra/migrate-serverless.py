@@ -13,6 +13,7 @@ REPOSITORY = 'dd64ru/Mom-I-am-OK-find-places'
 REPOSITORY_ID, REPOSITORY_OWNER_ID = '1404706412', '26544806'
 RUNTIME = f'places-runtime@{PROJECT}.iam.gserviceaccount.com'
 DEPLOY = f'places-deploy@{PROJECT}.iam.gserviceaccount.com'
+APP_ENGINE_DEFAULT = f'{PROJECT}@appspot.gserviceaccount.com'
 POOL, PROVIDER = 'places-github', 'github-main'
 DEPLOY_PERMISSIONS = sorted(['firebase.projects.get', 'resourcemanager.projects.get', 'cloudfunctions.functions.getIamPolicy', 'cloudfunctions.functions.setIamPolicy', 'run.services.get', 'run.services.getIamPolicy', 'run.services.setIamPolicy'])
 SECRETS = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_WEBHOOK_SECRET', 'OPENAI_SIWC_SESSION']
@@ -20,6 +21,20 @@ SECRETS = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_WEBHOOK_SECRET', 'O
 
 def fail(code):
     raise RuntimeError(code)
+
+
+def app_engine_default_state(account, project_policy, account_policy):
+    if not account or account.get('email') != APP_ENGINE_DEFAULT or account.get('disabled'):
+        fail('app_engine_default_identity_requires_owner_review')
+    direct = [entry for entry in project_policy.get('bindings', []) if 'serviceAccount:' + APP_ENGINE_DEFAULT in entry.get('members', [])]
+    if len(direct) > 1 or any(entry.get('role') != 'roles/editor' or 'condition' in entry for entry in direct):
+        fail('app_engine_default_project_grants_require_owner_review')
+    bindings = account_policy.get('bindings', [])
+    expected = {'role': 'roles/iam.serviceAccountUser', 'members': ['serviceAccount:' + DEPLOY]}
+    if bindings not in [[], [expected]]:
+        fail('app_engine_default_policy_requires_owner_review')
+    # No roles + no actAs is the safe intermediate state after removing Editor, before adding actAs.
+    return {'action': 'harden' if direct or not bindings else 'reuse', 'removeEditor': bool(direct), 'grantPreflightActAs': not bindings}
 
 
 def wif_configuration(repo):
@@ -134,6 +149,9 @@ def main(mode):
     if old_role and not old_role.get('deleted') and sorted(old_role.get('includedPermissions', [])) != ['compute.instances.get', 'compute.instances.list', 'compute.projects.get']:
         fail('old_compute_role_mismatch')
     policy = cloud('projects', 'get-iam-policy', PROJECT)
+    app_engine_account = cloud('iam', 'service-accounts', 'describe', APP_ENGINE_DEFAULT, missing=True)
+    app_engine_policy = cloud('iam', 'service-accounts', 'get-iam-policy', APP_ENGINE_DEFAULT) if app_engine_account else {}
+    app_engine = app_engine_default_state(app_engine_account, policy, app_engine_policy)
     old_bindings = []
     runtime_member, deploy_member = 'serviceAccount:' + RUNTIME, 'serviceAccount:' + DEPLOY
     allowed_deploy = {'roles/cloudfunctions.developer', 'roles/serviceusage.serviceUsageConsumer', f'projects/{PROJECT}/roles/placesFunctionsDeploy', f'projects/{PROJECT}/roles/placesDeployRead', 'roles/iap.tunnelResourceAccessor'}
@@ -193,7 +211,7 @@ def main(mode):
         sa_policy = cloud('iam', 'service-accounts', 'get-iam-policy', DEPLOY)
         if any(b['role'] == 'roles/iam.workloadIdentityUser' and (b['members'] != [principal] or b.get('condition')) for b in sa_policy.get('bindings', [])):
             fail('existing_federation_binding_mismatch')
-    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': provider_state == 'reuse', 'wifProviderAction': provider_state, 'mode': mode}))
+    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': provider_state == 'reuse', 'wifProviderAction': provider_state, 'appEngineDefaultAction': app_engine['action'], 'removeAppEngineEditor': app_engine['removeEditor'], 'grantAppEnginePreflightActAs': app_engine['grantPreflightActAs'], 'mode': mode}))
     if mode == '--plan':
         return
     # All legacy preflight checks above are read-only; only apply mutates resources.
@@ -205,11 +223,14 @@ def main(mode):
     # Inspect effective build identity before any legacy deletions.
     build = cloud('builds', 'get-default-service-account', '--region=' + REGION)
     build_email = canonical_build_email(build, number)
-    if build_email in [RUNTIME, DEPLOY]:
+    if build_email in [RUNTIME, DEPLOY, APP_ENGINE_DEFAULT]:
         fail('default_cloud_build_identity_requires_owner_review')
     build_roles = [b['role'] for b in policy.get('bindings', []) if 'serviceAccount:' + build_email in b.get('members', [])]
     if any(role in ['roles/owner', 'roles/editor'] for role in build_roles):
         fail('broad_default_build_identity_requires_owner_review')
+    # Targeted removal preserves other Editor members. Never grant actAs while this SA is Editor.
+    if app_engine['removeEditor']:
+        binding((['projects'], PROJECT), 'serviceAccount:' + APP_ENGINE_DEFAULT, 'roles/editor', remove=True)
     if not artifact:
         cloud('artifacts', 'repositories', 'create', 'gcf-artifacts', '--location=' + REGION, '--repository-format=docker')
         import tempfile
@@ -247,6 +268,8 @@ def main(mode):
     for role in ['roles/cloudfunctions.developer', 'roles/serviceusage.serviceUsageConsumer', f'projects/{PROJECT}/roles/placesFunctionsDeploy']:
         binding((['projects'], PROJECT), deploy_member, role)
     binding((['iam', 'service-accounts'], RUNTIME), deploy_member, 'roles/iam.serviceAccountUser')
+    if app_engine['grantPreflightActAs']:
+        binding((['iam', 'service-accounts'], APP_ENGINE_DEFAULT), deploy_member, 'roles/iam.serviceAccountUser')
     binding((['projects'], PROJECT), 'serviceAccount:' + build_email, 'roles/cloudbuild.builds.builder')
     if build_email != number + '@cloudbuild.gserviceaccount.com':
         binding((['iam', 'service-accounts'], build_email), deploy_member, 'roles/iam.serviceAccountUser')

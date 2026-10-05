@@ -435,6 +435,8 @@ m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 calls=[]
 def cloud(*args,**kwargs):
  calls.append(args)
+ if args[:3]==('iam','service-accounts','describe') and args[3]==m.APP_ENGINE_DEFAULT:return {'email':m.APP_ENGINE_DEFAULT}
+ if args[:3]==('iam','service-accounts','get-iam-policy') and args[3]==m.APP_ENGINE_DEFAULT:return {'bindings':[]}
  if args[:2]==('projects','describe'):return {'projectNumber':'12345'}
  if args[:3]==('firestore','databases','describe'):return {'locationId':'europe-west3'}
  if args[:2]==('projects','get-iam-policy'):return {'bindings':[]}
