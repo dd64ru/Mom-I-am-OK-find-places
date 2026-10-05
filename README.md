@@ -31,7 +31,7 @@ Production is now an authenticated **Firebase Functions v2 Telegram webhook** in
 
 ## What runs today
 
-The webhook accepts images/albums from any human in one configured private group. Vision recognition is followed by bounded SIWC Responses web-search verification and deterministic Nominatim POI resolution. A proposal offers **Confirm / Change city / Cancel**. Change city uses an owned, expiring ForceReply and reruns only verification/geocoding. Explicit confirmation transactionally creates/reuses one canonical WGS84 Place in Firestore. This is the current “map update”; branch lookup and external map/export adapters are future work; no custom mobile/cartographic app is planned.
+The webhook accepts images/albums from any human in one configured private group. Vision recognition is followed by bounded SIWC Responses web-search verification and Google Places API (New) deterministic POI resolution with Nominatim fallback. A proposal offers **Добавить / Изменить город / Отмена**. Change city uses an owned, expiring ForceReply and reruns only verification/geocoding. Explicit confirmation transactionally creates/reuses one canonical WGS84 Place in Firestore. This is the current “map update”; branch lookup and external map/export adapters are future work; no custom mobile/cartographic app is planned.
 
 `/help` and `/area <city or region>` are supported. Ordinary conversation, unknown commands and captions are ignored. Opaque callback tokens are mapped to durable interaction records; discovery revisions fence stale actions, while terminal transactions prevent duplicate Places or inconsistent confirm/cancel races. Albums retain Firestore-backed debounce/leases and bounded images. See [Telegram behavior](docs/telegram.md).
 
@@ -43,7 +43,7 @@ In addition to `npm run check`, `npm run test:rules` uses a **local demo-project
 
 ## Existing external infrastructure
 
-The owner reports project `mom-im-ok-places`, europe-west3 Firestore, prepared serverless IAM/WIF and imported Secret Manager SIWC/webhook/bot secrets. Old GCE resources are gone. No production function is deployed yet, and no workspace or Firebase Auth users exist. These are owner-verified facts, not live checks performed by the development agent. Follow the reviewed owner-only setup sequence; existing SIWC import does not need repeating for this code change.
+The owner reports project `mom-im-ok-places`, europe-west3 Firestore, prepared serverless IAM/WIF and imported Secret Manager SIWC/webhook/bot secrets. Old GCE resources are gone. The owner reports that the production function is deployed and the Telegram webhook is registered; Firebase membership remains a future integration. These are owner-verified facts, not live checks performed by the development agent. Follow the reviewed owner-only setup sequence; existing SIWC import does not need repeating for this code change.
 
 Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [next infrastructure setup](infra/README.md).
 
@@ -53,8 +53,10 @@ Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [
 
 ## Locality and resolution safety
 
-Geographic verification receives distinct `cityOverride` and `workspaceAreaHint` fields. Explicit correction is a hard constraint; conflicting verified locality fails closed. Cited canonical city/locality beats vision clues and workspace hints. A workspace hint alone cannot authorize a same-name branch. Nominatim requests English and matches bounded cited native/transliterated locality aliases with an optional ISO country constraint, retaining native venue names.
+Geographic verification receives distinct `cityOverride` and `workspaceAreaHint` fields. Explicit correction is a hard constraint; conflicting verified locality fails closed. Cited canonical city/locality beats vision clues and workspace hints. A workspace hint alone cannot authorize a same-name branch. Google Places and Nominatim prefer English and match bounded cited native/transliterated locality aliases with an optional ISO country constraint, retaining native venue names.
 
 Missing/ambiguous locality may prompt for city. A known locality with an absent, unsupported or ambiguous POI is `unresolved`, with Change city / Cancel and no automatic city-prompt loop. Temporary provider failures retain webhook retry behavior. See [geography](docs/geography.md) for travel feature classifications and conservative matching limits.
 
 Future boundary: **Firestore canonical Places → replaceable external map/export adapters**, for example GeoJSON/KML/GPX or supported third-party APIs/links. No external integration is implemented. Mom-I-am-OK's existing real users may later be attached to workspace membership.
+
+Google Places uses the attached runtime service account through ADC and short-lived OAuth Bearer tokens, with explicit quota project and a custom `serviceusage.services.use`-only runtime role. No Places API key or new secret is needed. Owner preparation and provider limits are documented in [Google Places](docs/google-places.md). Telegram UI is Russian; fixed stage/status/duration telemetry contains no user/provider content.

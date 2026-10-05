@@ -8,3 +8,6 @@ export * from './lease.js';
 export * from './secret-sessions.js';
 export * from './search.js';
 export * from './poi.js';
+export * from './google-places.js';
+export * from './fallback-poi.js';
+export * from './telemetry.js';

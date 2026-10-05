@@ -21,6 +21,11 @@ import { TelegramInteractions } from '../apps/functions/dist/interactions.js';
 import { TelegramApi } from '../apps/functions/dist/telegram-api.js';
 import { Ingress } from '../apps/functions/dist/ingress.js';
 import { initializeWorkspace } from '../scripts/workspace-init.mjs';
+import {
+  recognition as googleRecognition,
+  verification as googleVerification,
+  googleFixture,
+} from './fixtures/google-places.mjs';
 
 // Serialize mock transactions and enforce Firestore's read-before-write rule.
 class MemoryDb {
@@ -210,14 +215,18 @@ async function setup(options = {}) {
   };
 }
 function button(sent, action = 'Confirm') {
+  const label =
+    { Confirm: 'Добавить', 'Change city': 'Изменить город', Cancel: 'Отмена' }[
+      action
+    ] ?? action;
   const message = sent.findLast((m) =>
     m.body.reply_markup?.inline_keyboard
       ?.flat()
-      .some((b) => b.text.includes(action)),
+      .some((b) => b.text.includes(label)),
   );
   const data = message.body.reply_markup.inline_keyboard
     .flat()
-    .find((b) => b.text.includes(action)).callback_data;
+    .find((b) => b.text.includes(label)).callback_data;
   return {
     kind: 'callback',
     callbackId: 'fixture-callback',
@@ -242,6 +251,92 @@ const update = (message) => ({
   message: { ...base, ...message },
 });
 const policy = { chatId: -100 };
+
+test('Google Places confirmations dedupe by Place ID, persist attribution and use Russian Google proposals', async () => {
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: googleVerification,
+    poi: googleFixture(),
+  });
+  const first = await f.ingest('google-first');
+  await f.interactions.propose(first, 11, 1);
+  const proposal = f.sent.find((m) => m.body.reply_markup?.inline_keyboard);
+  assert.equal(proposal.method, 'sendMessage'); // Do not project Google content onto Telegram's non-Google map.
+  assert.match(proposal.body.text, /Источник: Google Maps/);
+  assert.match(proposal.body.text, /query_place_id=fixture-google-place-1/);
+  assert.match(proposal.body.text, /Fixture attribution/);
+  assert.doesNotMatch(proposal.body.text, /OpenStreetMap/);
+  assert.deepEqual(
+    proposal.body.reply_markup.inline_keyboard.flat().map((b) => b.text),
+    ['✅ Добавить', '✏️ Изменить город', '❌ Отмена'],
+  );
+  const callback = button(f.sent);
+  const raced = await Promise.allSettled([
+    f.interactions.callback(callback),
+    f.interactions.callback(callback),
+  ]);
+  assert.ok(raced.some((r) => r.status === 'fulfilled'));
+  for (const r of raced)
+    if (r.status === 'rejected')
+      assert.equal(r.reason.message, 'interaction_busy');
+  await f.interactions.callback(callback);
+  const saved = await f.repository.getDiscovery('fixture', first.id);
+  const place = await f.repository.getPlace('fixture', saved.confirmedPlaceId);
+  assert.equal(
+    place.evidence.find((r) => r.provider === 'google-places').externalId,
+    'fixture-google-place-1',
+  );
+  assert.equal(place.attributions[0].provider, 'Fixture attribution');
+  const second = await f.ingest('google-second');
+  await f.interactions.propose(second, 11, 2);
+  await f.interactions.callback(button(f.sent));
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', second.id)).confirmedPlaceId,
+    saved.confirmedPlaceId,
+  );
+  assert.equal(
+    [...f.db.values.keys()].filter((path) => path.includes('/places/')).length,
+    1,
+  );
+  assert.ok(
+    f.sent.some((m) => m.body.text === 'Добавлено в сохранённые места.'),
+  );
+});
+
+test('Google ambiguous/no-match discoveries cannot be confirmed; Russian city/cancel results preserve ownership', async () => {
+  const f = await setup({
+    outcome: { status: 'unresolved', reason: 'ambiguous_poi' },
+  });
+  const discovery = await f.ingest('ambiguous-google');
+  await f.interactions.propose(discovery, 11, 1);
+  assert.match(f.sent[0].body.text, /Найдено несколько подходящих мест/);
+  await assert.rejects(f.service.finish(discovery, 'confirm'));
+  await f.interactions.callback(button(f.sent, 'Change city'));
+  const prompt = f.sent.find((m) => m.body.reply_markup?.force_reply);
+  assert.match(prompt.body.text, /В каком городе находится это место/);
+  assert.equal(
+    prompt.body.reply_markup.input_field_placeholder,
+    'Город или регион',
+  );
+  const g = await setup({
+    outcome: { status: 'unresolved', reason: 'no_match' },
+  });
+  const unresolved = await g.ingest('no-google-place');
+  await g.interactions.propose(unresolved, 11, 1);
+  assert.match(
+    g.sent[0].body.text,
+    /Город определён, но само место найти не удалось/,
+  );
+  await assert.rejects(g.service.finish(unresolved, 'confirm'));
+  await g.interactions.callback(button(g.sent, 'Cancel'));
+  assert.ok(
+    g.sent.some((m) => m.body.text === 'Отменено. Место не добавлено.'),
+  );
+  assert.equal(
+    [...g.db.values.keys()].filter((path) => path.includes('/places/')).length,
+    0,
+  );
+});
 
 test('configured group accepts any human and ignores bots, other chats, text, captions and unknown commands', () => {
   for (const userId of [11, 99])
@@ -510,7 +605,7 @@ test('unknown city creates a narrow expiring prompt; no evidence gives concise r
     resolve: () => [],
   });
   await empty.interactions.propose(await empty.ingest('empty'), 11, 1);
-  assert.match(empty.sent[0].body.text, /Could not identify/);
+  assert.match(empty.sent[0].body.text, /Не удалось определить место/);
   assert.equal(
     empty.sent.some((m) => m.body.reply_markup),
     false,
@@ -1384,9 +1479,9 @@ test('known locality with absent, unsupported or ambiguous POI produces unresolv
     const proposal = f.sent.find((m) => m.body.reply_markup?.inline_keyboard);
     assert.deepEqual(
       proposal.body.reply_markup.inline_keyboard[0].map((b) => b.text),
-      ['✏️ Change city', '❌ Cancel'],
+      ['✏️ Изменить город', '❌ Отмена'],
     );
-    assert.match(proposal.body.text, /No Place has been saved/);
+    assert.match(proposal.body.text, /Место не сохранено/);
     await assert.rejects(
       f.service.finish(d, 'confirm'),
       /deterministic_candidate_required/,

@@ -2,6 +2,16 @@ import { z } from 'zod';
 export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const Timestamp = z.string().datetime();
 const Confidence = z.number().min(0).max(1);
+const AttributionsSchema = z
+  .array(
+    z
+      .object({
+        provider: z.string().min(1).max(300),
+        providerUri: z.string().url().max(1000),
+      })
+      .strict(),
+  )
+  .max(10);
 export const CoordinatesSchema = z
   .object({
     latitude: z.number().min(-90).max(90),
@@ -46,6 +56,7 @@ export const PlaceSchema = z
     tags: z.array(z.string()),
     createdAt: Timestamp,
     updatedAt: Timestamp,
+    attributions: AttributionsSchema.optional(),
   })
   .strict();
 export const ChainSchema = z
@@ -108,6 +119,7 @@ export const CandidateSchema = z
       .strict()
       .optional(),
     confidence: Confidence,
+    attributions: AttributionsSchema.optional(),
   })
   .strict();
 export const GeographicContextSchema = z

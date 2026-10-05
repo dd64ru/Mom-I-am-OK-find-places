@@ -16,6 +16,7 @@ DEPLOY = f'places-deploy@{PROJECT}.iam.gserviceaccount.com'
 APP_ENGINE_DEFAULT = f'{PROJECT}@appspot.gserviceaccount.com'
 POOL, PROVIDER = 'places-github', 'github-main'
 DEPLOY_PERMISSIONS = sorted(['firebase.projects.get', 'resourcemanager.projects.get', 'cloudfunctions.functions.getIamPolicy', 'cloudfunctions.functions.setIamPolicy', 'run.services.get', 'run.services.getIamPolicy', 'run.services.setIamPolicy'])
+PLACES_USE_ROLE = f'projects/{PROJECT}/roles/placesApiConsumer'
 SECRETS = ['TELEGRAM_BOT_TOKEN', 'GEMINI_API_KEY', 'TELEGRAM_WEBHOOK_SECRET', 'OPENAI_SIWC_SESSION']
 
 
@@ -157,7 +158,7 @@ def main(mode):
     allowed_deploy = {'roles/cloudfunctions.developer', 'roles/serviceusage.serviceUsageConsumer', f'projects/{PROJECT}/roles/placesFunctionsDeploy', f'projects/{PROJECT}/roles/placesDeployRead', 'roles/iap.tunnelResourceAccessor'}
     for entry in policy.get('bindings', []):
         members, role = entry.get('members', []), entry['role']
-        if runtime_member in members and role != 'roles/datastore.user':
+        if runtime_member in members and (role not in ['roles/datastore.user', PLACES_USE_ROLE] or role == PLACES_USE_ROLE and 'condition' in entry):
             fail('unexpected_runtime_project_grant')
         if deploy_member in members and role not in allowed_deploy:
             fail('unexpected_deploy_project_grant')
@@ -172,8 +173,11 @@ def main(mode):
             if any(m != deploy_member and not m.startswith('user:') for m in members):
                 fail('old_iap_member_mismatch')
             old_bindings.append(entry)
-    for name, permissions in [('placesSessionVersionAdder', ['secretmanager.versions.add']), ('placesFunctionsDeploy', DEPLOY_PERMISSIONS)]:
+    places_role_exists = False
+    for name, permissions in [('placesSessionVersionAdder', ['secretmanager.versions.add']), ('placesFunctionsDeploy', DEPLOY_PERMISSIONS), ('placesApiConsumer', ['serviceusage.services.use'])]:
         existing = cloud('iam', 'roles', 'describe', name, missing=True)
+        if name == 'placesApiConsumer':
+            places_role_exists = bool(existing)
         if existing and (existing.get('deleted') or sorted(existing.get('includedPermissions', [])) != sorted(permissions)):
             fail('existing_serverless_custom_role_mismatch')
     accounts = {name: cloud('iam', 'service-accounts', 'describe', email, missing=True) for name, email in [('runtime', RUNTIME), ('deploy', DEPLOY)]}
@@ -211,11 +215,11 @@ def main(mode):
         sa_policy = cloud('iam', 'service-accounts', 'get-iam-policy', DEPLOY)
         if any(b['role'] == 'roles/iam.workloadIdentityUser' and (b['members'] != [principal] or b.get('condition')) for b in sa_policy.get('bindings', [])):
             fail('existing_federation_binding_mismatch')
-    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': provider_state == 'reuse', 'wifProviderAction': provider_state, 'appEngineDefaultAction': app_engine['action'], 'removeAppEngineEditor': app_engine['removeEditor'], 'grantAppEnginePreflightActAs': app_engine['grantPreflightActAs'], 'mode': mode}))
+    print(json.dumps({'project': PROJECT, 'region': REGION, 'VMAndDiskAbsent': True, 'removeNetwork': bool(network), 'removeSubnet': bool(subnet), 'removeFirewall': bool(firewall), 'removeComputeRole': bool(old_role and not old_role.get('deleted')), 'oldIAMBindings': len(old_bindings), 'reuseRuntime': bool(accounts['runtime']), 'reuseDeploy': bool(accounts['deploy']), 'reuseWIF': provider_state == 'reuse', 'wifProviderAction': provider_state, 'appEngineDefaultAction': app_engine['action'], 'removeAppEngineEditor': app_engine['removeEditor'], 'grantAppEnginePreflightActAs': app_engine['grantPreflightActAs'], 'placesApiConsumerAction': 'reuse' if places_role_exists and any(entry['role'] == PLACES_USE_ROLE and runtime_member in entry.get('members', []) for entry in policy.get('bindings', [])) else 'prepare', 'mode': mode}))
     if mode == '--plan':
         return
     # All legacy preflight checks above are read-only; only apply mutates resources.
-    cloud('services', 'enable', 'cloudfunctions.googleapis.com', 'run.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com', 'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com', 'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com', 'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com')
+    cloud('services', 'enable', 'cloudfunctions.googleapis.com', 'run.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com', 'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'places.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com', 'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com', 'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com')
     if artifact and artifact.get('inspectionDeferred'):
         artifact = cloud('artifacts', 'repositories', 'describe', 'gcf-artifacts', '--location=' + REGION, missing=True)
         if artifact and (artifact.get('format') != 'DOCKER' or not artifact.get('cleanupPolicies')):
@@ -258,6 +262,8 @@ def main(mode):
         cloud('compute', 'networks', 'delete', 'places-network')
     custom_role('placesSessionVersionAdder', ['secretmanager.versions.add'])
     custom_role('placesFunctionsDeploy', DEPLOY_PERMISSIONS)
+    custom_role('placesApiConsumer', ['serviceusage.services.use'])
+    binding((['projects'], PROJECT), runtime_member, PLACES_USE_ROLE)
     binding((['projects'], PROJECT), runtime_member, 'roles/datastore.user')
     for secret in SECRETS[2:]:
         if not cloud('secrets', 'describe', secret, missing=True):
@@ -279,7 +285,7 @@ def main(mode):
         operation = 'update-oidc' if provider_state == 'upgrade' else 'create-oidc'
         cloud('iam', 'workload-identity-pools', 'providers', operation, PROVIDER, '--location=global', '--workload-identity-pool=' + POOL, '--issuer-uri=https://token.actions.githubusercontent.com', '--attribute-mapping=' + ','.join(key + '=' + value for key, value in mapping.items()), '--attribute-condition=' + trust)
     binding((['iam', 'service-accounts'], DEPLOY), principal, 'roles/iam.workloadIdentityUser')
-    print(json.dumps({'GCP_PROJECT_ID': PROJECT, 'GCP_WIF_PROVIDER': f'projects/{number}/locations/global/workloadIdentityPools/{POOL}/providers/{PROVIDER}', 'GCP_DEPLOY_SERVICE_ACCOUNT': DEPLOY, 'region': REGION, 'buildAccount': build_email, 'functionNotDeployed': True, 'secretsHaveNoNewPayloads': True}))
+    print(json.dumps({'GCP_PROJECT_ID': PROJECT, 'GCP_WIF_PROVIDER': f'projects/{number}/locations/global/workloadIdentityPools/{POOL}/providers/{PROVIDER}', 'GCP_DEPLOY_SERVICE_ACCOUNT': DEPLOY, 'region': REGION, 'buildAccount': build_email, 'functionDeploymentPerformed': False, 'secretsHaveNoNewPayloads': True}))
 
 
 if __name__ == '__main__':

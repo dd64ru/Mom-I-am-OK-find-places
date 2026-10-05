@@ -17,6 +17,7 @@ act_as = {'role': 'roles/iam.serviceAccountUser', 'members': [deploy]}
 project = {'bindings': [
     {'role': 'roles/editor', 'members': [app, unrelated]},
     {'role': 'roles/datastore.user', 'members': [runtime]},
+    {'role': 'projects/' + m.PROJECT + '/roles/placesApiConsumer', 'members': [runtime]},
     *[{'role': role, 'members': [deploy]} for role in ['roles/cloudfunctions.developer', 'roles/serviceusage.serviceUsageConsumer', 'projects/' + m.PROJECT + '/roles/placesFunctionsDeploy']],
     {'role': 'roles/cloudbuild.builds.builder', 'members': ['serviceAccount:' + build_email]},
 ]}
@@ -42,17 +43,23 @@ if scenario in ['unexpected_member', 'token_creator', 'conditional_actas', 'othe
     if scenario == 'other_policy_role': entry['role'] = 'roles/viewer'
     policies[m.APP_ENGINE_DEFAULT]['bindings'] = [entry]
 if scenario == 'project_actas': project['bindings'].append(copy.deepcopy(act_as))
+if scenario == 'places_runtime_broad': project['bindings'].append({'role': 'roles/serviceusage.serviceUsageConsumer', 'members': [runtime]})
+if scenario == 'places_runtime_conditional': project['bindings'][2]['condition'] = {'title': 'fixture', 'expression': 'true'}
+if scenario == 'places_runtime_foreignrole': project['bindings'][2]['role'] = 'projects/' + m.PROJECT + '/roles/otherRole'
+if scenario == 'places_role_missing': project['bindings'].pop(2)
 initial_project = copy.deepcopy(project)
 initial_policies = copy.deepcopy(policies)
 calls = []
 repo = {'id': 1404706412, 'owner': {'id': 26544806}}
 mapping, trust, _, _ = m.wif_configuration(repo)
 provider = {'attributeMapping': mapping, 'attributeCondition': trust, 'oidc': {'issuerUri': 'https://token.actions.githubusercontent.com'}}
-roles = {'placesSessionVersionAdder': ['secretmanager.versions.add'], 'placesFunctionsDeploy': m.DEPLOY_PERMISSIONS}
+roles = {'placesSessionVersionAdder': ['secretmanager.versions.add'], 'placesFunctionsDeploy': m.DEPLOY_PERMISSIONS, 'placesApiConsumer': ['serviceusage.services.use']}
+if scenario == 'places_role_missing': roles.pop('placesApiConsumer')
+if scenario == 'places_role_mismatch': roles['placesApiConsumer'].append('serviceusage.services.enable')
 required_apis = {
     'cloudfunctions.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com',
     'run.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com',
-    'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com',
+    'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'places.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com',
     'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com',
     'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com',
 }
@@ -74,7 +81,7 @@ def cloud(*args, **kwargs):
         return {'email': 'foreign@example.com' if args[3] == m.APP_ENGINE_DEFAULT and scenario == 'wrong_identity' else args[3], 'disabled': args[3] == m.APP_ENGINE_DEFAULT and scenario == 'disabled'}
     if args[:3] == ('iam', 'service-accounts', 'get-iam-policy'): return copy.deepcopy(policies[args[3]])
     if args[:3] == ('iam', 'roles', 'describe'):
-        return {'includedPermissions': roles[args[3]]} if args[3] in roles else None
+        return {'includedPermissions': roles[args[3]], 'deleted': args[3] == 'placesApiConsumer' and scenario == 'places_role_deleted'} if args[3] in roles else None
     if args[:2] == ('secrets', 'describe'): return {'name': args[2]}
     if args[:2] == ('secrets', 'get-iam-policy'):
         return {'bindings': [] if args[2] == 'GEMINI_API_KEY' else [{'role': 'roles/secretmanager.secretAccessor', 'members': [runtime]}]}
@@ -85,6 +92,10 @@ def cloud(*args, **kwargs):
         if args[3] == 'list': return [{'name': 'projects/123456789012/locations/global/workloadIdentityPools/places-github/providers/github-main'}]
         raise AssertionError('WIF mutation forbidden in this fixture')
     if args[:2] == ('builds', 'get-default-service-account'): return {'serviceAccountEmail': build_email}
+    if args[:3] == ('iam', 'roles', 'create'):
+        assert args[3] == 'placesApiConsumer' and '--permissions=serviceusage.services.use' in args
+        roles['placesApiConsumer'] = ['serviceusage.services.use']
+        return {}
     if 'list' in args: return []
     if 'describe' in args: return None
     if args[:2] == ('services', 'enable'): return {}
@@ -98,6 +109,9 @@ def cloud(*args, **kwargs):
             assert '--condition=None' in args
             project['bindings'][0]['members'].remove(member)
         else:
+            if scenario == 'places_role_missing' and role == m.PLACES_USE_ROLE and member == runtime and not any(b['role'] == role for b in project['bindings']):
+                assert '--condition=None' in args
+                project['bindings'].append({'role': role, 'members': [member]})
             assert any(b['role'] == role and member in b['members'] for b in project['bindings']), 'project grant widened'
     elif args[:2] == ('iam', 'service-accounts'):
         assert operation == 'add-iam-policy-binding'
@@ -118,12 +132,12 @@ def cloud(*args, **kwargs):
 m.cloud = cloud
 shutil.which = lambda _: '/fixture/gcloud'
 urllib.request.urlopen = lambda *a, **k: io.BytesIO(json.dumps(repo).encode())
-bad = ['owner', 'other_role', 'conditional_editor', 'unexpected_member', 'token_creator', 'conditional_actas', 'other_policy_role', 'project_actas', 'absent', 'disabled', 'wrong_identity']
+bad = ['owner', 'other_role', 'conditional_editor', 'unexpected_member', 'token_creator', 'conditional_actas', 'other_policy_role', 'project_actas', 'absent', 'disabled', 'wrong_identity', 'places_runtime_broad', 'places_runtime_conditional', 'places_runtime_foreignrole', 'places_role_mismatch', 'places_role_deleted']
 output = io.StringIO()
 with contextlib.redirect_stdout(output):
     if scenario in bad:
         try: m.main('--apply')
-        except RuntimeError as error: assert str(error) in ['app_engine_default_identity_requires_owner_review', 'app_engine_default_project_grants_require_owner_review', 'app_engine_default_policy_requires_owner_review', 'unexpected_deploy_project_grant']
+        except RuntimeError as error: assert str(error) in ['app_engine_default_identity_requires_owner_review', 'app_engine_default_project_grants_require_owner_review', 'app_engine_default_policy_requires_owner_review', 'unexpected_deploy_project_grant', 'unexpected_runtime_project_grant', 'existing_serverless_custom_role_mismatch']
         else: raise AssertionError('unsafe IAM accepted')
         assert all(set(args) & {'describe', 'list', 'get-iam-policy'} for args in calls)
         assert project == initial_project and policies == initial_policies
@@ -141,6 +155,7 @@ with contextlib.redirect_stdout(output):
             assert_api_enable()
             expected_project = copy.deepcopy(initial_project)
             if app in expected_project['bindings'][0]['members']: expected_project['bindings'][0]['members'].remove(app)
+            if scenario == 'places_role_missing': expected_project['bindings'].append({'role': m.PLACES_USE_ROLE, 'members': [runtime]})
             expected_policies = copy.deepcopy(initial_policies)
             expected_policies[m.APP_ENGINE_DEFAULT]['bindings'] = [copy.deepcopy(act_as)]
             assert project == expected_project and policies == expected_policies
@@ -185,6 +200,12 @@ for (const scenario of [
   'absent',
   'disabled',
   'wrong_identity',
+  'places_role_missing',
+  'places_role_mismatch',
+  'places_role_deleted',
+  'places_runtime_broad',
+  'places_runtime_conditional',
+  'places_runtime_foreignrole',
 ]) {
   test(`App Engine preflight hardening with mocked IAM: ${scenario}`, () => {
     assert.equal(

@@ -57,7 +57,7 @@ export class TelegramInteractions {
     if (!discovery.recognition.clues.length) {
       await this.api.call('sendMessage', {
         chat_id: this.chat,
-        text: 'Could not identify the place. Please resend a clearer screenshot.',
+        text: 'Не удалось определить место. Пришли более чёткий скриншот.',
         reply_parameters: { message_id: replyTo },
       });
       return;
@@ -83,10 +83,10 @@ export class TelegramInteractions {
         inline_keyboard: [
           [
             ...(candidate
-              ? [{ text: '✅ Confirm', callback_data: `p:${token}:c` }]
+              ? [{ text: '✅ Добавить', callback_data: `p:${token}:c` }]
               : []),
-            { text: '✏️ Change city', callback_data: `p:${token}:e` },
-            { text: '❌ Cancel', callback_data: `p:${token}:x` },
+            { text: '✏️ Изменить город', callback_data: `p:${token}:e` },
+            { text: '❌ Отмена', callback_data: `p:${token}:x` },
           ],
         ],
       };
@@ -95,9 +95,17 @@ export class TelegramInteractions {
         reply_parameters: { message_id: replyTo },
         reply_markup: buttons,
       };
-      const attribution = '© OpenStreetMap contributors (ODbL)';
+      const google = candidate?.providerIdentity?.provider === 'google-places';
+      const attribution = google
+        ? [
+            'Источник: Google Maps',
+            ...(candidate?.attributions ?? []).map(
+              (a) => a.provider.replace(/[\r\n]/g, ' ') + ' ' + a.providerUri,
+            ),
+          ].join('\n')
+        : '© Участники OpenStreetMap (ODbL)';
       const message =
-        candidate && candidate.address.formatted
+        candidate && !google && candidate.address.formatted
           ? await this.api.call('sendVenue', {
               ...common,
               latitude: candidate.coordinates.latitude,
@@ -108,7 +116,7 @@ export class TelegramInteractions {
           : await this.api.call('sendMessage', {
               ...common,
               text: candidate
-                ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${candidate.coordinates.latitude}, ${candidate.coordinates.longitude}\n${attribution}`
+                ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted + '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}`
                 : resolutionMessage(discovery),
             });
       await this.docs.change(this.path(token), (raw) => ({
@@ -139,12 +147,12 @@ export class TelegramInteractions {
     if (!messageId) {
       const message = await this.api.call('sendMessage', {
         chat_id: this.chat,
-        text: 'Which city is this place in? Reply directly to this message (up to 200 characters, within 10 minutes).',
+        text: 'В каком городе находится это место? Ответь прямо на это сообщение (до 200 символов, в течение 10 минут).',
         reply_parameters: { message_id: replyTo },
         reply_markup: {
           force_reply: true,
           selective: true,
-          input_field_placeholder: 'City or region',
+          input_field_placeholder: 'Город или регион',
         },
       });
       messageId = Number(message.message_id);
@@ -290,7 +298,7 @@ export class TelegramInteractions {
     if (!acknowledged)
       await this.api.call('answerCallbackQuery', {
         callback_query_id: callback.callbackId,
-        text: 'Received. Expired or already handled actions will be ignored.',
+        text: 'Запрос получен. Просроченные и уже обработанные действия пропускаются.',
       });
     if (!(await this.canCallback(callback))) return;
     const claimed = await this.claim(
@@ -339,9 +347,9 @@ export class TelegramInteractions {
             chat_id: this.chat,
             text: result.changed
               ? result.place
-                ? 'Confirmed — added to your places.'
-                : 'Cancelled. No Place was added.'
-              : 'Already handled.',
+                ? 'Добавлено в сохранённые места.'
+                : 'Отменено. Место не добавлено.'
+              : 'Это действие уже обработано.',
             reply_parameters: { message_id: callback.messageId },
           });
         }
@@ -407,21 +415,18 @@ export class TelegramInteractions {
 function resolutionMessage(discovery: Discovery): string {
   if (discovery.status === 'awaiting_city')
     return discovery.cityOverride
-      ? 'Locality remains ambiguous after correction. No Place has been saved. You can Change city or Cancel.'
-      : 'The city is missing or ambiguous. Please reply to the city prompt. No Place has been saved.';
+      ? 'После уточнения города место всё ещё не удалось определить однозначно. Место не сохранено. Можно изменить город или отменить.'
+      : 'Не удалось уверенно определить город. Ответь на сообщение ниже названием города. Место не сохранено.';
   const reasons: Record<string, string> = {
     locality_conflict:
-      'Your city correction conflicts with verified locality evidence.',
-    locality_mismatch:
-      'The POI results do not match the identified city/locality.',
-    unsupported_category:
-      'This feature is not supported by the current POI resolver.',
+      'Указанный город противоречит найденной информации о месте.',
+    locality_mismatch: 'Найденные места не соответствуют указанному городу.',
+    unsupported_category: 'Этот тип места пока не поддерживается.',
     ambiguous_poi:
-      'Several matching places remain in the identified city/locality.',
+      'Найдено несколько подходящих мест. Уточни город или попробуй другой скриншот.',
     insufficient_evidence:
-      'There is not enough reliable venue evidence. A clearer screenshot may help.',
-    no_match:
-      'The locality is identified, but this place could not be resolved in OpenStreetMap.',
+      'Недостаточно данных, чтобы уверенно определить место. Попробуй более информативный скриншот.',
+    no_match: 'Город определён, но само место найти не удалось.',
   };
-  return `${reasons[discovery.resolutionReason ?? ''] ?? 'Could not resolve this place confidently.'} No Place has been saved. You can Change city or Cancel.`;
+  return `${reasons[discovery.resolutionReason ?? ''] ?? 'Не удалось уверенно определить это место.'} Место не сохранено. Можно изменить город или отменить.`;
 }

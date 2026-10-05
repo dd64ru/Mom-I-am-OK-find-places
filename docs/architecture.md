@@ -7,7 +7,10 @@ flowchart LR
   C --> V[Vision recognition: no coordinates]
   V --> O[OpenAI SIWC / optional outage-only Gemini]
   C --> S[SIWC web-search text and protocol citations]
-  S --> P[Deterministic Nominatim POI]
+  S --> G[Google Places New: primary POI]
+  G --> P[Composed deterministic result]
+  G -. unreliable / transient .-> N[Nominatim fallback]
+  N --> P
   P --> Q[Telegram Confirm / Change city / Cancel]
   Q --> X[Transactional completion]
   X --> F[Firestore canonical Place]
@@ -32,7 +35,7 @@ Discovery confirmation/cancellation and Place creation occur in one Firestore tr
 
 A workspace initialized with `members: []` creates no Firebase Auth user and grants no client access. Admin/ADC runtime IAM is separate from client security rules. Later real Firebase UIDs can be attached to enable member reads of canonical data without schema redesign; the intended future integration is Mom-I-am-OK's real accounts. Cross-project integration is not implemented. Client writes and runtime interaction reads remain denied.
 
-OpenAI vision validates the chosen model once per cold instance. Gemini remains an opt-in emergency fallback only for Responses HTTP 502/503/504; auth/model/config/schema/programming errors fail closed. Search reuses the same OpenAiOAuth/SecretSessions and refresh lease, with `store:false` and streaming, no independent refresh owner and no API key. Coordinates never come from AI. See [geography](geography.md) for real protocol citations, bounded requests, Nominatim policy, cache and global rate limiting.
+OpenAI vision validates the chosen model once per cold instance. Gemini remains an opt-in emergency fallback only for Responses HTTP 502/503/504; auth/model/config/schema/programming errors fail closed. Search reuses the same OpenAiOAuth/SecretSessions and refresh lease, with `store:false` and streaming, no independent refresh owner and no API key. Coordinates never come from AI. See [geography](geography.md) for real protocol citations, bounded requests, Google Places ADC, safe fallback and Nominatim policy/cache/global rate limiting.
 
 Functions v2 / Cloud Run request execution stays in europe-west3, minInstances=0, maxInstances=2, 300 seconds, no VM/poller/VPC/NAT/scheduler. Low-volume synchronous processing is bounded: ten-second POI timeout, 45-second search timeout, 90-second vision transport and finite download budget. Busy/failing work returns 503 for Telegram retry; no work survives the HTTP response. A durable image slot limits image memory and city resolution; album grouping and rotating-refresh fencing are preserved. External Telegram side effects have retry limitations documented in [Telegram](telegram.md); domain Place writes are transactional.
 
@@ -41,3 +44,5 @@ No custom mobile/map application, external map integration, branch crawler, paid
 GeographicContext carries explicit per-discovery city correction and optional workspace hint separately through search and POI ports. VerifiedText carries bounded canonical locality aliases and ISO country code; model output still has no coordinate authority. Deterministic POI resolution returns either one resolved candidate, a city_unknown reason (missing/ambiguous locality), or an unresolved reason (no match, unsupported feature, ambiguous POI, insufficient evidence or locality conflict/mismatch). The core persists those states/reasons explicitly. Only city_unknown automatically creates a ForceReply; unresolved results retain Change city / Cancel. Network/provider failures throw sanitized diagnostics for existing webhook retries, without pretending city is missing.
 
 Future map/export adapters consume the canonical Places boundary; GeoJSON/KML/GPX and supported APIs/links are possible consumers, not implemented features. The repository does not build a custom client. Mom-I-am-OK integration can later attach existing real Firebase UIDs to membership independently of any mapping choice.
+
+Google Places uses runtime ADC, never a Places key/secret or LLM coordinates. Its stable Place ID joins existing provider-identity deduplication. Google references and attributions stay attached to canonical data; future export adapters must honor provider-specific content restrictions. Operational telemetry contains only fixed stage/status/provider/result enums and bounded duration. Telegram labels/prompts/results are Russian. See [Google provider](google-places.md).

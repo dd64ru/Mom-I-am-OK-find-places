@@ -1,4 +1,4 @@
-import { OpenAiFailure } from '@places/providers';
+import { OpenAiFailure, GooglePlacesFailure } from '@places/providers';
 import { timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import {
@@ -161,6 +161,7 @@ export async function handleWebhook(
 
 export function safeDiagnostic(error: unknown): string {
   if (error instanceof OpenAiFailure) return error.code;
+  if (error instanceof GooglePlacesFailure) return error.code;
   const allowed = new Set([
     'poi_lookup_failed',
     'poi_rate_busy',
