@@ -6,6 +6,7 @@ import {
 } from './place-matching.js';
 export type CandidateEvidence = NameMatch & {
   localityState: 'match' | 'unknown' | 'conflict';
+  localityRequired: boolean;
   countryState: 'match' | 'unknown' | 'conflict';
   addressState: 'match' | 'absent' | 'conflict';
   categoryState: ReturnType<typeof categorySupport>;
@@ -21,6 +22,7 @@ export type CandidateDecision =
   | 'accepted_partial_with_category'
   | 'rejected_hard_conflict'
   | 'ambiguous_competition'
+  | 'insufficient_locality'
   | 'insufficient_identity';
 export const hardConflict = (e: CandidateEvidence) =>
   e.localityState === 'conflict' ||
@@ -28,6 +30,10 @@ export const hardConflict = (e: CandidateEvidence) =>
   e.addressState === 'conflict';
 export function identityDecision(e: CandidateEvidence): CandidateDecision {
   if (hardConflict(e)) return 'rejected_hard_conflict';
+  // Explicit user locality is a constraint for every identity class.
+  // A province/unknown city stays neutral, but cannot satisfy that constraint.
+  if (e.localityRequired && e.localityState !== 'match')
+    return 'insufficient_locality';
   if (identityStrength(e.nameEvidence) === 3) return 'accepted_strong_identity';
   if (identityStrength(e.nameEvidence) !== 2) return 'insufficient_identity';
   if (e.localityState === 'match') return 'accepted_partial_with_locality';

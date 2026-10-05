@@ -30,6 +30,7 @@ const evidence = (nameEvidence = 'distinctive_equivalent', overrides = {}) => ({
   nameEvidence,
   nameRank: 0.9,
   localityState: 'unknown',
+  localityRequired: false,
   countryState: 'unknown',
   addressState: 'absent',
   categoryState: 'unknown',
@@ -302,4 +303,34 @@ test('weak Google identity retains bounded OSM fallback after enrichment, preser
     reason: 'insufficient_evidence',
   });
   assert.equal(calls, 1);
+});
+
+test('explicit locality requires positive corroboration for every identity class; category/address/web/country cannot bypass it', () => {
+  for (const type of [
+    'exact',
+    'reordered',
+    'distinctive_equivalent',
+    'strong_partial',
+    'bounded_typo',
+  ]) {
+    const unverified = evidence(type, {
+      localityRequired: true,
+      localityState: 'unknown',
+      countryState: 'match',
+      addressState: 'match',
+      verifiedWeb: true,
+      categoryState: 'compatible',
+      finalRank: 1,
+    });
+    assert.equal(decideCandidate(unverified), 'insufficient_locality');
+    assert.ok(
+      decideCandidate({ ...unverified, localityState: 'match' }).startsWith(
+        'accepted_',
+      ),
+    );
+    assert.equal(
+      decideCandidate({ ...unverified, localityState: 'conflict' }),
+      'rejected_hard_conflict',
+    );
+  }
 });

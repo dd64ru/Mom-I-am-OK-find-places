@@ -277,3 +277,110 @@ for (const category of ['deli', 'grocery', 'food store', 'supermarket'])
       );
     assert.equal(categorySupport('UNKNOWN_DOMAIN', ['deli']), 'unknown');
   });
+
+for (const [
+  scenario,
+  cityOverride,
+  components,
+  formattedAddress,
+  resolved,
+  decision,
+] of [
+  [
+    'English Shanghai municipality cannot satisfy Guangzhou',
+    'Guangzhou',
+    [country, { longText: 'Shanghai', types: ['administrative_area_level_1'] }],
+    'Shanghai, China',
+    false,
+    'insufficient_locality',
+  ],
+  [
+    'Chinese Shanghai municipality contradicts Guangzhou',
+    'Guangzhou',
+    [country, { longText: '上海市', types: ['administrative_area_level_1'] }],
+    '上海市, 中国',
+    false,
+    'rejected_hard_conflict',
+  ],
+  [
+    'English Shanghai municipality corroborates Shanghai',
+    'Shanghai',
+    [country, { longText: 'Shanghai', types: ['administrative_area_level_1'] }],
+    'PRIVATE_ADDRESS',
+    true,
+    'accepted_strong_identity',
+  ],
+  [
+    'Guangdong stays neutral alongside Guangzhou locality',
+    'Guangzhou',
+    [
+      country,
+      { longText: 'Guangdong', types: ['administrative_area_level_1'] },
+      { longText: 'Guangzhou', types: ['locality'] },
+    ],
+    'Guangzhou, Guangdong, China',
+    true,
+    'accepted_strong_identity',
+  ],
+  [
+    'country alone cannot satisfy explicit Guangzhou',
+    'Guangzhou',
+    [country],
+    'China',
+    false,
+    'insufficient_locality',
+  ],
+  [
+    'country-only unique identity can still resolve cityless',
+    undefined,
+    [country],
+    'China',
+    true,
+    'accepted_strong_identity',
+  ],
+  [
+    'formattedAddress corroborates Guangzhou when typed city is unavailable',
+    'Guangzhou',
+    [
+      country,
+      { longText: 'Guangdong', types: ['administrative_area_level_1'] },
+    ],
+    '18 Road, Guangzhou, China',
+    true,
+    'accepted_strong_identity',
+  ],
+])
+  for (const returnedName of ['Grande Alimentari', 'Alimentari Grande'])
+    test(`explicit locality constraint: ${scenario} / ${returnedName}`, async () => {
+      const events = [];
+      const strong = {
+        ...partial,
+        displayName: { text: returnedName },
+        addressComponents: components,
+        formattedAddress,
+      };
+      const result = await provider([strong], events).firstPass(
+        recognition,
+        cityOverride ? { cityOverride } : {},
+      );
+      assert.equal(result.status === 'resolved', resolved);
+      const e = events.find((e) => e.event === 'google_places_decision');
+      assert.equal(e.decision, decision);
+      assert.equal(
+        e.localityState,
+        resolved && cityOverride
+          ? 'match'
+          : decision === 'rejected_hard_conflict'
+            ? 'conflict'
+            : 'unknown',
+      );
+      if (decision === 'insufficient_locality') {
+        assert.ok(
+          events
+            .filter((e) => e.event === 'google_places_filter')
+            .every(
+              (e) => e.accepted === 0 && e.rejected.insufficient_locality === 1,
+            ),
+        );
+      }
+    });
