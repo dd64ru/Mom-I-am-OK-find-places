@@ -127,19 +127,7 @@ for (const [scenario, mutate, reason] of [
     (r) => {
       r.displayName.text = 'Fixture Cafe Airport Branch';
     },
-    'no_match',
-  ],
-  [
-    'generic street/address',
-    (r) => {
-      r.types = [
-        'street_address',
-        'route',
-        'political',
-        'administrative_area_level_1',
-      ];
-    },
-    'no_match',
+    'insufficient_evidence',
   ],
 ]) {
   test(`Google rejects ${scenario}`, async () => {

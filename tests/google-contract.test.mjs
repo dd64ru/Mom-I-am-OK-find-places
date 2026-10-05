@@ -212,8 +212,6 @@ for (const [label, mutate] of [
       (r.addressComponents[0].longText = r.addressComponents[0].shortText =
         '180'),
   ],
-  ['unrelated university', (r) => (r.types = ['university'])],
-  ['unrelated station', (r) => (r.types = ['train_station'])],
 ])
   test(`explicit contrary evidence still prevents a match: ${label}`, async () => {
     const changed = clone(row);

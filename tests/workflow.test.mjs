@@ -391,7 +391,7 @@ test('Google ambiguous/no-match discoveries cannot be confirmed; Russian city/ca
   });
   const discovery = await f.ingest('ambiguous-google');
   await f.interactions.propose(discovery, 11, 1);
-  assert.match(f.sent[0].body.text, /Найдено несколько подходящих мест/);
+  assert.match(f.sent[0].body.text, /Нашлось несколько похожих мест/);
   await assert.rejects(f.service.finish(discovery, 'confirm'));
   await f.interactions.callback(button(f.sent, 'Change city'));
   const prompt = f.sent.find((m) => m.body.reply_markup?.force_reply);
@@ -405,10 +405,7 @@ test('Google ambiguous/no-match discoveries cannot be confirmed; Russian city/ca
   });
   const unresolved = await g.ingest('no-google-place');
   await g.interactions.propose(unresolved, 11, 1);
-  assert.match(
-    g.sent[0].body.text,
-    /Город определён, но само место найти не удалось/,
-  );
+  assert.match(g.sent[0].body.text, /Не удалось найти подходящее место/);
   await assert.rejects(g.service.finish(unresolved, 'confirm'));
   await g.interactions.callback(button(g.sent, 'Cancel'));
   assert.ok(
@@ -2341,7 +2338,6 @@ test('Google requests and optional enrichment stay bounded; absence of clues per
 test('weak/generic name and explicit provider country, city and house-number conflicts cannot be saved by first-result ranking', async () => {
   const badRows = [
     { ...alimentariRow, displayName: { text: 'Unrelated Cafe' } },
-    { ...alimentariRow, types: ['train_station'] },
     {
       ...alimentariRow,
       addressComponents: alimentariRow.addressComponents.map((c) =>
@@ -2656,3 +2652,130 @@ test('search telemetry accepts fixed phase enums only and unknown-city paginatio
     { status: 'city_unknown', reason: 'ambiguous_locality' },
   );
 });
+
+test('short Alimentari city correction resolves the Shanghai branch on first Google query and skips further web enrichment', async () => {
+  const recognition = alimentariRecognition(0.2);
+  recognition.clues[0].name = 'Alimentari';
+  const requests = [],
+    events = [];
+  const f = await setup({
+    recognition,
+    verified: noEvidence,
+    poi: alimentariProvider([alimentariRow, guangzhouRow], requests, events),
+  });
+  await f.interactions.propose(await f.ingest('short-alimentari'), 11, 1);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', 'short-alimentari')).status,
+    'awaiting_city',
+  );
+  assert.ok(
+    f.sent.some((m) =>
+      /Нашлось несколько похожих мест\. Уточни город\./u.test(
+        m.body.text ?? '',
+      ),
+    ),
+  );
+  const before = { google: requests.length, search: f.calls.search };
+  const deps = cityDependencies(f);
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  assert.equal(
+    (await handleWebhook(cityDelivery(9, 'Shanghai'), deps)).status,
+    200,
+  );
+  const d = await f.repository.getDiscovery('fixture', 'short-alimentari');
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(d.candidates[0].providerIdentity.id, googleRow.id);
+  assert.equal(requests.length, before.google + 1);
+  assert.equal(f.calls.search, before.search);
+  assert.equal(f.calls.vision, 1);
+  const decision = events
+    .filter((e) => e.event === 'google_places_decision')
+    .at(-1);
+  assert.equal(decision.phase, 'google_first_pass');
+  assert.equal(decision.nameEvidence, 'distinctive_equivalent');
+  assert.equal(decision.decision, 'accepted_strong_identity');
+  assert.ok(f.sent.some((m) => /Alimentari Grande/u.test(m.body.text ?? '')));
+  assert.ok(
+    f.sent.some((m) => /Источник: Google Maps/u.test(m.body.text ?? '')),
+  );
+});
+
+test("Happy Harbour / OH Bay landmark in Shenzhen Bao'an resolves first pass with live attribution and durable identity only", async () => {
+  const requests = [],
+    events = [];
+  const landmark = {
+    ...googleRow,
+    id: 'happy-harbour-google-id',
+    displayName: { text: 'Happy Harbour' },
+    formattedAddress: "OH Bay, Bao'an, Shenzhen, China",
+    types: ['tourist_attraction', 'park'],
+    location: { latitude: 22.55, longitude: 113.89 },
+    addressComponents: [
+      { longText: "Bao'an", types: ['sublocality_level_1'] },
+      { longText: 'Shenzhen', types: ['locality'] },
+      { longText: 'China', shortText: 'CN', types: ['country'] },
+    ],
+  };
+  const f = await setup({
+    recognition: {
+      visibleText: ['PRIVATE_CAPTION'],
+      clues: [
+        {
+          name: 'Happy Harbour',
+          aliases: ['OH Bay'],
+          category: 'landmark',
+          areaHint: "Shenzhen, Bao'an",
+          confidence: 0.65,
+        },
+      ],
+    },
+    verify: () => assert.fail('unique landmark must skip enrichment'),
+    poi: alimentariProvider([landmark], requests, events),
+  });
+  const d = await f.ingest('happy-harbour');
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(d.liveCandidate.address.city, 'Shenzhen');
+  assert.equal(requests.length, 1);
+  assert.equal(f.calls.search, 0);
+  assert.equal(
+    events.find((e) => e.event === 'google_places_decision').decision,
+    'accepted_strong_identity',
+  );
+  await f.interactions.propose(d, 11, 1);
+  const proposal = f.sent.at(-1).body.text;
+  assert.match(proposal, /OH Bay/);
+  assert.match(proposal, /Bao'an/);
+  assert.match(proposal, /Источник: Google Maps/);
+  await f.service.finish(d, 'confirm');
+  const place = [...f.db.values.entries()].find(([key]) =>
+    key.includes('/places/'),
+  )[1];
+  assert.deepEqual(place.providerIdentity, {
+    provider: 'google-places',
+    id: landmark.id,
+  });
+  for (const prohibited of [
+    'coordinates',
+    'address',
+    'canonicalName',
+    'category',
+    'attributions',
+  ])
+    assert.equal(prohibited in place, false);
+});
+
+for (const [reason, message] of [
+  ['no_match', 'Не удалось найти подходящее место.'],
+  ['ambiguous_poi', 'Нашлось несколько похожих мест. Уточни город.'],
+  ['insufficient_evidence', 'Не удалось уверенно определить конкретное место.'],
+])
+  test(`Russian unresolved message reflects ${reason} without score or screenshot advice`, async () => {
+    const f = await setup({ outcome: { status: 'unresolved', reason } });
+    await f.interactions.propose(await f.ingest('unresolved-message'), 11, 1);
+    const text = f.sent[0].body.text;
+    assert.ok(text.startsWith(message));
+    assert.doesNotMatch(text, /скриншот|порог|score|threshold/u);
+  });

@@ -27,7 +27,7 @@ const generic = new Set([
   'grande',
   'historic',
 ]);
-export const nameTokens = (s: string) =>
+export const nameTokens = (s: string): string[] =>
   s
     .slice(0, 300)
     .normalize('NFKD')
@@ -60,50 +60,67 @@ function oneEdit(a: string, b: string) {
   }
   return edits + (i < a.length || j < b.length ? 1 : 0) <= 1;
 }
-export function venueNameScore(evidence: string, returned: string): number {
+export type NameEvidence =
+  | 'exact'
+  | 'reordered'
+  | 'distinctive_equivalent'
+  | 'strong_partial'
+  | 'bounded_typo'
+  | 'weak'
+  | 'none';
+export type NameMatch = { nameEvidence: NameEvidence; nameRank: number };
+export const identityStrength = (e: NameEvidence): number =>
+  ['exact', 'reordered', 'distinctive_equivalent'].includes(e)
+    ? 3
+    : ['strong_partial', 'bounded_typo'].includes(e)
+      ? 2
+      : e === 'weak'
+        ? 1
+        : 0;
+export function venueNameEvidence(
+  evidence: string,
+  returned: string,
+): NameMatch {
   const a = nameTokens(evidence),
     b = nameTokens(returned);
-  if (
-    !a.length ||
-    !b.length ||
-    a.length > 12 ||
-    b.length > 12 ||
-    !(
-      distinct(evidence).some(
-        (t) => t.length >= 4 || /\p{Script=Han}/u.test(t),
-      ) ||
-      (distinct(evidence).length >= 2 &&
-        distinct(evidence).join('').length >= 7)
-    )
-  )
-    return 0;
-  if (a.join('') === b.join('')) return 0.96;
-  if ([...a].sort().join('|') === [...b].sort().join('|')) return 0.94;
   const left = distinct(evidence),
     right = distinct(returned);
-  // Retain extra distinctive branch words; generic words cannot authorize a match alone.
+  const result = (nameEvidence: NameEvidence, nameRank: number): NameMatch => ({
+    nameEvidence,
+    nameRank,
+  });
+  if (!a.length || !b.length || a.length > 12 || b.length > 12)
+    return result('none', 0);
+  const meaningful =
+    left.some((t) => t.length >= 4 || /\p{Script=Han}/u.test(t)) ||
+    (left.length >= 2 && left.join('').length >= 7);
+  if (!meaningful)
+    return result(a.some((t) => b.includes(t)) ? 'weak' : 'none', 0);
+  if (a.join('') === b.join('')) return result('exact', 0.96);
+  const sameTokens = (x: string[], y: string[]) =>
+    [...x].sort().join('|') === [...y].sort().join('|');
+  if (sameTokens(a, b)) return result('reordered', 0.94);
+  // Generic descriptors never penalize otherwise identical distinctive identity.
+  if (sameTokens(left, right)) return result('distinctive_equivalent', 0.9);
   const used = new Set<number>();
   let typo = false;
   for (const token of left) {
     const index = right.findIndex(
       (t, i) => !used.has(i) && (t === token || oneEdit(t, token)),
     );
-    if (index < 0) return 0;
+    if (index < 0)
+      return result(left.some((t) => right.includes(t)) ? 'weak' : 'none', 0.1);
     if (right[index] !== token) typo = true;
     used.add(index);
   }
-  if (!left.length) return 0;
-  if (left.length === right.length && a.length === b.length)
-    return typo ? 0.86 : 0.9;
+  if (left.length === right.length && typo) return result('bounded_typo', 0.86);
   if (
-    typo ||
-    left.length > right.length ||
-    right.length - left.length > 1 ||
-    !left.some((t) => t.length >= 7)
+    !typo &&
+    right.length - left.length === 1 &&
+    left.some((t) => t.length >= 7)
   )
-    return 0;
-  // A distinctive partial sign requires additional locality/country/category support.
-  return 0.72;
+    return result('strong_partial', 0.72);
+  return result('weak', 0.1);
 }
 const categoryGroups: [RegExp, (t: string) => boolean][] = [
   [
@@ -115,6 +132,10 @@ const categoryGroups: [RegExp, (t: string) => boolean][] = [
         'bakery',
         'restaurant',
         'food_court',
+        'deli',
+        'food_store',
+        'grocery_store',
+        'supermarket',
         'bar',
         'pub',
       ].includes(t) || t.endsWith('_restaurant'),
@@ -129,13 +150,25 @@ const categoryGroups: [RegExp, (t: string) => boolean][] = [
   [
     /shop|store|retail|market/,
     (t) =>
-      ['store', 'market', 'supermarket', 'shopping_mall'].includes(t) ||
-      t.endsWith('_store'),
+      [
+        'store',
+        'market',
+        'grocery_store',
+        'supermarket',
+        'shopping_mall',
+      ].includes(t) || t.endsWith('_store'),
   ],
   [/museum/, (t) => t === 'museum' || t.endsWith('_museum')],
   [
-    /park|garden/,
-    (t) => ['park', 'garden', 'national_park', 'botanical_garden'].includes(t),
+    /park|garden|landmark|attraction/,
+    (t) =>
+      [
+        'park',
+        'garden',
+        'national_park',
+        'botanical_garden',
+        'tourist_attraction',
+      ].includes(t),
   ],
   [
     /station|airport|transport/,
@@ -171,5 +204,5 @@ export const categoryWeight = (support: ReturnType<typeof categorySupport>) =>
       : support === 'conflict'
         ? -0.3
         : 0;
-export const GOOGLE_MATCH_THRESHOLD = 0.88,
-  GOOGLE_MATCH_MARGIN = 0.12;
+// Secondary rank separation, never an absolute acceptance cutoff.
+export const GOOGLE_MATCH_MARGIN = 0.12;

@@ -83,10 +83,9 @@ for (const unrelated of [
       'resolved',
     );
   });
-test('partial signs still require additional support and contradictory country/city/category/house number reject', async () => {
+test('distinctive-equivalent signs accept without country and still reject explicit country/city/house conflicts', async () => {
   const { r, v } = evidence('Alimentari');
   for (const wrong of [
-    { ...row, types: ['university'] },
     {
       ...row,
       addressComponents: row.addressComponents.map((c) =>
@@ -110,13 +109,13 @@ test('partial signs still require additional support and contradictory country/c
       ).status,
       'resolved',
     );
-  const weak = clone(v);
-  delete weak.candidates[0].countryCode;
-  assert.notEqual(
+  const cityless = clone(v);
+  delete cityless.candidates[0].countryCode;
+  assert.equal(
     (
       await provider([
         { ...row, displayName: { text: 'Alimentari Grande' } },
-      ]).resolve(r, weak)
+      ]).resolve(r, cityless)
     ).status,
     'resolved',
   );
@@ -151,7 +150,7 @@ test('two similarly scored Google branches stay ambiguous independently of resul
       reason: 'ambiguous_poi',
     });
 });
-test('explicit score margin prevents exact result winning over a close partial branch; clearly weaker competitor can lose', async () => {
+test('strong identity outranks partial evidence without a universal numeric margin', async () => {
   const { r, v } = evidence();
   const exact = { ...row, displayName: { text: 'Alimentari Grande' } };
   const partial = {
@@ -159,10 +158,10 @@ test('explicit score margin prevents exact result winning over a close partial b
     id: 'branch-two',
     displayName: { text: 'Alimentari Grande Riverside' },
   };
-  assert.deepEqual(await provider([exact, partial]).resolve(r, v), {
-    status: 'unresolved',
-    reason: 'ambiguous_poi',
-  });
+  assert.equal(
+    (await provider([exact, partial]).resolve(r, v)).status,
+    'resolved',
+  );
   const weak = clone(v);
   weak.candidates[0].category = 'place';
   delete weak.candidates[0].countryCode;

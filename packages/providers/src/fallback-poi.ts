@@ -94,11 +94,7 @@ export class FallbackPoi implements PoiProvider {
       }
       if (
         result.status === 'resolved' ||
-        [
-          'locality_conflict',
-          'insufficient_evidence',
-          'no_place_evidence',
-        ].includes(result.reason)
+        ['locality_conflict', 'no_place_evidence'].includes(result.reason)
       )
         return result;
       const secondary = await this.telemetry.measure(
@@ -113,6 +109,7 @@ export class FallbackPoi implements PoiProvider {
       return secondary.status === 'resolved'
         ? secondary
         : result.reason === 'ambiguous_poi' ||
+            result.reason === 'insufficient_evidence' ||
             secondary.status === 'city_unknown'
           ? result
           : secondary;
