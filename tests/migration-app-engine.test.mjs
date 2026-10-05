@@ -49,6 +49,18 @@ repo = {'id': 1404706412, 'owner': {'id': 26544806}}
 mapping, trust, _, _ = m.wif_configuration(repo)
 provider = {'attributeMapping': mapping, 'attributeCondition': trust, 'oidc': {'issuerUri': 'https://token.actions.githubusercontent.com'}}
 roles = {'placesSessionVersionAdder': ['secretmanager.versions.add'], 'placesFunctionsDeploy': m.DEPLOY_PERMISSIONS}
+required_apis = {
+    'cloudfunctions.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com',
+    'run.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com',
+    'firebaseextensions.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com',
+    'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com',
+    'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com',
+}
+assert m.DEPLOY_PERMISSIONS == sorted(['firebase.projects.get', 'resourcemanager.projects.get', 'cloudfunctions.functions.getIamPolicy', 'cloudfunctions.functions.setIamPolicy', 'run.services.get', 'run.services.getIamPolicy', 'run.services.setIamPolicy'])
+def assert_api_enable():
+    enables = [args for args in calls if args[:2] == ('services', 'enable')]
+    assert len(enables) == 1 and set(enables[0][2:]) == required_apis
+    assert len(enables[0][2:]) == len(required_apis)
 def cloud(*args, **kwargs):
     calls.append(args)
     if args[:2] == ('projects', 'describe'): return {'projectNumber': '123456789012'}
@@ -119,9 +131,11 @@ with contextlib.redirect_stdout(output):
         assert summary['wifProviderAction'] == 'reuse'
         assert project == initial_project and policies == initial_policies
         assert all(set(args) & {'describe', 'list', 'get-iam-policy'} for args in calls)
+        assert not any(args[:2] == ('services', 'enable') for args in calls)
         if scenario != 'plan':
             calls.clear()
             m.main('--apply')
+            assert_api_enable()
             expected_project = copy.deepcopy(initial_project)
             if app in expected_project['bindings'][0]['members']: expected_project['bindings'][0]['members'].remove(app)
             expected_policies = copy.deepcopy(initial_policies)
@@ -131,11 +145,14 @@ with contextlib.redirect_stdout(output):
             assert len(mutations) == (0 if scenario == 'reuse' else 1 if scenario in ['resume', 'editor_with_actas'] else 2)
             calls.clear()
             m.main('--apply')
+            assert_api_enable()
             assert not any('remove-iam-policy-binding' in args or (m.APP_ENGINE_DEFAULT in args and 'add-iam-policy-binding' in args) for args in calls)
             assert project == expected_project and policies == expected_policies
             output.seek(0); output.truncate(0)
+            calls.clear()
             m.main('--plan')
             assert json.loads(output.getvalue())['appEngineDefaultAction'] == 'reuse'
+            assert not any(args[:2] == ('services', 'enable') for args in calls)
 print('app_engine_fixture_ok')
 `;
 
