@@ -109,7 +109,7 @@ export class TelegramInteractions {
               ...common,
               text: candidate
                 ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${candidate.coordinates.latitude}, ${candidate.coordinates.longitude}\n${attribution}`
-                : 'Could not resolve this place confidently. Please specify or change its city; no Place has been saved.',
+                : resolutionMessage(discovery),
             });
       await this.docs.change(this.path(token), (raw) => ({
         value: { ...raw, messageId: message.message_id },
@@ -402,4 +402,26 @@ export class TelegramInteractions {
       throw error;
     }
   }
+}
+
+function resolutionMessage(discovery: Discovery): string {
+  if (discovery.status === 'awaiting_city')
+    return discovery.cityOverride
+      ? 'Locality remains ambiguous after correction. No Place has been saved. You can Change city or Cancel.'
+      : 'The city is missing or ambiguous. Please reply to the city prompt. No Place has been saved.';
+  const reasons: Record<string, string> = {
+    locality_conflict:
+      'Your city correction conflicts with verified locality evidence.',
+    locality_mismatch:
+      'The POI results do not match the identified city/locality.',
+    unsupported_category:
+      'This feature is not supported by the current POI resolver.',
+    ambiguous_poi:
+      'Several matching places remain in the identified city/locality.',
+    insufficient_evidence:
+      'There is not enough reliable venue evidence. A clearer screenshot may help.',
+    no_match:
+      'The locality is identified, but this place could not be resolved in OpenStreetMap.',
+  };
+  return `${reasons[discovery.resolutionReason ?? ''] ?? 'Could not resolve this place confidently.'} No Place has been saved. You can Change city or Cancel.`;
 }

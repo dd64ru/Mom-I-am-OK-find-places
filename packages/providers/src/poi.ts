@@ -2,11 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import {
   CandidateSchema,
+  GeographicContextSchema,
+  VerificationSchema,
+  RecognitionSchema,
+  type GeographicContext,
+  type PoiResolution,
   type Candidate,
   type Recognition,
   type Verification,
 } from '@places/schemas';
 import type { PoiProvider } from '@places/core';
+import { selectLocality, localityMatches, normalizedName } from './locality.js';
+import { travelPoi } from './travel-poi.js';
 import type { AtomicDocuments } from './lease.js';
 export const NOMINATIM_ENDPOINT = 'https://nominatim.openstreetmap.org';
 const USER_AGENT =
@@ -28,16 +35,15 @@ const Row = z.object({
     county: z.string().optional(),
     state: z.string().optional(),
     suburb: z.string().optional(),
+    'ISO3166-2-lvl4': z.string().max(32).optional(),
     country: z.string().optional(),
     country_code: z
       .string()
       .regex(/^[a-z]{2}$/)
       .optional(),
   }),
-  namedetails: z.record(z.string()).optional(),
+  namedetails: z.record(z.string().max(300)).optional(),
 });
-const normalized = (s: string) =>
-  s.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu, ' ');
 export function nominatimEndpoint(value: string): string {
   try {
     const url = new URL(value);
@@ -68,20 +74,15 @@ export class NominatimPoi implements PoiProvider {
   async resolve(
     recognition: Recognition,
     verification: Verification,
-    areaHint?: string,
-  ): Promise<Candidate[]> {
-    const verified =
-      verification.status === 'verified' && verification.references.length
-        ? verification.candidates.filter((c) => c.confidence >= 0.8)
-        : [];
-    if (verified.length > 1) return []; // do not arbitrarily choose a textual candidate
-    const highVision = recognition.clues.filter((c) => c.confidence >= 0.85);
-    if (!verified.length && highVision.length !== 1) return [];
-    const clue = verified[0] ?? highVision[0];
-    if (!clue) return [];
-    const city =
-      areaHint ?? ('canonicalName' in clue ? clue.city : clue.areaHint);
-    if (!city) return [];
+    context: GeographicContext = {},
+  ): Promise<PoiResolution> {
+    context = GeographicContextSchema.parse(context);
+    verification = VerificationSchema.parse(verification);
+    recognition = RecognitionSchema.parse(recognition);
+    const decision = selectLocality(recognition, verification, context);
+    if (decision.status !== 'ready') return decision;
+    const { clue, locality } = decision;
+    const city = locality.name;
     const name = 'canonicalName' in clue ? clue.canonicalName : clue.name;
     const aliases = [name, clue.nativeName, ...clue.aliases]
       .filter((s): s is string => !!s)
@@ -96,7 +97,9 @@ export class NominatimPoi implements PoiProvider {
       .slice(0, 500);
     // Only public venue name/area/address clues. Never images, visibleText, captions or conversation.
     const hash = createHash('sha256')
-      .update(`${this.endpoint}:${normalized(query)}`)
+      .update(
+        `${this.endpoint}:en:${locality.countryCode ?? ''}:${normalizedName(query)}`,
+      )
       .digest('hex');
     const path = `_poiCache/${hash}`;
     const cached = await this.docs.change(path, (state) => ({
@@ -143,9 +146,17 @@ export class NominatimPoi implements PoiProvider {
             namedetails: '1',
             limit: '3',
             dedupe: '1',
+            'accept-language': 'en',
+            ...(locality.countryCode
+              ? { countrycodes: locality.countryCode.toLowerCase() }
+              : {}),
           }).toString();
           const response = await this.request(url, {
-            headers: { 'User-Agent': USER_AGENT, Accept: 'application/json' },
+            headers: {
+              'User-Agent': USER_AGENT,
+              Accept: 'application/json',
+              'Accept-Language': 'en',
+            },
             signal: AbortSignal.timeout(10_000),
             redirect: 'error',
           });
@@ -195,30 +206,20 @@ export class NominatimPoi implements PoiProvider {
     try {
       const rows = z.array(Row).max(3).parse(raw);
       const results: Candidate[] = [];
+      let nameMatched = false,
+        categoryMatched = false;
       for (const row of rows) {
-        if (
-          !['amenity', 'shop', 'tourism', 'leisure', 'historic'].includes(
-            row.category,
-          )
-        )
-          continue;
         const names = [row.name, ...Object.values(row.namedetails ?? {})];
         if (
           !names.some((n) =>
-            aliases.some((a) => normalized(a) === normalized(n)),
+            aliases.some((a) => normalizedName(a) === normalizedName(n)),
           )
         )
           continue;
-        const areas = [
-          row.address.city,
-          row.address.town,
-          row.address.village,
-          row.address.municipality,
-          row.address.county,
-          row.address.state,
-          row.address.country,
-        ].filter((s): s is string => !!s);
-        if (!areas.some((a) => normalized(city) === normalized(a))) continue;
+        nameMatched = true;
+        if (!travelPoi(row.category, row.type)) continue;
+        categoryMatched = true;
+        if (!localityMatches(row.address, locality)) continue;
         const externalId = `${row.osm_type}/${row.osm_id}`;
         const reference = {
           provider: 'nominatim',
@@ -226,10 +227,20 @@ export class NominatimPoi implements PoiProvider {
           url: `https://www.openstreetmap.org/${externalId}`,
           observedAt: new Date(this.now()).toISOString(),
         };
+        const canonicalName = row.namedetails?.['name:en']?.trim() || row.name;
+        const nativeName =
+          clue.nativeName ??
+          (row.address.country_code === 'cn'
+            ? row.namedetails?.['name:zh']
+            : undefined) ??
+          row.namedetails?.name ??
+          row.name;
         results.push(
           CandidateSchema.parse({
-            canonicalName: row.name,
-            ...(clue.nativeName ? { nativeName: clue.nativeName } : {}),
+            canonicalName,
+            ...(nativeName && nativeName !== canonicalName
+              ? { nativeName }
+              : {}),
             aliases: clue.aliases,
             category: row.type,
             coordinates: {
@@ -252,7 +263,17 @@ export class NominatimPoi implements PoiProvider {
           }),
         );
       }
-      return results;
+      if (results.length === 1)
+        return { status: 'resolved', candidate: results[0]! };
+      if (results.length > 1)
+        return { status: 'unresolved', reason: 'ambiguous_poi' };
+      if (nameMatched && !categoryMatched)
+        return { status: 'unresolved', reason: 'unsupported_category' };
+      if (categoryMatched)
+        return locality.source === 'vision'
+          ? { status: 'city_unknown', reason: 'ambiguous_locality' }
+          : { status: 'unresolved', reason: 'locality_mismatch' };
+      return { status: 'unresolved', reason: 'no_match' };
     } catch {
       throw new Error('poi_result_invalid');
     }

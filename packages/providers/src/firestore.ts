@@ -67,12 +67,17 @@ export class FirestoreRepository implements PlacesRepository {
       const next = DiscoverySchema.parse({
         ...current,
         candidates: patch.candidates ?? current.candidates,
+        resolutionReason: patch.resolutionReason,
         status: patch.status ?? current.status,
         ...(patch.cityOverride ? { cityOverride: patch.cityOverride } : {}),
         revision: revision + 1,
         updatedAt: new Date().toISOString(),
       });
-      if (!['needs_confirmation', 'awaiting_city'].includes(next.status))
+      if (
+        !['needs_confirmation', 'awaiting_city', 'unresolved'].includes(
+          next.status,
+        )
+      )
         throw new Error('discovery_transition_invalid');
       tx.set(ref, clean(next));
       return next;

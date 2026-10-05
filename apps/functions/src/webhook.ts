@@ -162,6 +162,10 @@ export async function handleWebhook(
 export function safeDiagnostic(error: unknown): string {
   if (error instanceof OpenAiFailure) return error.code;
   const allowed = new Set([
+    'poi_lookup_failed',
+    'poi_rate_busy',
+    'poi_daily_limit',
+    'poi_result_invalid',
     'openai_reauthorization_required',
     'openai_refresh_busy',
     'openai_refresh_failed',

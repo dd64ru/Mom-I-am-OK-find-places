@@ -183,9 +183,9 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             };
             result = await new DiscoveryService(repository, fenced, {
               search: {
-                async verify(recognition, area) {
+                async verify(recognition, context) {
                   budget.throwIfAborted();
-                  const result = await search.verify(recognition, area);
+                  const result = await search.verify(recognition, context);
                   budget.throwIfAborted();
                   await assertOwned();
                   await assertSlot();
@@ -193,9 +193,13 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 },
               },
               poi: {
-                async resolve(recognition, verified, area) {
+                async resolve(recognition, verified, context) {
                   budget.throwIfAborted();
-                  const result = await poi.resolve(recognition, verified, area);
+                  const result = await poi.resolve(
+                    recognition,
+                    verified,
+                    context,
+                  );
                   budget.throwIfAborted();
                   await assertOwned();
                   await assertSlot();

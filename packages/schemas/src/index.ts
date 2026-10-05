@@ -110,6 +110,50 @@ export const CandidateSchema = z
     confidence: Confidence,
   })
   .strict();
+export const GeographicContextSchema = z
+  .object({
+    cityOverride: z.string().min(1).max(200).optional(),
+    workspaceAreaHint: z.string().min(1).max(200).optional(),
+  })
+  .strict();
+export const ResolutionReasonSchema = z.enum([
+  'missing_locality',
+  'ambiguous_locality',
+  'no_place_evidence',
+  'insufficient_evidence',
+  'no_match',
+  'unsupported_category',
+  'ambiguous_poi',
+  'locality_conflict',
+  'locality_mismatch',
+]);
+export const PoiResolutionSchema = z.discriminatedUnion('status', [
+  z
+    .object({ status: z.literal('resolved'), candidate: CandidateSchema })
+    .strict(),
+  z
+    .object({
+      status: z.literal('city_unknown'),
+      reason: z.enum(['missing_locality', 'ambiguous_locality']),
+    })
+    .strict(),
+  z
+    .object({
+      status: z.literal('unresolved'),
+      reason: z.enum([
+        'no_place_evidence',
+        'insufficient_evidence',
+        'no_match',
+        'unsupported_category',
+        'ambiguous_poi',
+        'locality_conflict',
+        'locality_mismatch',
+      ]),
+    })
+    .strict(),
+]);
+export type GeographicContext = z.infer<typeof GeographicContextSchema>;
+export type PoiResolution = z.infer<typeof PoiResolutionSchema>;
 export const DiscoverySchema = z
   .object({
     id: IdSchema,
@@ -121,10 +165,12 @@ export const DiscoverySchema = z
     status: z.enum([
       'needs_confirmation',
       'awaiting_city',
+      'unresolved',
       'confirmed',
       'cancelled',
     ]),
     cityOverride: z.string().min(1).max(200).optional(),
+    resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
     confirmedPlaceId: IdSchema.optional(),
     createdAt: Timestamp,
@@ -147,6 +193,11 @@ export const VerifiedTextSchema = z
     aliases: z.array(z.string().min(1).max(300)).max(10),
     category: z.string().min(1).max(100),
     city: z.string().min(1).max(200).optional(),
+    cityAliases: z.array(z.string().min(1).max(200)).max(10).default([]),
+    countryCode: z
+      .string()
+      .regex(/^[A-Z]{2}$/)
+      .optional(),
     district: z.string().min(1).max(200).optional(),
     country: z.string().min(1).max(100).optional(),
     addressClue: z.string().min(1).max(300).optional(),

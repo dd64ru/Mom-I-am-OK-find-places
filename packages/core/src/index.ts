@@ -1,15 +1,16 @@
 import {
   DiscoverySchema,
   VerificationSchema,
-  CandidateSchema,
+  PoiResolutionSchema,
   type Place,
   type Chain,
   type Workspace,
   type Recognition,
-  type Candidate,
   type Discovery,
   type Reference,
   type Verification,
+  type GeographicContext,
+  type PoiResolution,
 } from '@places/schemas';
 export interface ImageInput {
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
@@ -27,14 +28,17 @@ export interface VisionProvider {
   ): Promise<VisionResult>;
 }
 export interface SearchProvider {
-  verify(recognition: Recognition, areaHint?: string): Promise<Verification>;
+  verify(
+    recognition: Recognition,
+    context?: GeographicContext,
+  ): Promise<Verification>;
 }
 export interface PoiProvider {
   resolve(
     recognition: Recognition,
     verification: Verification,
-    areaHint?: string,
-  ): Promise<Candidate[]>;
+    context?: GeographicContext,
+  ): Promise<PoiResolution>;
 }
 export interface Completion {
   discovery: Discovery;
@@ -117,26 +121,36 @@ export class DiscoveryService {
       return discovery;
     const workspace = await this.repository.getWorkspace(discovery.workspaceId);
     if (!workspace) throw new Error('workspace_missing');
-    const area = discovery.cityOverride ?? workspace.areaHint;
+    const context: GeographicContext = {
+      cityOverride: discovery.cityOverride,
+      workspaceAreaHint: workspace.areaHint,
+    };
     const verified = VerificationSchema.parse(
-      await this.verification.search.verify(discovery.recognition, area),
+      await this.verification.search.verify(discovery.recognition, context),
     );
-    const candidates = (
-      await this.verification.poi.resolve(discovery.recognition, verified, area)
-    ).map((c) => CandidateSchema.parse(c));
-    // Ambiguous deterministic matches need clarification; no arbitrary first-result selection.
-    const selected = candidates.length === 1 ? candidates : [];
+    const resolution = PoiResolutionSchema.parse(
+      await this.verification.poi.resolve(
+        discovery.recognition,
+        verified,
+        context,
+      ),
+    );
     return (
       (await this.repository.reviseDiscovery(
         discovery.workspaceId,
         discovery.id,
         discovery.revision,
         {
-          candidates: selected,
+          candidates:
+            resolution.status === 'resolved' ? [resolution.candidate] : [],
           status:
-            selected.length || !discovery.recognition.clues.length
+            resolution.status === 'resolved'
               ? 'needs_confirmation'
-              : 'awaiting_city',
+              : resolution.status === 'city_unknown'
+                ? 'awaiting_city'
+                : 'unresolved',
+          resolutionReason:
+            resolution.status === 'resolved' ? undefined : resolution.reason,
         },
       )) ??
       (await this.repository.getDiscovery(discovery.workspaceId, discovery.id))!

@@ -11,16 +11,17 @@ flowchart LR
   P --> Q[Telegram Confirm / Change city / Cancel]
   Q --> X[Transactional completion]
   X --> F[Firestore canonical Place]
+  F -. future projection .-> M[Replaceable external map / export adapters]
   Q --> R[City override: reuse Recognition]
   R --> S
 ```
 
-`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place contains name/aliases/category, WGS84 coordinates, address, evidence, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by a map, Android/OsmAnd or Mom-I-am-OK adapter.
+`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place contains name/aliases/category, WGS84 coordinates, address, evidence, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by replaceable external map/export or Mom-I-am-OK adapters.
 
 Firestore hierarchy:
 
 - `workspaces/{id}`: Firebase UID `members`, locale, optional area hint and timestamps. Empty members is a legitimate Telegram-only workspace.
-- `discoveries`: Recognition, actual vision provider, verified deterministic candidates, per-discovery city override, revision, needs_confirmation/awaiting_city/confirmed/cancelled and confirmed Place ID.
+- `discoveries`: Recognition, actual vision provider, verified deterministic candidates, per-discovery city override, revision, needs_confirmation/awaiting_city/unresolved/confirmed/cancelled, resolution reason and confirmed Place ID.
 - `places`: canonical confirmed/archived geographic places. IDs deterministically dedupe provider identities without merging separate chain branches.
 - `chains`: existing reusable model; linking/branch browsing is future work.
 - `pendingIngress`: projected file/source IDs and debounce/lease metadata; no conversation, captions, raw update or image bytes.
@@ -35,4 +36,8 @@ OpenAI vision validates the chosen model once per cold instance. Gemini remains 
 
 Functions v2 / Cloud Run request execution stays in europe-west3, minInstances=0, maxInstances=2, 300 seconds, no VM/poller/VPC/NAT/scheduler. Low-volume synchronous processing is bounded: ten-second POI timeout, 45-second search timeout, 90-second vision transport and finite download budget. Busy/failing work returns 503 for Telegram retry; no work survives the HTTP response. A durable image slot limits image memory and city resolution; album grouping and rotating-refresh fencing are preserved. External Telegram side effects have retry limitations documented in [Telegram](telegram.md); domain Place writes are transactional.
 
-No web map, Android/OsmAnd, branch crawler, paid geocoder, Cloud Tasks or artificial login requirement is introduced. A confirmed Place in Firestore is the “map update” for this milestone.
+No custom mobile/map application, external map integration, branch crawler, paid geocoder, Cloud Tasks or artificial login requirement is introduced. A confirmed Place in Firestore is the “map update” for this milestone.
+
+GeographicContext carries explicit per-discovery city correction and optional workspace hint separately through search and POI ports. VerifiedText carries bounded canonical locality aliases and ISO country code; model output still has no coordinate authority. Deterministic POI resolution returns either one resolved candidate, a city_unknown reason (missing/ambiguous locality), or an unresolved reason (no match, unsupported feature, ambiguous POI, insufficient evidence or locality conflict/mismatch). The core persists those states/reasons explicitly. Only city_unknown automatically creates a ForceReply; unresolved results retain Change city / Cancel. Network/provider failures throw sanitized diagnostics for existing webhook retries, without pretending city is missing.
+
+Future map/export adapters consume the canonical Places boundary; GeoJSON/KML/GPX and supported APIs/links are possible consumers, not implemented features. The repository does not build a custom client. Mom-I-am-OK integration can later attach existing real Firebase UIDs to membership independently of any mapping choice.

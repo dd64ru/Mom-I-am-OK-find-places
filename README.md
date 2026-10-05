@@ -1,6 +1,6 @@
 # Mom I'm OK — Places
 
-Private shared place discovery from images. Telegram is the first input; Firestore owns shared data. A future Android companion will synchronize confirmed places into installed OsmAnd. The core is independent of country, input channel, AI vendor and map client.
+Private shared place discovery from images. Telegram is the first input; Firestore owns shared data. Future replaceable adapters may project/export canonical Places into existing third-party mapping products. The map client is not selected. The core is independent of country, input channel, AI vendor and map client.
 
 ## Local setup
 
@@ -19,20 +19,19 @@ Production is now an authenticated **Firebase Functions v2 Telegram webhook** in
 
 ## Repository
 
-| Path                 | Responsibility                                                                            |
-| -------------------- | ----------------------------------------------------------------------------------------- |
-| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts  |
-| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                                |
-| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                        |
-| `apps/worker`        | Local configuration, privacy gate and OAuth/model/vision/ID diagnostics                   |
-| `apps/functions`     | Authenticated HTTPS webhook, durable ingress and serverless composition                   |
-| `apps/android-sync`  | Companion-app scaffold documentation; no Android build yet                                |
-| `infra`              | Firestore client rules, index configuration, serverless migration and IAM/WIF preparation |
-| `docs`               | Architecture, decisions, authorization, Telegram UX, Android integration                  |
+| Path                 | Responsibility                                                                                                |
+| -------------------- | ------------------------------------------------------------------------------------------------------------- |
+| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts                      |
+| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                                                    |
+| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                                            |
+| `apps/worker`        | Local configuration, privacy gate and OAuth/model/vision/ID diagnostics                                       |
+| `apps/functions`     | Authenticated HTTPS webhook, durable ingress and serverless composition                                       |
+| `infra`              | Firestore client rules, index configuration, serverless migration and IAM/WIF preparation                     |
+| `docs`               | Architecture, decisions, authorization, Telegram UX, geographic verification and future projection boundaries |
 
 ## What runs today
 
-The webhook accepts images/albums from any human in one configured private group. Vision recognition is followed by bounded SIWC Responses web-search verification and deterministic Nominatim POI resolution. A proposal offers **Confirm / Change city / Cancel**. Change city uses an owned, expiring ForceReply and reruns only verification/geocoding. Explicit confirmation transactionally creates/reuses one canonical WGS84 Place in Firestore. This is the current “map update”; a real map/UI, Android/OsmAnd, branch lookup and exports come later.
+The webhook accepts images/albums from any human in one configured private group. Vision recognition is followed by bounded SIWC Responses web-search verification and deterministic Nominatim POI resolution. A proposal offers **Confirm / Change city / Cancel**. Change city uses an owned, expiring ForceReply and reruns only verification/geocoding. Explicit confirmation transactionally creates/reuses one canonical WGS84 Place in Firestore. This is the current “map update”; branch lookup and external map/export adapters are future work; no custom mobile/cartographic app is planned.
 
 `/help` and `/area <city or region>` are supported. Ordinary conversation, unknown commands and captions are ignored. Opaque callback tokens are mapped to durable interaction records; discovery revisions fence stale actions, while terminal transactions prevent duplicate Places or inconsistent confirm/cancel races. Albums retain Firestore-backed debounce/leases and bounded images. See [Telegram behavior](docs/telegram.md).
 
@@ -51,3 +50,11 @@ Read [architecture](docs/architecture.md), [decisions](docs/decisions.md), and [
 ## License
 
 [MIT](LICENSE).
+
+## Locality and resolution safety
+
+Geographic verification receives distinct `cityOverride` and `workspaceAreaHint` fields. Explicit correction is a hard constraint; conflicting verified locality fails closed. Cited canonical city/locality beats vision clues and workspace hints. A workspace hint alone cannot authorize a same-name branch. Nominatim requests English and matches bounded cited native/transliterated locality aliases with an optional ISO country constraint, retaining native venue names.
+
+Missing/ambiguous locality may prompt for city. A known locality with an absent, unsupported or ambiguous POI is `unresolved`, with Change city / Cancel and no automatic city-prompt loop. Temporary provider failures retain webhook retry behavior. See [geography](docs/geography.md) for travel feature classifications and conservative matching limits.
+
+Future boundary: **Firestore canonical Places → replaceable external map/export adapters**, for example GeoJSON/KML/GPX or supported third-party APIs/links. No external integration is implemented. Mom-I-am-OK's existing real users may later be attached to workspace membership.
