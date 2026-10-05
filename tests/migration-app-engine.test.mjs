@@ -52,7 +52,7 @@ roles = {'placesSessionVersionAdder': ['secretmanager.versions.add'], 'placesFun
 required_apis = {
     'cloudfunctions.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com',
     'run.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com',
-    'firebaseextensions.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com',
+    'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com',
     'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com',
     'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com',
 }
@@ -61,6 +61,9 @@ def assert_api_enable():
     enables = [args for args in calls if args[:2] == ('services', 'enable')]
     assert len(enables) == 1 and set(enables[0][2:]) == required_apis
     assert len(enables[0][2:]) == len(required_apis)
+    if scenario == 'cloud_billing':
+        assert 'cloudbilling.googleapis.com' in enables[0][2:], 'Firebase CLI billing prerequisite missing'
+        assert not set(enables[0][2:]) & {'cloudscheduler.googleapis.com', 'cloudtasks.googleapis.com'}
 def cloud(*args, **kwargs):
     calls.append(args)
     if args[:2] == ('projects', 'describe'): return {'projectNumber': '123456789012'}
@@ -155,6 +158,15 @@ with contextlib.redirect_stdout(output):
             assert not any(args[:2] == ('services', 'enable') for args in calls)
 print('app_engine_fixture_ok')
 `;
+
+test('Firebase CLI 15.32.1 Cloud Billing prerequisite is owner-preenabled without optional trigger APIs or CI IAM widening', () => {
+  assert.equal(
+    execFileSync('python3', ['-c', harness, 'cloud_billing'], {
+      encoding: 'utf8',
+    }).trim(),
+    'app_engine_fixture_ok',
+  );
+});
 
 for (const scenario of [
   'plan',

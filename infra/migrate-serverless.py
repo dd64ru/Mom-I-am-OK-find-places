@@ -215,7 +215,7 @@ def main(mode):
     if mode == '--plan':
         return
     # All legacy preflight checks above are read-only; only apply mutates resources.
-    cloud('services', 'enable', 'cloudfunctions.googleapis.com', 'run.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com', 'firebaseextensions.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com', 'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com', 'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com')
+    cloud('services', 'enable', 'cloudfunctions.googleapis.com', 'run.googleapis.com', 'cloudbuild.googleapis.com', 'artifactregistry.googleapis.com', 'eventarc.googleapis.com', 'pubsub.googleapis.com', 'storage.googleapis.com', 'firebaseextensions.googleapis.com', 'cloudbilling.googleapis.com', 'secretmanager.googleapis.com', 'firestore.googleapis.com', 'iam.googleapis.com', 'iamcredentials.googleapis.com', 'sts.googleapis.com', 'firebase.googleapis.com', 'cloudresourcemanager.googleapis.com')
     if artifact and artifact.get('inspectionDeferred'):
         artifact = cloud('artifacts', 'repositories', 'describe', 'gcf-artifacts', '--location=' + REGION, missing=True)
         if artifact and (artifact.get('format') != 'DOCKER' or not artifact.get('cleanupPolicies')):
