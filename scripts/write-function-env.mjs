@@ -28,7 +28,9 @@ try {
   await writeFile(
     '.deploy/functions/.env.mom-im-ok-places',
     names.map((name) => `${name}=${values[name]}`).join('\n') +
-      `\nNOMINATIM_ENDPOINT=${endpoint}\nGEMINI_FALLBACK_ENABLED=false\n`,
+      // Firebase analyzes every exported function even for a webhook-only deploy.
+      // Feed enablement requires a separate owner-reviewed deployment configuration.
+      `\nNOMINATIM_ENDPOINT=${endpoint}\nGEMINI_FALLBACK_ENABLED=false\nPLACES_FEED_ENABLED=false\nPLACES_FEED_URL_TOKENS_ENABLED=false\n`,
   );
 } catch {
   console.error(
