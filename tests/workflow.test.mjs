@@ -2872,3 +2872,99 @@ test('production Alimentari partial with English Shanghai admin component resolv
     ),
   );
 });
+
+for (const [official, locality, tier, wording] of [
+  [
+    'Juniper Museum',
+    false,
+    'medium',
+    /Уверенность: средняя.*Нашёл возможный вариант/u,
+  ],
+  [
+    'Juniper Museum Riverside',
+    false,
+    'low',
+    /Уверенность: низкая.*Но это не точно/u,
+  ],
+  [
+    'Juniper Museum',
+    true,
+    'high',
+    /Уверенность: высокая.*Похоже, это именно оно/u,
+  ],
+])
+  test(`Google ${tier} proposal keeps human confirmation and refresh confidence without persisting Google content`, async () => {
+    const liveRow = {
+      ...googleRow,
+      displayName: { text: official },
+      types: ['museum'],
+      formattedAddress: 'Provider-only address',
+      addressComponents: locality
+        ? [{ longText: 'Rome', types: ['locality'] }]
+        : [],
+    };
+    let refreshes = 0;
+    const poi = new GooglePlacesPoi(
+      async () => googleToken,
+      googleProject,
+      async (_url, init) => {
+        if (init.method === 'GET') {
+          refreshes++;
+          return Response.json(liveRow);
+        }
+        return Response.json({ places: [liveRow] });
+      },
+    );
+    const f = await setup({
+      recognition: {
+        visibleText: [],
+        clues: [
+          {
+            name: 'Juniper Museum',
+            aliases: [],
+            category: 'museum',
+            confidence: 0.01,
+          },
+        ],
+      },
+      verified: noEvidence,
+      poi,
+    });
+    const initial = await f.ingest(`confidence-${tier}`);
+    const pending = await f.service.requestCity(initial);
+    const d = await f.service.correctCity(pending, 'Rome');
+    assert.equal(d.status, 'needs_confirmation');
+    assert.equal(d.liveCandidate.candidateConfidence, tier);
+    assert.equal(d.candidates[0].candidateConfidence, tier);
+    assert.equal(
+      [...f.db.values.keys()].some((p) => p.includes('/places/')),
+      false,
+    );
+    // Simulate a webhook retry: only identity and application confidence were retained.
+    const stored = await f.repository.getDiscovery('fixture', d.id);
+    assert.equal('coordinates' in stored.candidates[0], false);
+    assert.equal('address' in stored.candidates[0], false);
+    assert.equal('canonicalName' in stored.candidates[0], false);
+    await f.interactions.propose(stored, 11, 1);
+    assert.equal(refreshes, 1);
+    const card = f.sent.at(-1).body;
+    assert.match(card.text, wording);
+    assert.match(card.text, /Juniper Museum/u);
+    assert.match(card.text, /Источник: Google Maps/u);
+    assert.match(card.text, /https:\/\/www.google.com\/maps\/search/u);
+    assert.ok(
+      card.reply_markup.inline_keyboard[0].some(
+        (b) => b.text === '✅ Добавить',
+      ),
+    );
+    assert.equal(
+      [...f.db.values.keys()].some((p) => p.includes('/places/')),
+      false,
+    );
+    const confirmed = await f.service.finish(stored, 'confirm');
+    assert.equal(confirmed.changed, true);
+    assert.equal(confirmed.place.providerIdentity.id, googleRow.id);
+    assert.equal('coordinates' in confirmed.place, false);
+    assert.equal('address' in confirmed.place, false);
+    assert.equal('canonicalName' in confirmed.place, false);
+  });

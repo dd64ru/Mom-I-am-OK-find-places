@@ -28,6 +28,7 @@ import {
 } from './place-matching.js';
 import {
   compareEvidence,
+  candidateConfidence,
   decideCandidate,
   identityDecision,
   isAccepted,
@@ -244,7 +245,6 @@ export type GoogleFilterEvent = {
     locality_conflict: number;
     address_conflict: number;
     insufficient_identity: number;
-    insufficient_locality: number;
     ambiguous_competition: number;
   };
 };
@@ -539,7 +539,6 @@ export class GooglePlacesPoi implements PoiProvider {
         locality_conflict: 0,
         address_conflict: 0,
         insufficient_identity: 0,
-        insufficient_locality: 0,
         ambiguous_competition: 0,
       };
       const event: GoogleFilterEvent = {
@@ -621,7 +620,6 @@ export class GooglePlacesPoi implements PoiProvider {
         const evidence: CandidateEvidence = {
           nameEvidence: winning.nameEvidence,
           nameRank: winning.nameRank,
-          localityRequired: !!input.data.context.cityOverride,
           localityState: geography.cityConflict
             ? 'conflict'
             : geography.cityMatch
@@ -671,8 +669,6 @@ export class GooglePlacesPoi implements PoiProvider {
         if (geography.countryMatch) event.countryCompatible++;
         if (addressState === 'match') event.addressCompatible++;
         if (isAccepted(rowDecision)) event.accepted++;
-        else if (rowDecision === 'insufficient_locality')
-          rejected.insufficient_locality++;
         else rejected.insufficient_identity++;
         const address = geography.address;
         const reference = {
@@ -720,6 +716,7 @@ export class GooglePlacesPoi implements PoiProvider {
           address: { formatted: row.formattedAddress ?? '', ...address },
           references: [...input.data.verification.references, reference],
           confidence: matchingClue.confidence,
+          candidateConfidence: candidateConfidence(evidence),
           resolution: 'deterministic_poi',
           providerIdentity: { provider: 'google-places', id: row.id },
           ...(row.attributions?.length
@@ -772,6 +769,9 @@ export class GooglePlacesPoi implements PoiProvider {
               (runner?.evidence.finalRank ?? 0) * 1000,
             ),
             decision,
+            candidateConfidence: isAccepted(decision)
+              ? candidateConfidence(topEvidence)
+              : undefined,
           });
       } catch {
         /* best effort */

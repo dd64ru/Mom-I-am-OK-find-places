@@ -30,7 +30,6 @@ const evidence = (nameEvidence = 'distinctive_equivalent', overrides = {}) => ({
   nameEvidence,
   nameRank: 0.9,
   localityState: 'unknown',
-  localityRequired: false,
   countryState: 'unknown',
   addressState: 'absent',
   categoryState: 'unknown',
@@ -62,10 +61,10 @@ test('strong unique identity accepts even at low rank and contradictory category
   );
 });
 for (const type of ['strong_partial', 'bounded_typo'])
-  test(`${type} requires meaningful corroboration; country/provider rank alone cannot supply it`, () => {
+  test(`${type} allows unique meaningful identity with missing corroboration at low confidence`, () => {
     assert.equal(
       decideCandidate(evidence(type, { finalRank: 1, countryState: 'match' })),
-      'insufficient_identity',
+      'accepted_partial_uncorroborated',
     );
     for (const [field, value, code] of [
       ['localityState', 'match', 'locality'],
@@ -225,6 +224,7 @@ test('Google decision telemetry contains exactly fixed evidence enums and intege
         'finalRankPermille',
         'runnerUpRankPermille',
         'decision',
+        'candidateConfidence',
       ].sort(),
     );
     assert.equal(e.decision, 'rejected_hard_conflict');
@@ -305,7 +305,7 @@ test('weak Google identity retains bounded OSM fallback after enrichment, preser
   assert.equal(calls, 1);
 });
 
-test('explicit locality requires positive corroboration for every identity class; category/address/web/country cannot bypass it', () => {
+test('unknown locality is neutral for all meaningful identity classes, but explicit conflict remains hard', () => {
   for (const type of [
     'exact',
     'reordered',
@@ -314,7 +314,6 @@ test('explicit locality requires positive corroboration for every identity class
     'bounded_typo',
   ]) {
     const unverified = evidence(type, {
-      localityRequired: true,
       localityState: 'unknown',
       countryState: 'match',
       addressState: 'match',
@@ -322,7 +321,7 @@ test('explicit locality requires positive corroboration for every identity class
       categoryState: 'compatible',
       finalRank: 1,
     });
-    assert.equal(decideCandidate(unverified), 'insufficient_locality');
+    assert.ok(decideCandidate(unverified).startsWith('accepted_'));
     assert.ok(
       decideCandidate({ ...unverified, localityState: 'match' }).startsWith(
         'accepted_',

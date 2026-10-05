@@ -141,6 +141,11 @@ export class TelegramInteractions {
             ...(candidate?.attributions ?? []).map((a) => renderAttribution(a)),
           ].join('\n')
         : '© Участники OpenStreetMap (ODbL)';
+      const confidenceText = google
+        ? candidate?.candidateConfidence === 'high'
+          ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
+          : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
+        : '';
       const message =
         candidate && !google && candidate.address.formatted
           ? await this.api.call('sendVenue', {
@@ -153,7 +158,7 @@ export class TelegramInteractions {
           : await this.api.call('sendMessage', {
               ...common,
               text: (candidate
-                ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
+                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
                 : resolutionMessage(discovery)
               ).slice(0, 4000),
             });

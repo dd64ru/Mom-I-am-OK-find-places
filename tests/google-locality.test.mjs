@@ -184,7 +184,7 @@ for (const [city, type] of [
       'rejected_hard_conflict',
     );
   });
-test('country agreement alone cannot masquerade as city agreement or corroborate partial identity', async () => {
+test('country agreement never masquerades as city agreement; unique partial identity surfaces with low confidence', async () => {
   const events = [];
   const result = await provider(
     [
@@ -196,7 +196,8 @@ test('country agreement alone cannot masquerade as city agreement or corroborate
     ],
     events,
   ).resolve(recognition, semantic, { cityOverride: 'шанхай' });
-  assert.equal(result.reason, 'insufficient_evidence');
+  assert.equal(result.status, 'resolved');
+  assert.equal(result.candidate.candidateConfidence, 'low');
   const e = events.find((e) => e.event === 'google_places_filter');
   assert.equal(e.cityCompatible, 0);
   assert.equal(e.countryCompatible, 1);
@@ -287,12 +288,12 @@ for (const [
   decision,
 ] of [
   [
-    'English Shanghai municipality cannot satisfy Guangzhou',
+    'unfamiliar English admin1 remains unknown for explicit Guangzhou',
     'Guangzhou',
     [country, { longText: 'Shanghai', types: ['administrative_area_level_1'] }],
     'Shanghai, China',
-    false,
-    'insufficient_locality',
+    true,
+    'accepted_strong_identity',
   ],
   [
     'Chinese Shanghai municipality contradicts Guangzhou',
@@ -323,12 +324,12 @@ for (const [
     'accepted_strong_identity',
   ],
   [
-    'country alone cannot satisfy explicit Guangzhou',
+    'country alone leaves explicit Guangzhou unknown',
     'Guangzhou',
     [country],
     'China',
-    false,
-    'insufficient_locality',
+    true,
+    'accepted_strong_identity',
   ],
   [
     'country-only unique identity can still resolve cityless',
@@ -368,19 +369,15 @@ for (const [
       assert.equal(e.decision, decision);
       assert.equal(
         e.localityState,
-        resolved && cityOverride
+        resolved &&
+          cityOverride &&
+          ![
+            'unfamiliar English admin1 remains unknown for explicit Guangzhou',
+            'country alone leaves explicit Guangzhou unknown',
+          ].includes(scenario)
           ? 'match'
           : decision === 'rejected_hard_conflict'
             ? 'conflict'
             : 'unknown',
       );
-      if (decision === 'insufficient_locality') {
-        assert.ok(
-          events
-            .filter((e) => e.event === 'google_places_filter')
-            .every(
-              (e) => e.accepted === 0 && e.rejected.insufficient_locality === 1,
-            ),
-        );
-      }
     });

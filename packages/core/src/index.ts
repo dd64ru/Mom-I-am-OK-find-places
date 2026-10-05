@@ -232,7 +232,10 @@ export class DiscoveryService {
         await this.verification.poi.refresh(candidate.providerIdentity),
       );
       if (!display.success) throw new ProviderFailure('poi_adaptation_failed');
-      return display.data;
+      return {
+        ...display.data,
+        candidateConfidence: candidate.candidateConfidence,
+      };
     } catch (error) {
       await this.recordFailure(discovery, error);
       return;

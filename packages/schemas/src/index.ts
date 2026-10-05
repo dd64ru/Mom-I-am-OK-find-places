@@ -173,11 +173,13 @@ export const CandidateSchema = z
       ])
       .optional(),
     confidence: Confidence,
+    candidateConfidence: z.enum(['high', 'medium', 'low']).optional(),
     attributions: AttributionsSchema.optional(),
   })
   .strict();
 export const GoogleStoredCandidateSchema = z
   .object({
+    candidateConfidence: z.enum(['high', 'medium', 'low']).optional(),
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),
     resolution: z.literal('deterministic_poi'),
     providerIdentity: GoogleIdentitySchema,
@@ -207,6 +209,9 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
           ...(candidate.recognitionClueIndex !== undefined
             ? { recognitionClueIndex: candidate.recognitionClueIndex }
             : {}),
+          ...(candidate.candidateConfidence
+            ? { candidateConfidence: candidate.candidateConfidence }
+            : {}),
           resolution: candidate.resolution,
           providerIdentity: candidate.providerIdentity,
           references: candidate.references,
@@ -214,8 +219,9 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
       : candidate,
   );
 }
-// Only for in-memory rendering/projection; never a Firestore Place or Discovery field.
+// Provider display content is in-memory only; the application confidence enum may be retained on a Discovery.
 export const PlaceDisplaySchema = CandidateSchema.pick({
+  candidateConfidence: true,
   canonicalName: true,
   coordinates: true,
   address: true,
