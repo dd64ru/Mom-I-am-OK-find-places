@@ -2779,3 +2779,96 @@ for (const [reason, message] of [
     assert.ok(text.startsWith(message));
     assert.doesNotMatch(text, /скриншот|порог|score|threshold/u);
   });
+
+test('confirmation persists the bound independent recognition label, never Google displayName, and preserves a user label on dedupe', async () => {
+  const r = {
+    visibleText: [],
+    clues: [
+      {
+        name: 'Unrelated clue',
+        aliases: [],
+        category: 'place',
+        confidence: 0.99,
+      },
+      {
+        name: 'Grande Alimentari',
+        aliases: [],
+        category: 'cafe',
+        confidence: 0.95,
+      },
+    ],
+  };
+  const f = await setup({
+    recognition: r,
+    poi: alimentariProvider([alimentariRow]),
+  });
+  const d = await f.ingest('bound-recognition-label');
+  assert.equal(d.candidates[0].recognitionClueIndex, 1);
+  const first = await f.service.finish(d, 'confirm');
+  assert.equal(first.place.label, 'Grande Alimentari');
+  assert.equal(first.place.labelSource, 'recognition');
+  assert.notEqual(first.place.label, alimentariRow.displayName.text);
+  await f.repository.savePlace({
+    ...first.place,
+    label: 'My independent label',
+    labelSource: 'user',
+  });
+  const second = await f.service.finish(
+    await f.ingest('dedupe-user-label'),
+    'confirm',
+  );
+  assert.equal(second.place.label, 'My independent label');
+  assert.equal(second.place.labelSource, 'user');
+});
+
+test('production Alimentari partial with English Shanghai admin component resolves first pass after city intent is available, skipping web and showing Add', async () => {
+  const r = alimentariRecognition(0.99);
+  r.clues[0].category = 'unknown-venue';
+  const branch = {
+    ...alimentariRow,
+    displayName: { text: 'Alimentari Grande Riverside (Donghu Road Branch)' },
+    types: ['establishment', 'point_of_interest'],
+    formattedAddress: '18 Donghu Road, Shanghai, China',
+    addressComponents: [
+      { longText: 'Shanghai', types: ['administrative_area_level_1'] },
+      { longText: 'China', shortText: 'CN', types: ['country'] },
+    ],
+  };
+  const requests = [],
+    events = [];
+  const f = await setup({
+    recognition: r,
+    verify: () =>
+      assert.fail('corroborated first pass must not spend time on web'),
+    poi: alimentariProvider([branch], requests, events),
+  });
+  const pending = await f.repository.createDiscovery({
+    id: 'real-partial-city',
+    workspaceId: 'fixture',
+    recognition: r,
+    source: { provider: 'telegram', observedAt: time },
+    candidates: [],
+    visionProvider: 'fixture',
+    status: 'awaiting_city',
+    revision: 1,
+    createdAt: time,
+  });
+  const d = await f.service.correctCity(pending, 'Shanghai');
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(requests.length, 1);
+  assert.equal(f.calls.search, 0);
+  assert.equal(f.calls.vision, 0);
+  const decision = events.find((e) => e.event === 'google_places_decision');
+  assert.equal(decision.nameEvidence, 'strong_partial');
+  assert.equal(decision.localityState, 'match');
+  assert.equal(decision.categoryState, 'unknown');
+  assert.equal(decision.decision, 'accepted_partial_with_locality');
+  await f.interactions.propose(d, 11, 1);
+  assert.ok(
+    f.sent.some((m) =>
+      m.body.reply_markup?.inline_keyboard
+        ?.flat()
+        .some((b) => b.text === '✅ Добавить'),
+    ),
+  );
+});

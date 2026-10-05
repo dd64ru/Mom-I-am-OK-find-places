@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Firestore } from '@google-cloud/firestore';
 import {
   IdSchema,
+  recognitionLabel,
   WorkspaceSchema,
   PlaceSchema,
   ChainSchema,
@@ -130,6 +131,7 @@ export class FirestoreRepository implements PlacesRepository {
         const existing = await tx.get(placeRef);
         const {
           resolution: _,
+          recognitionClueIndex,
           providerIdentity: identity,
           references,
           ...content
@@ -150,6 +152,7 @@ export class FirestoreRepository implements PlacesRepository {
           ? PlaceSchema.parse(existing.data())
           : PlaceSchema.parse({
               ...fields,
+              ...recognitionLabel(discovery.recognition, recognitionClueIndex),
               id: placeId,
               workspaceId,
               source,

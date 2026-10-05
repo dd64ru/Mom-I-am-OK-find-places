@@ -19,15 +19,15 @@ Production is now an authenticated **Firebase Functions v2 Telegram webhook** in
 
 ## Repository
 
-| Path                 | Responsibility                                                                                                |
-| -------------------- | ------------------------------------------------------------------------------------------------------------- |
-| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts                      |
-| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                                                    |
-| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                                            |
-| `apps/worker`        | Local configuration, privacy gate and OAuth/model/vision/ID diagnostics                                       |
-| `apps/functions`     | Authenticated HTTPS webhook, durable ingress and serverless composition                                       |
-| `infra`              | Firestore client rules, index configuration, serverless migration and IAM/WIF preparation                     |
-| `docs`               | Architecture, decisions, authorization, Telegram UX, geographic verification and future projection boundaries |
+| Path                 | Responsibility                                                                                                   |
+| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `packages/schemas`   | Runtime-validated canonical Place, Chain, Workspace, Discovery and recognition contracts                         |
+| `packages/core`      | Discovery workflow and vision/search/POI/persistence ports                                                       |
+| `packages/providers` | Firestore, Secret Manager, OpenAI OAuth/Responses, Gemini fallback                                               |
+| `apps/worker`        | Local configuration, privacy gate and OAuth/model/vision/ID diagnostics                                          |
+| `apps/functions`     | Authenticated HTTPS webhook, durable ingress and serverless composition                                          |
+| `infra`              | Firestore client rules, index configuration, serverless migration and IAM/WIF preparation                        |
+| `docs`               | Architecture, decisions, authorization, Telegram UX, geographic verification and read-only map projection/export |
 
 ## What runs today
 
@@ -60,3 +60,5 @@ Missing AI locality never gates Google lookup; comparable provider results in di
 Future boundary: **Firestore canonical Places → replaceable external map/export adapters** (Google records retain identity/evidence only and refresh transient provider content by Place ID; OSM records keep durable coordinates), for example GeoJSON/KML/GPX or supported third-party APIs/links. No external integration is implemented. Mom-I-am-OK's existing real users may later be attached to workspace membership.
 
 Google Places uses the attached runtime service account through ADC and short-lived OAuth Bearer tokens, with explicit quota project and a custom `serviceusage.services.use`-only runtime role. No Places API key or new secret is needed. Owner preparation and provider limits are documented in [Google Places](docs/google-places.md). Telegram UI is Russian; fixed stage/status/duration telemetry contains no user/provider content.
+
+Read-only standards-based map projection, independent Place labels, owner backfill planning, feed authentication and future consumer setup: [docs/map-projection.md](docs/map-projection.md). The feed defaults disabled; the existing webhook-only deployment workflow is unchanged.

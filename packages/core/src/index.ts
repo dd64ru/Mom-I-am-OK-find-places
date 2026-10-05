@@ -296,3 +296,5 @@ export function normalizeCity(value: string): string | undefined {
   const city = value.normalize('NFKC').trim().replace(/\s+/gu, ' ');
   return city && city.length <= 200 ? city : undefined;
 }
+export * from './projection.js';
+export * from './label-backfill.js';

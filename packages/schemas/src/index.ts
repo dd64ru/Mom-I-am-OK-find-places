@@ -36,10 +36,29 @@ export const AddressSchema = z
     district: z.string().optional(),
   })
   .strict();
+export const ApplicationLabelSchema = z
+  .object({
+    label: z
+      .string()
+      .trim()
+      .min(1)
+      .max(300)
+      .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s)),
+    labelSource: z.enum(['recognition', 'user']),
+  })
+  .strict();
+export type ApplicationLabel = z.infer<typeof ApplicationLabelSchema>;
+const optionalLabel = {
+  label: ApplicationLabelSchema.shape.label.optional(),
+  labelSource: ApplicationLabelSchema.shape.labelSource.optional(),
+};
+const labelPair = (p: { label?: string; labelSource?: string }) =>
+  (p.label === undefined) === (p.labelSource === undefined);
 const OsmPlaceSchema = z
   .object({
     id: IdSchema,
     workspaceId: IdSchema,
+    ...optionalLabel,
     canonicalName: z.string().min(1),
     nativeName: z.string().optional(),
     aliases: z.array(z.string()),
@@ -56,7 +75,8 @@ const OsmPlaceSchema = z
     updatedAt: Timestamp,
     attributions: AttributionsSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine(labelPair);
 // Google content is display-only. A durable Google Place retains identity and references,
 // never provider display names, address, coordinates, types or attribution content.
 export const GoogleIdentitySchema = z
@@ -69,6 +89,7 @@ const GooglePlaceSchema = z
   .object({
     id: IdSchema,
     workspaceId: IdSchema,
+    ...optionalLabel,
     providerIdentity: GoogleIdentitySchema,
     source: ReferenceSchema.refine(
       (r) => r.provider === 'google-places' && !!r.externalId,
@@ -80,6 +101,7 @@ const GooglePlaceSchema = z
     updatedAt: Timestamp,
   })
   .strict()
+  .refine(labelPair)
   .refine((p) => p.source.externalId === p.providerIdentity.id);
 export const PlaceSchema = z.union([
   GooglePlaceSchema,
@@ -128,6 +150,7 @@ export const RecognitionSchema = z
   .strict();
 export const CandidateSchema = z
   .object({
+    recognitionClueIndex: z.number().int().min(0).max(9).optional(),
     canonicalName: z.string().min(1),
     nativeName: z.string().optional(),
     aliases: z.array(z.string()),
@@ -155,6 +178,7 @@ export const CandidateSchema = z
   .strict();
 export const GoogleStoredCandidateSchema = z
   .object({
+    recognitionClueIndex: z.number().int().min(0).max(9).optional(),
     resolution: z.literal('deterministic_poi'),
     providerIdentity: GoogleIdentitySchema,
     references: z.array(ReferenceSchema).min(1).max(25),
@@ -180,6 +204,9 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
   return StoredCandidateSchema.parse(
     candidate.providerIdentity?.provider === 'google-places'
       ? {
+          ...(candidate.recognitionClueIndex !== undefined
+            ? { recognitionClueIndex: candidate.recognitionClueIndex }
+            : {}),
           resolution: candidate.resolution,
           providerIdentity: candidate.providerIdentity,
           references: candidate.references,
@@ -197,6 +224,25 @@ export const PlaceDisplaySchema = CandidateSchema.pick({
   attributions: true,
 });
 export type PlaceDisplay = z.infer<typeof PlaceDisplaySchema>;
+// Transient provider-neutral map projection; never a durable Place or Discovery.
+export const ProjectedPlaceSchema = z
+  .object({
+    id: IdSchema,
+    label: z.string().min(1),
+    coordinates: CoordinatesSchema,
+    tags: z.array(z.string()),
+    category: z.string().optional(),
+    providerIdentity: z.union([
+      GoogleIdentitySchema,
+      z
+        .object({ provider: z.string().min(1), id: z.string().min(1) })
+        .strict()
+        .refine((p) => p.provider !== 'google-places'),
+    ]),
+    sourceLink: z.string().url().optional(),
+  })
+  .strict();
+export type ProjectedPlace = z.infer<typeof ProjectedPlaceSchema>;
 export const GeographicContextSchema = z
   .object({
     cityOverride: z.string().min(1).max(200).optional(),
@@ -332,3 +378,22 @@ export const VerificationSchema = z
   })
   .strict();
 export type Verification = z.infer<typeof VerificationSchema>;
+
+// This function reads independent Recognition only, never provider display or verification.
+export function recognitionLabel(
+  recognition: Recognition,
+  index?: number,
+): ApplicationLabel | undefined {
+  const selected = index ?? (recognition.clues.length === 1 ? 0 : undefined);
+  if (selected === undefined) return;
+  const name = recognition.clues[selected]?.name;
+  if (!name) return;
+  const parsed = ApplicationLabelSchema.safeParse({
+    label: name
+      .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+      .replace(/\s+/gu, ' ')
+      .trim(),
+    labelSource: 'recognition',
+  });
+  return parsed.success ? parsed.data : undefined;
+}

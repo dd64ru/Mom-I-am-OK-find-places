@@ -16,18 +16,19 @@ flowchart LR
   P --> Q[Telegram Confirm / Change city / Cancel]
   Q --> X[Transactional completion]
   X --> F[Firestore canonical Place]
-  F -. future projection .-> M[Replaceable external map / export adapters]
+  F --> H[Read-only projection: bounded coordinate hydration]
+  H --> M[GeoJSON / GPX / KML adapters and private feed]
   Q --> R[City override: reuse Recognition]
   R --> G
 ```
 
-`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place is a strict union: OSM/non-Google records retain name/aliases/category, WGS84 coordinates, address and attribution; Google records retain only stable provider identity, evidence references, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by replaceable external map/export or Mom-I-am-OK adapters.
+`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place is a strict union: OSM/non-Google records retain name/aliases/category, WGS84 coordinates, address and attribution; Google records retain stable provider identity, evidence references, optional independent application label/provenance, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by replaceable external map/export or Mom-I-am-OK adapters.
 
 Firestore hierarchy:
 
 - `workspaces/{id}`: Firebase UID `members`, locale, optional area hint and timestamps. Empty members is a legitimate Telegram-only workspace.
-- `discoveries`: Recognition, actual vision provider, durable deterministic candidates (Google identity/references only; no Google display/location content), per-discovery city override, revision, needs_confirmation/awaiting_city/unresolved/confirmed/cancelled/failed, resolution reason and confirmed Place ID.
-- `places`: canonical confirmed/archived records; Google records intentionally have no durable coordinates/address/name. IDs deterministically dedupe provider identities without merging separate chain branches.
+- `discoveries`: Recognition, actual vision provider, durable deterministic candidates (Google identity/references and optional independent recognition-clue index; no Google display/location content), per-discovery city override, revision, needs_confirmation/awaiting_city/unresolved/confirmed/cancelled/failed, resolution reason and confirmed Place ID.
+- `places`: canonical confirmed/archived records; Google records have no durable provider coordinates/address/displayName; optional application-owned labels are independently sourced. IDs deterministically dedupe provider identities without merging separate chain branches.
 - `chains`: existing reusable model; linking/branch browsing is future work.
 - `pendingIngress`: projected file/source IDs and debounce/lease metadata; no conversation, captions, raw update or image bytes.
 - `telegramInteractions` / `cityPrompts`: opaque token mappings, exact prompt/proposal IDs, temporary requester ownership, revision, expiry and processing leases; inaccessible to all client reads.
@@ -53,3 +54,5 @@ Google Places uses runtime ADC, never a Places key/secret or LLM coordinates. It
 OpenAI vision can infer bounded landmarks from architecture without readable text. Web verification admits at most two search operations and a citation-independent linguistic city intent; Google first-pass lookup precedes optional web enrichment and compares at most two variants per phase (four total) using explicit identity evidence, narrow contradictions and candidate competition. Only providers supply authoritative identity/location. Count-only filters and fixed evidence decisions explain rejections without content. Image processing sends a claimed, idempotent Russian acknowledgement before expensive work, then best-effort deletes it before the result; initial unknown locality sends one ForceReply only.
 
 Google search eligibility is separate from final acceptance. All schema-valid vision clues can search; no 0.85 confidence or known-city gate runs before Google I/O. At most three structured clues inform at most two first-pass queries. Missing locality omits the locality/region constraint. A strong unique provider result skips web enrichment; otherwise one bounded enrichment invocation supplies reformulation/linguistic intent for a two-query second pass. Unknown-city comparable results with different/unclear provider localities produce city_unknown; same-city ambiguity remains unresolved. Acceptance requires strict deterministic identity/location and strong identity, or corroborated partial/typo identity, with competition resolved; explicit geography/house-number conflicts reject. Scores rank candidates, never impose an absolute acceptance cutoff. The conservative Nominatim selector/gate is unchanged. Typed deterministic parser/adaptation failures terminate Discovery/Ingress once with safe HTTP 200 rather than repeating work.
+
+The [read-only projection layer](map-projection.md) reads confirmed Places through a separate placesFeed function. Independent labels survive without Google calls; Google coordinates hydrate live by Place ID with concurrency/time limits and per-feature failure isolation. GeoJSON/GPX/KML share one transient model. The feed has workspace-scoped hash-verified bearer authentication, private content ETags and no write ports; feed and URL-token modes default disabled. Backfill plans independent Recognition labels without Google content or cloud writes in this task. The existing webhook-only deploy workflow and IAM stay unchanged.

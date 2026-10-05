@@ -77,6 +77,16 @@ function encodeGoogleId(id: string) {
     throw new GooglePlacesFailure('google_places_adaptation_failed');
   }
 }
+// Exact contiguous tokens; punctuation-separated Han segments may drop the city suffix.
+// Never a raw substring (ham cannot match Shanghai; York cannot match Yorkshire).
+export function localityInAddress(alias: string, address: string): boolean {
+  const wanted = nameTokens(normalizedLocality(alias)).join(' ');
+  if (!wanted) return false;
+  return address.split(/[,，;；]/u).some((segment) => {
+    const tokens = nameTokens(normalizedLocality(segment.trim())).join(' ');
+    return ` ${tokens} `.includes(` ${wanted} `);
+  });
+}
 function geographicEvidence(row: GooglePlaceDto, locality?: Locality) {
   const countryCodes = [
     ...new Set(
@@ -99,36 +109,42 @@ function geographicEvidence(row: GooglePlaceDto, locality?: Locality) {
           (a) => normalizedLocality(a) === normalizedLocality(s),
         ),
     );
-  const cities = row.addressComponents.filter(
-    (c) =>
-      (c.types.includes('locality') ||
-        (locality?.countryCode === 'CN' &&
-          c.types.some((t) =>
-            [
-              'administrative_area_level_1',
-              'administrative_area_level_2',
-            ].includes(t),
-          ) &&
-          [c.longText, c.shortText].some((n) => n?.endsWith('市')))) &&
-      (c.longText || c.shortText),
+  const relevant = row.addressComponents.filter((c) =>
+    c.types.some((t) =>
+      [
+        'locality',
+        'postal_town',
+        'administrative_area_level_1',
+        'administrative_area_level_2',
+      ].includes(t),
+    ),
   );
-  const cityMatch =
-    cities.some(namesMatch) ||
-    (!cities.length &&
-      row.addressComponents
-        .filter((c) =>
-          c.types.some((t) =>
-            [
-              'postal_town',
-              'administrative_area_level_1',
-              'administrative_area_level_2',
-            ].includes(t),
-          ),
-        )
-        .some(namesMatch));
-  // Canonical locality is stronger than a mailing town/district. Unclear hierarchy is neutral.
+  const direct = relevant.filter((c) => c.types.includes('locality'));
+  const postal = relevant.filter((c) => c.types.includes('postal_town'));
+  const china = countryCodes.includes('CN');
+  // Matching any administrative layer corroborates intent, regardless of response language.
+  // Only reliable city-level components contradict it; a different province is neutral.
+  const administrativeCities = china
+    ? relevant.filter(
+        (c) =>
+          c.types.includes('administrative_area_level_2') ||
+          (c.types.includes('administrative_area_level_1') &&
+            [c.longText, c.shortText].some((n) => n?.endsWith('市'))),
+      )
+    : [];
+  const cities = direct.length
+    ? direct
+    : postal.length
+      ? postal
+      : administrativeCities;
   const cityConflict =
     !!locality?.aliases.length && !!cities.length && !cities.some(namesMatch);
+  const formattedMatch =
+    !cities.length &&
+    !!locality?.aliases.some((alias) =>
+      localityInAddress(alias, row.formattedAddress ?? ''),
+    );
+  const cityMatch = relevant.some(namesMatch) || formattedMatch;
   return {
     countryConflict,
     countryMatch,
@@ -216,7 +232,8 @@ export type GoogleFilterEvent = {
   complete: number;
   nameStrong: number;
   categoryCompatible: number;
-  localityCompatible: number;
+  cityCompatible: number;
+  countryCompatible: number;
   addressCompatible: number;
   accepted: number;
   result: 'resolved' | 'ambiguous' | 'no_match';
@@ -531,7 +548,8 @@ export class GooglePlacesPoi implements PoiProvider {
         complete: 0,
         nameStrong: 0,
         categoryCompatible: 0,
-        localityCompatible: 0,
+        cityCompatible: 0,
+        countryCompatible: 0,
         addressCompatible: 0,
         accepted: 0,
         result: 'no_match',
@@ -646,8 +664,8 @@ export class GooglePlacesPoi implements PoiProvider {
           excluded.push(evidence);
           continue;
         }
-        if (geography.cityMatch || geography.countryMatch)
-          event.localityCompatible++;
+        if (geography.cityMatch) event.cityCompatible++;
+        if (geography.countryMatch) event.countryCompatible++;
         if (addressState === 'match') event.addressCompatible++;
         if (isAccepted(rowDecision)) event.accepted++;
         else rejected.insufficient_identity++;
@@ -658,7 +676,33 @@ export class GooglePlacesPoi implements PoiProvider {
           url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeGoogleId(row.id)}`,
           observedAt: new Date(this.now()).toISOString(),
         };
+        const independent = input.data.recognition.clues
+          .map((clue, index) => {
+            const match = [clue.name, clue.nativeName, ...clue.aliases]
+              .filter((n): n is string => !!n)
+              .slice(0, 12)
+              .map((n) => venueNameEvidence(n, row.displayName.text))
+              .sort(
+                (a, b) =>
+                  identityStrength(b.nameEvidence) -
+                    identityStrength(a.nameEvidence) || b.nameRank - a.nameRank,
+              )[0]!;
+            return { index, match };
+          })
+          .filter((c) => identityStrength(c.match.nameEvidence) >= 2)
+          .sort(
+            (a, b) =>
+              identityStrength(b.match.nameEvidence) -
+                identityStrength(a.match.nameEvidence) ||
+              b.match.nameRank - a.match.nameRank,
+          );
+        const recognitionClueIndex =
+          independent[0]?.index ??
+          (input.data.recognition.clues.length === 1 ? 0 : undefined);
         const parsed = CandidateSchema.safeParse({
+          ...(recognitionClueIndex !== undefined
+            ? { recognitionClueIndex }
+            : {}),
           canonicalName: row.displayName.text,
           ...(matchingClue.nativeName
             ? { nativeName: matchingClue.nativeName.slice(0, 300) }

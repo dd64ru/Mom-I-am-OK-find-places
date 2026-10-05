@@ -77,10 +77,7 @@ export const identityStrength = (e: NameEvidence): number =>
       : e === 'weak'
         ? 1
         : 0;
-export function venueNameEvidence(
-  evidence: string,
-  returned: string,
-): NameMatch {
+function baseVenueNameEvidence(evidence: string, returned: string): NameMatch {
   const a = nameTokens(evidence),
     b = nameTokens(returned);
   const left = distinct(evidence),
@@ -122,9 +119,36 @@ export function venueNameEvidence(
     return result('strong_partial', 0.72);
   return result('weak', 0.1);
 }
+// Strip only a bounded trailing qualifier explicitly marked as a branch/store.
+// Ordinary parenthetical identity text (Museum (Hotel)) remains significant.
+export function providerBaseName(value: string): string {
+  const suffix = value.match(/^(.*\S)\s*[（(]([^()（）]{1,100})[)）]\s*$/u);
+  if (
+    suffix &&
+    (/\bbranch$/iu.test(suffix[2]!.trim()) ||
+      /[\p{Script=Han}]{2,}(?:分店|店)$/u.test(suffix[2]!.trim()))
+  )
+    return suffix[1]!.trim();
+  // Unparenthesized metadata requires an explicit separator, not arbitrary word removal.
+  const marked = value.match(
+    /^(.*\S)\s+[-–—|]\s+[^()（）]{1,100}\bbranch\s*$/iu,
+  );
+  return marked?.[1]?.trim() ?? value;
+}
+export function venueNameEvidence(
+  evidence: string,
+  returned: string,
+): NameMatch {
+  const full = baseVenueNameEvidence(evidence, returned);
+  const base = providerBaseName(returned);
+  if (base === returned) return full;
+  const stripped = baseVenueNameEvidence(evidence, base);
+  // Metadata cannot rescue weak/generic base identity; every branch still competes by ID.
+  return identityStrength(stripped.nameEvidence) >= 2 ? stripped : full;
+}
 const categoryGroups: [RegExp, (t: string) => boolean][] = [
   [
-    /cafe|coffee|bakery|restaurant|dining|food|bar|pub/,
+    /cafe|coffee|bakery|restaurant|dining|food|deli|grocery|supermarket|bar|pub/,
     (t) =>
       [
         'cafe',
