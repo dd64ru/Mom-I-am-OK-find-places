@@ -1,4 +1,4 @@
-import type { PoiProvider } from '@places/core';
+import { ProviderFailure, type PoiProvider } from '@places/core';
 import {
   PoiResolutionSchema,
   type Recognition,
@@ -8,6 +8,11 @@ import {
 } from '@places/schemas';
 import { GooglePlacesFailure } from './google-places.js';
 import { PipelineTelemetry, resolutionStatus } from './telemetry.js';
+function adaptResolution(raw: unknown): PoiResolution {
+  const parsed = PoiResolutionSchema.safeParse(raw);
+  if (!parsed.success) throw new ProviderFailure('poi_adaptation_failed');
+  return parsed.data;
+}
 export class FallbackPoi implements PoiProvider {
   constructor(
     private readonly primary: PoiProvider,
@@ -33,7 +38,7 @@ export class FallbackPoi implements PoiProvider {
         result = await this.telemetry.measure(
           'google_places',
           async () =>
-            PoiResolutionSchema.parse(
+            adaptResolution(
               await this.primary.resolve(recognition, verification, context),
             ),
           resolutionStatus,
@@ -48,7 +53,7 @@ export class FallbackPoi implements PoiProvider {
         return this.telemetry.measure(
           'nominatim',
           async () =>
-            PoiResolutionSchema.parse(
+            adaptResolution(
               await this.fallback.resolve(recognition, verification, context),
             ),
           resolutionStatus,
@@ -66,7 +71,7 @@ export class FallbackPoi implements PoiProvider {
       const secondary = await this.telemetry.measure(
         'nominatim',
         async () =>
-          PoiResolutionSchema.parse(
+          adaptResolution(
             await this.fallback.resolve(recognition, verification, context),
           ),
         resolutionStatus,

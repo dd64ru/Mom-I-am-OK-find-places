@@ -416,9 +416,10 @@ test('Google diagnostics contain only bounded counts/fixed codes, no source cont
     [{ ...row, displayName: { text: 'Alimentari Grande' } }],
     log,
   ).resolve(r, v);
-  assert.equal(log[0].result, 'resolved');
-  assert.equal(log[0].accepted, 1);
-  for (const event of log) {
+  const filters = log.filter((e) => e.event === 'google_places_filter');
+  assert.equal(filters[0].result, 'resolved');
+  assert.equal(filters[0].accepted, 1);
+  for (const event of filters) {
     assert.deepEqual(
       Object.keys(event).sort(),
       [
@@ -457,7 +458,11 @@ test('Google diagnostics contain only bounded counts/fixed codes, no source cont
     [{ ...row, displayName: { text: 'Unrelated Cafe' } }],
     rejected,
   ).resolve(r, v);
-  assert.ok(rejected.every((e) => e.rejected.no_name_match === 1));
+  assert.ok(
+    rejected
+      .filter((e) => e.event === 'google_places_filter')
+      .every((e) => e.rejected.no_name_match === 1),
+  );
   const harmless = new GooglePlacesPoi(
     async () => token,
     project,
@@ -542,7 +547,7 @@ test('processing acknowledgement precedes expensive work, survives concurrent/re
   );
   assert.ok(
     source.indexOf('status.complete(') <
-      source.indexOf('await interactions.propose('),
+      source.indexOf('return interactions.propose('),
   );
 });
 test('processing status send/delete/storage failure never fails expensive processing', async () => {

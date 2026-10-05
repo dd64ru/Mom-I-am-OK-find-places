@@ -62,22 +62,26 @@ export class FirestoreRepository implements PlacesRepository {
       const current = DiscoverySchema.parse(snapshot.data());
       if (
         current.revision !== revision ||
-        ['confirmed', 'cancelled'].includes(current.status)
+        ['confirmed', 'cancelled', 'failed'].includes(current.status)
       )
         return undefined;
       const next = DiscoverySchema.parse({
         ...current,
         candidates: patch.candidates ?? current.candidates,
         resolutionReason: patch.resolutionReason,
+        failureReason: patch.failureReason,
         status: patch.status ?? current.status,
         ...(patch.cityOverride ? { cityOverride: patch.cityOverride } : {}),
         revision: revision + 1,
         updatedAt: new Date().toISOString(),
       });
       if (
-        !['needs_confirmation', 'awaiting_city', 'unresolved'].includes(
-          next.status,
-        )
+        ![
+          'needs_confirmation',
+          'awaiting_city',
+          'unresolved',
+          'failed',
+        ].includes(next.status)
       )
         throw new Error('discovery_transition_invalid');
       tx.set(ref, clean(next));
@@ -97,7 +101,7 @@ export class FirestoreRepository implements PlacesRepository {
       const discovery = DiscoverySchema.parse(snapshot.data());
       if (
         discovery.revision !== revision ||
-        ['confirmed', 'cancelled'].includes(discovery.status)
+        ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
       ) {
         const existing = discovery.confirmedPlaceId
           ? await tx.get(

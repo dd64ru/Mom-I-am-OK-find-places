@@ -10,6 +10,8 @@ import {
 } from '@places/schemas';
 import { DiscoveryService } from '@places/core';
 import {
+  GooglePlacesFailure,
+  FallbackPoi,
   FirestoreRepository,
   NominatimPoi,
   OpenAiSearch,
@@ -22,7 +24,8 @@ import {
 } from '../apps/functions/dist/webhook.js';
 import { TelegramInteractions } from '../apps/functions/dist/interactions.js';
 import { TelegramApi } from '../apps/functions/dist/telegram-api.js';
-import { Ingress } from '../apps/functions/dist/ingress.js';
+import { Ingress, ingressId } from '../apps/functions/dist/ingress.js';
+import { ProcessingStatus } from '../apps/functions/dist/processing-status.js';
 import { initializeWorkspace } from '../scripts/workspace-init.mjs';
 import {
   recognition as googleRecognition,
@@ -633,6 +636,13 @@ test('Change city has one owned ForceReply; only exact active reply accepted; co
   assert.equal(f.calls.vision, 1);
   assert.equal(f.calls.search, 2);
   assert.equal(f.calls.poi, 2);
+  const statuses = f.sent.filter((m) => m.body.text === '🔎 Уточняю место…');
+  assert.equal(statuses.length, 1);
+  const deletion = f.sent.findIndex((m) => m.method === 'deleteMessage');
+  const finalProposal = f.sent.findLastIndex(
+    (m) => m.body.reply_markup?.inline_keyboard,
+  );
+  assert.ok(deletion > f.sent.indexOf(statuses[0]) && deletion < finalProposal);
   assert.equal(
     (await f.repository.getDiscovery('fixture', 'image')).cityOverride,
     'Corrected City',
@@ -1091,6 +1101,10 @@ test('city verification retry resumes from stored override/Recognition without r
   assert.equal(f.calls.vision, 1);
   assert.equal(f.calls.search, 3);
   assert.equal(f.calls.poi, 3);
+  assert.equal(
+    f.sent.filter((m) => m.body.text === '🔎 Уточняю место…').length,
+    1,
+  );
   assert.equal(
     (await f.repository.getDiscovery('fixture', 'image')).status,
     'needs_confirmation',
@@ -1802,4 +1816,270 @@ test('a losing discovery revision cannot attach its stale Google display to the 
   assert.equal(discovery.status, 'unresolved');
   assert.equal(discovery.liveCandidate, undefined);
   assert.equal(await f.service.displayCandidate(discovery), undefined);
+});
+
+test('terminal Google city parser failure is recorded once, edits one status and acknowledges repeated webhook deliveries', async () => {
+  let f;
+  f = await setup({
+    recognition: googleRecognition,
+    verify: (context) => {
+      if (context.cityOverride)
+        assert.equal(f.sent.at(-1).body.text, '🔎 Уточняю место…');
+      return googleVerification;
+    },
+    poi: {
+      resolve: async (r, v, context) => {
+        if (!context.cityOverride)
+          return { status: 'city_unknown', reason: 'missing_locality' };
+        return googleFixture({ places: 'PRIVATE_PROVIDER_PAYLOAD' }).resolve(
+          r,
+          v,
+          context,
+        );
+      },
+    },
+  });
+  await f.interactions.propose(await f.ingest('terminal-city'), 11, 1);
+  const prompt = f.sent.find((m) => m.body.reply_markup?.force_reply);
+  const promptId = f.sent.indexOf(prompt) + 101;
+  const ingress = new Ingress(f.docs, 'fixture');
+  const logs = [],
+    original = console.error;
+  console.error = (line) => logs.push(line);
+  const request = {
+    method: 'POST',
+    contentType: 'application/json',
+    secret: 'fixture-header',
+    rawBody: Buffer.from(
+      JSON.stringify(
+        update({
+          message_id: 19,
+          text: 'Shanghai',
+          reply_to_message: { message_id: promptId },
+        }),
+      ),
+    ),
+  };
+  const dependencies = {
+    policy,
+    username: 'fixture_bot',
+    secret: async () => 'fixture-header',
+    accept: async (reply) => {
+      const token = await f.interactions.canReply(reply);
+      if (!token) return 'done';
+      const id = await ingress.receive(-100, reply);
+      return ingress.run(id, () => f.interactions.cityReply(reply, token));
+    },
+  };
+  try {
+    assert.equal((await handleWebhook(request, dependencies)).status, 200);
+    assert.equal((await handleWebhook(request, dependencies)).status, 200);
+    const discovery = await f.repository.getDiscovery(
+      'fixture',
+      'terminal-city',
+    );
+    assert.equal(discovery.status, 'failed');
+    assert.equal(discovery.failureReason, 'google_places_top_level_invalid');
+    assert.deepEqual(discovery.candidates, []);
+    const id = ingressId('fixture', -100, 'cityReply-19');
+    const saved = f.docs.values.get(`workspaces/fixture/pendingIngress/${id}`);
+    assert.equal(saved.phase, 'done');
+    assert.equal(saved.failureReason, discovery.failureReason);
+    await ingress.run(id, async () =>
+      assert.fail('completed ingress must never restart work'),
+    );
+    await f.service.resolve(discovery);
+    assert.deepEqual(f.calls, { vision: 1, search: 2, poi: 2 });
+    assert.equal(
+      logs.filter(
+        (line) => JSON.parse(line).event === 'provider_terminal_failure',
+      ).length,
+      1,
+    );
+    assert.equal(logs.join('').includes('PRIVATE'), false);
+    const status = f.sent.filter((m) => m.body.text === '🔎 Уточняю место…');
+    assert.equal(status.length, 1);
+    const terminal = f.sent.filter((m) => m.method === 'editMessageText');
+    assert.equal(terminal.length, 1);
+    assert.equal(terminal[0].body.message_id, f.sent.indexOf(status[0]) + 101);
+    assert.equal(
+      terminal[0].body.text,
+      '⚠️ Не удалось обработать место из-за ошибки сервиса. Попробуй ещё раз позже.',
+    );
+    assert.equal(terminal[0].body.text.includes('google_places'), false);
+    assert.equal(
+      [...f.db.values.keys()].some((p) => p.includes('/places/')),
+      false,
+    );
+    assert.equal(
+      JSON.stringify([...f.db.values, ...f.docs.values]).includes(
+        'PRIVATE_PROVIDER_PAYLOAD',
+      ),
+      false,
+    );
+    assert.equal((await f.service.finish(discovery, 'confirm')).changed, false);
+    for (const bad of [
+      { ...discovery, failureReason: undefined },
+      { ...discovery, candidates: [storedCandidate(candidate)] },
+      { ...discovery, status: 'unresolved' },
+    ])
+      assert.equal(DiscoverySchema.safeParse(bad).success, false);
+  } finally {
+    console.error = original;
+  }
+});
+
+test('terminal image failure and invalid internal POI adaptation stop retries without weakening strict schemas', async () => {
+  for (const [outcome, expected] of [
+    [
+      new FallbackPoi(
+        {
+          resolve: async () => ({
+            status: 'resolved',
+            candidate: { private: 'PRIVATE_PROVIDER_CONTENT' },
+          }),
+        },
+        {
+          resolve: async () =>
+            assert.fail('internal adaptation error must not invoke OSM'),
+        },
+      ),
+      'poi_adaptation_failed',
+    ],
+    [
+      {
+        resolve: async () => {
+          throw new GooglePlacesFailure('google_places_invalid_json');
+        },
+      },
+      'google_places_invalid_json',
+    ],
+    [
+      {
+        resolve: async () => ({
+          status: 'resolved',
+          candidate: {
+            ...candidate,
+            coordinates: { latitude: 200, longitude: 0, crs: 'WGS84' },
+          },
+        }),
+      },
+      'poi_adaptation_failed',
+    ],
+  ]) {
+    const f = await setup({ poi: outcome });
+    const api = {
+      call: async (method, body) => {
+        f.sent.push({ method, body });
+        return { message_id: 500 };
+      },
+    };
+    const status = new ProcessingStatus(f.docs, api, 'fixture', -100),
+      ingress = new Ingress(f.docs, 'fixture');
+    const accepted = {
+      kind: 'image',
+      messageId: 1,
+      fileId: 'fixture',
+      userId: 11,
+    };
+    const id = await ingress.receive(-100, accepted);
+    const process = async () => {
+      await status.start(id, 1);
+      const result = await f.ingest(id);
+      assert.equal(result.status, 'failed');
+      await status.failure(id);
+      return { failureReason: result.failureReason };
+    };
+    await ingress.run(id, process);
+    await ingress.run(id, process);
+    await status.failure(id);
+    assert.deepEqual(f.calls, { vision: 1, search: 1, poi: 1 });
+    assert.equal(
+      (await f.repository.getDiscovery('fixture', id)).failureReason,
+      expected,
+    );
+    assert.equal(
+      f.sent.filter((m) => m.body.text === '🔎 Ищу место…').length,
+      1,
+    );
+    assert.equal(
+      f.sent.filter((m) => m.method === 'editMessageText').length,
+      1,
+    );
+    assert.equal(
+      [...f.db.values.keys()].some((p) => p.includes('/places/')),
+      false,
+    );
+  }
+});
+
+test('terminal ID refresh failure persists failed state rather than repeatedly retrying proposal refresh', async () => {
+  let refreshes = 0;
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: googleVerification,
+    poi: {
+      resolve: (...args) => googleFixture().resolve(...args),
+      refresh: async () => {
+        refreshes++;
+        throw new GooglePlacesFailure('google_places_response_invalid');
+      },
+    },
+  });
+  await f.ingest('terminal-refresh');
+  const saved = await f.repository.getDiscovery('fixture', 'terminal-refresh');
+  const first = await f.interactions.propose(saved, 11, 1);
+  assert.equal(first.failureReason, 'google_places_response_invalid');
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', saved.id),
+    11,
+    1,
+  );
+  assert.equal(refreshes, 1);
+  assert.deepEqual(f.calls, { vision: 1, search: 1, poi: 1 });
+  assert.equal(f.sent.filter((m) => m.body.text?.startsWith('⚠️')).length, 1);
+  assert.equal(
+    f.sent.some((m) => m.body.reply_markup?.inline_keyboard),
+    false,
+  );
+});
+
+test('long opaque Google identity deduplicates in Firestore while all unknown/provider display fields stay transient', async () => {
+  const id = 'opaque /?é#:' + 'long'.repeat(500);
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: googleVerification,
+    poi: googleFixture({
+      places: [
+        {
+          ...googleRow,
+          id,
+          future: 'PRIVATE_UNKNOWN_PROVIDER_FIELD',
+          displayName: { ...googleRow.displayName, future: true },
+        },
+      ],
+    }),
+  });
+  const one = await f.ingest('opaque-one'),
+    two = await f.ingest('opaque-two');
+  const first = await f.service.finish(one, 'confirm'),
+    second = await f.service.finish(two, 'confirm');
+  assert.equal(first.place.providerIdentity.id, id);
+  assert.equal(first.place.id, second.place.id);
+  assert.match(first.place.id, /^[a-f0-9]{64}$/);
+  const persisted = JSON.stringify([...f.db.values.values()]);
+  for (const content of [
+    'PRIVATE_UNKNOWN_PROVIDER_FIELD',
+    'Fixture Café',
+    googleRow.formattedAddress,
+    'latitude',
+    'longitude',
+    'attributions',
+    'future',
+  ])
+    assert.equal(persisted.includes(content), false);
+  assert.equal(
+    PlaceSchema.safeParse({ ...first.place, future: true }).success,
+    false,
+  );
 });

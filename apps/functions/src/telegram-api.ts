@@ -3,6 +3,7 @@ export interface TelegramTransport {
   call(
     method:
       | 'getFile'
+      | 'editMessageText'
       | 'deleteMessage'
       | 'sendMessage'
       | 'sendVenue'

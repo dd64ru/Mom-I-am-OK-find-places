@@ -12,7 +12,7 @@ export class ProcessingStatus {
   private path(id: string) {
     return `workspaces/${this.workspace}/pendingIngress/${id}/status/processing`;
   }
-  async start(id: string, replyTo: number) {
+  async start(id: string, replyTo: number, kind: 'image' | 'city' = 'image') {
     try {
       const send = await this.docs.change(this.path(id), (raw) =>
         raw ? { result: false } : { value: { claimed: true }, result: true },
@@ -20,7 +20,7 @@ export class ProcessingStatus {
       if (!send) return;
       const sent = await this.api.call('sendMessage', {
         chat_id: this.chat,
-        text: '🔎 Ищу место…',
+        text: kind === 'city' ? '🔎 Уточняю место…' : '🔎 Ищу место…',
         reply_parameters: { message_id: replyTo },
       });
       if (Number.isSafeInteger(sent.message_id))
@@ -30,6 +30,42 @@ export class ProcessingStatus {
         }));
     } catch {
       /* UI acknowledgement is best effort; never retry expensive processing for its failure. */
+    }
+  }
+  async failure(id: string) {
+    try {
+      const state = await this.docs.change<{ messageId?: number } | undefined>(
+        this.path(id),
+        (raw) =>
+          raw?.errorClaimed
+            ? { result: undefined }
+            : {
+                value: { ...raw, claimed: true, errorClaimed: true },
+                result: {
+                  ...(typeof raw?.messageId === 'number'
+                    ? { messageId: raw.messageId }
+                    : {}),
+                },
+              },
+      );
+      if (!state) return;
+      const text =
+        '⚠️ Не удалось обработать место из-за ошибки сервиса. Попробуй ещё раз позже.';
+      if (state.messageId) {
+        try {
+          await this.api.call('editMessageText', {
+            chat_id: this.chat,
+            message_id: state.messageId,
+            text,
+          });
+          return;
+        } catch {
+          await this.complete(id);
+        }
+      }
+      await this.api.call('sendMessage', { chat_id: this.chat, text });
+    } catch {
+      /* Terminal acknowledgement is best effort and never repeats expensive work. */
     }
   }
   async complete(id: string) {

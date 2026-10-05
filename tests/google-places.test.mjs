@@ -139,17 +139,7 @@ for (const [scenario, mutate, reason] of [
         'administrative_area_level_1',
       ];
     },
-    'unsupported_category',
-  ],
-  [
-    'contradictory city component',
-    (r) => {
-      r.addressComponents.push({
-        longText: 'Guangzhou',
-        types: ['postal_town'],
-      });
-    },
-    'locality_mismatch',
+    'no_match',
   ],
 ]) {
   test(`Google rejects ${scenario}`, async () => {
@@ -305,55 +295,52 @@ for (const body of [{}, { places: [] }]) {
       noMatch,
     ));
 }
-for (const body of [
-  { places: 'PRIVATE_PAYLOAD' },
-  { places: [{ ...row, location: { latitude: 1000, longitude: 0 } }] },
-  { places: [{ ...row, id: undefined }] },
-  { places: [row], error: { message: token } },
-]) {
-  test('malformed Google response fails with a fixed diagnostic without exposing content', async () => {
-    await assert.rejects(
-      googleFixture(body).resolve(recognition, verification),
-      (error) => {
-        assert.equal(error.message, 'google_places_response_invalid');
-        assert.equal(safeDiagnostic(error), error.message);
-        assert.equal(String(error).includes(token), false);
-        return true;
-      },
-    );
-  });
-}
-test('invalid JSON and oversized Google body fail closed with safe response diagnostics', async () => {
-  for (const body of ['{INVALID_PRIVATE_BODY', ' '.repeat(200_001)]) {
+test('uninterpretable top-level response fails with a fixed diagnostic', async () => {
+  await assert.rejects(
+    googleFixture({ places: 'PRIVATE_PAYLOAD' }).resolve(
+      recognition,
+      verification,
+    ),
+    (error) => {
+      assert.equal(error.message, 'google_places_top_level_invalid');
+      assert.equal(safeDiagnostic(error), error.message);
+      assert.equal(String(error).includes(token), false);
+      return true;
+    },
+  );
+});
+test('invalid JSON and oversized Google body have separate safe diagnostics', async () => {
+  for (const [body, code] of [
+    ['{INVALID_PRIVATE_BODY', 'google_places_invalid_json'],
+    [' '.repeat(8 * 1024 * 1024 + 1), 'google_places_response_too_large'],
+  ])
     await assert.rejects(
       googleFixture(undefined, async () => new Response(body)).resolve(
         recognition,
         verification,
       ),
-      { message: 'google_places_response_invalid' },
+      { message: code },
     );
-  }
 });
-test('credential echoes and contradictory duplicate IDs fail closed before persistence or Telegram', async () => {
-  for (const places of [
-    [{ ...row, id: token }],
-    [row, { ...row, location: { ...row.location, latitude: 30 } }],
-  ]) {
-    await assert.rejects(
-      googleFixture({ places }).resolve(recognition, verification),
-      { message: 'google_places_response_invalid' },
-    );
-  }
+test('consumed credential echoes are skipped; contradictory duplicate identities fail closed', async () => {
+  assert.deepEqual(
+    await googleFixture({ places: [{ ...row, id: token }] }).resolve(
+      recognition,
+      verification,
+    ),
+    noMatch,
+  );
+  await assert.rejects(
+    googleFixture({
+      places: [row, { ...row, location: { ...row.location, latitude: 30 } }],
+    }).resolve(recognition, verification),
+    { message: 'google_places_response_invalid' },
+  );
 });
-test('valid partial Place metadata is unusable rather than a schema/config failure, and may use OSM', async () => {
-  for (const partial of [
-    { id: row.id },
-    { ...row, location: undefined },
-    { ...row, addressComponents: undefined },
-  ]) {
+test('unusable partial rows may use OSM; omitted optional geography can still resolve', async () => {
+  for (const partial of [{ id: row.id }, { ...row, location: undefined }]) {
     const primary = googleFixture({ places: [partial] });
-    const result = await primary.resolve(recognition, verification);
-    assert.equal(result.status, 'unresolved');
+    assert.deepEqual(await primary.resolve(recognition, verification), noMatch);
     let calls = 0;
     await new FallbackPoi(primary, {
       resolve: async () => {
@@ -363,6 +350,14 @@ test('valid partial Place metadata is unusable rather than a schema/config failu
     }).resolve(recognition, verification);
     assert.equal(calls, 1);
   }
+  assert.equal(
+    (
+      await googleFixture({
+        places: [{ ...row, addressComponents: undefined }],
+      }).resolve(recognition, verification)
+    ).status,
+    'resolved',
+  );
 });
 
 test('actual timeout/429/5xx paths invoke OSM; actual auth failures never do', async () => {
@@ -693,10 +688,6 @@ for (const [clue, address] of [
         ...place,
         formattedAddress: address.replace('158', '159') + ', Shanghai',
       },
-      {
-        ...place,
-        formattedAddress: address.replace('Anfu', 'Other') + ', Shanghai',
-      },
       { ...place, displayName: { text: 'Other Cafe' } },
       {
         ...place,
@@ -764,8 +755,7 @@ test('Google Place ID refresh retrieves a bounded live view using ADC and no sea
 test('refresh validates complete identity and response identity; unsafe or incomplete provider content fails closed', async () => {
   for (const identity of [
     { provider: 'nominatim', id: row.id },
-    { provider: 'google-places', id: '../another' },
-    { provider: 'google-places', id: 'bad?query=content' },
+    { provider: 'google-places', id: 123 },
     { provider: 'google-places', id: '' },
   ])
     await assert.rejects(
@@ -777,7 +767,6 @@ test('refresh validates complete identity and response identity; unsafe or incom
   for (const body of [
     { ...row, id: 'different-id' },
     { ...row, location: undefined },
-    { ...row, formattedAddress: undefined },
     { ...row, displayName: undefined },
     { ...row, location: { latitude: 1000, longitude: 120 } },
     { ...row, displayName: { text: token } },

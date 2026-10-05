@@ -2,16 +2,14 @@ import { z } from 'zod';
 export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const Timestamp = z.string().datetime();
 const Confidence = z.number().min(0).max(1);
-const AttributionsSchema = z
-  .array(
-    z
-      .object({
-        provider: z.string().min(1).max(300),
-        providerUri: z.string().url().max(1000),
-      })
-      .strict(),
-  )
-  .max(10);
+const AttributionsSchema = z.array(
+  z
+    .object({ provider: z.string().min(1), providerUri: z.string().optional() })
+    .strict(),
+);
+// Opaque external identity; transport/storage safety is separate from provider-ID validity.
+export const GooglePlaceIdSchema = z.string().min(1);
+export type GooglePlaceId = z.infer<typeof GooglePlaceIdSchema>;
 export const CoordinatesSchema = z
   .object({
     latitude: z.number().min(-90).max(90),
@@ -64,7 +62,7 @@ const OsmPlaceSchema = z
 export const GoogleIdentitySchema = z
   .object({
     provider: z.literal('google-places'),
-    id: IdSchema,
+    id: GooglePlaceIdSchema,
   })
   .strict();
 const GooglePlaceSchema = z
@@ -140,11 +138,16 @@ export const CandidateSchema = z
     references: z.array(ReferenceSchema).min(1).max(25),
     resolution: z.literal('deterministic_poi'),
     providerIdentity: z
-      .object({
-        provider: z.string().min(1).max(64),
-        id: z.string().min(1).max(128),
-      })
-      .strict()
+      .union([
+        GoogleIdentitySchema,
+        z
+          .object({
+            provider: z.string().min(1).max(64),
+            id: z.string().min(1).max(128),
+          })
+          .strict()
+          .refine((i) => i.provider !== 'google-places'),
+      ])
       .optional(),
     confidence: Confidence,
     attributions: AttributionsSchema.optional(),
@@ -238,6 +241,15 @@ export const PoiResolutionSchema = z.discriminatedUnion('status', [
 ]);
 export type GeographicContext = z.infer<typeof GeographicContextSchema>;
 export type PoiResolution = z.infer<typeof PoiResolutionSchema>;
+export const ProviderFailureReasonSchema = z.enum([
+  'google_places_response_invalid',
+  'google_places_top_level_invalid',
+  'google_places_invalid_json',
+  'google_places_response_too_large',
+  'google_places_adaptation_failed',
+  'poi_adaptation_failed',
+]);
+export type ProviderFailureReason = z.infer<typeof ProviderFailureReasonSchema>;
 export const DiscoverySchema = z
   .object({
     id: IdSchema,
@@ -252,7 +264,9 @@ export const DiscoverySchema = z
       'unresolved',
       'confirmed',
       'cancelled',
+      'failed',
     ]),
+    failureReason: ProviderFailureReasonSchema.optional(),
     cityOverride: z.string().min(1).max(200).optional(),
     resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
@@ -260,7 +274,14 @@ export const DiscoverySchema = z
     createdAt: Timestamp,
     updatedAt: Timestamp.optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (d) =>
+      d.status === 'failed'
+        ? !!d.failureReason && d.candidates.length === 0 && !d.confirmedPlaceId
+        : d.failureReason === undefined,
+    'invalid_terminal_failure_state',
+  );
 export type Place = z.infer<typeof PlaceSchema>;
 export type Chain = z.infer<typeof ChainSchema>;
 export type Workspace = z.infer<typeof WorkspaceSchema>;

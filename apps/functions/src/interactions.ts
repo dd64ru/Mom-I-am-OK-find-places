@@ -1,8 +1,14 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DiscoveryService, type PlacesRepository } from '@places/core';
-import type { Discovery, DiscoveryView } from '@places/schemas';
+import type {
+  Discovery,
+  DiscoveryView,
+  ProviderFailureReason,
+} from '@places/schemas';
 import type { AtomicDocuments } from '@places/providers';
 import type { AcceptedMessage } from '@places/worker';
+import { ProcessingStatus } from './processing-status.js';
+import { ingressId } from './ingress.js';
 import type { TelegramTransport } from './telegram-api.js';
 const LIFETIME = 24 * 60 * 60 * 1000,
   CITY_LIFETIME = 10 * 60 * 1000;
@@ -52,7 +58,21 @@ export class TelegramInteractions {
         reply_markup: { inline_keyboard: [] },
       });
   }
-  async propose(discovery: DiscoveryView, userId: number, replyTo: number) {
+  async propose(
+    discovery: DiscoveryView,
+    userId: number,
+    replyTo: number,
+    statusId = discovery.id,
+  ): Promise<void | { failureReason: ProviderFailureReason }> {
+    if (discovery.status === 'failed') {
+      await new ProcessingStatus(
+        this.docs,
+        this.api,
+        this.workspace,
+        this.chat,
+      ).failure(statusId);
+      return { failureReason: discovery.failureReason! };
+    }
     if (['confirmed', 'cancelled'].includes(discovery.status)) return;
     if (!discovery.recognition.clues.length) {
       await this.api.call('sendMessage', {
@@ -82,6 +102,14 @@ export class TelegramInteractions {
     );
     if (!state.messageId && state.phase === 'active') {
       const candidate = await this.service.displayCandidate(discovery);
+      if (!candidate) {
+        const current = await this.repository.getDiscovery(
+          this.workspace,
+          discovery.id,
+        );
+        if (current?.status === 'failed')
+          return this.propose(current, userId, replyTo, statusId);
+      }
       const buttons = {
         inline_keyboard: [
           [
@@ -102,9 +130,7 @@ export class TelegramInteractions {
       const attribution = google
         ? [
             'Источник: Google Maps',
-            ...(candidate?.attributions ?? []).map(
-              (a) => a.provider.replace(/[\r\n]/g, ' ') + ' ' + a.providerUri,
-            ),
+            ...(candidate?.attributions ?? []).map((a) => renderAttribution(a)),
           ].join('\n')
         : '© Участники OpenStreetMap (ODbL)';
       const message =
@@ -118,9 +144,10 @@ export class TelegramInteractions {
             })
           : await this.api.call('sendMessage', {
               ...common,
-              text: candidate
-                ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted + '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}`
-                : resolutionMessage(discovery),
+              text: (candidate
+                ? `${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
+                : resolutionMessage(discovery)
+              ).slice(0, 4000),
             });
       await this.docs.change(this.path(token), (raw) => ({
         value: { ...raw, messageId: message.message_id },
@@ -195,7 +222,7 @@ export class TelegramInteractions {
     const discovery = await this.discovery(state);
     if (
       !discovery ||
-      ['confirmed', 'cancelled'].includes(discovery.status) ||
+      ['confirmed', 'cancelled', 'failed'].includes(discovery.status) ||
       discovery.revision < state.revision ||
       discovery.revision > state.revision + 2
     )
@@ -279,7 +306,7 @@ export class TelegramInteractions {
     if (state.phase === 'active')
       return (
         discovery.revision === state.revision &&
-        !['confirmed', 'cancelled'].includes(discovery.status)
+        !['confirmed', 'cancelled', 'failed'].includes(discovery.status)
       );
     return (
       state.action === callback.action &&
@@ -288,7 +315,7 @@ export class TelegramInteractions {
         (discovery.revision === state.revision + 1 &&
           (callback.action === 'city'
             ? discovery.status === 'awaiting_city'
-            : ['confirmed', 'cancelled'].includes(discovery.status))))
+            : ['confirmed', 'cancelled', 'failed'].includes(discovery.status))))
     );
   }
   async callback(
@@ -375,9 +402,27 @@ export class TelegramInteractions {
     );
     if (!claimed) return;
     const { state, owner } = claimed;
+    const status = new ProcessingStatus(
+      this.docs,
+      this.api,
+      this.workspace,
+      this.chat,
+    );
+    const logicalId = ingressId(
+      this.workspace,
+      this.chat,
+      `cityReply-${reply.messageId}`,
+    );
+    await status.start(logicalId, reply.messageId, 'city');
     try {
       let discovery = await this.discovery(state);
+      if (discovery?.status === 'failed') {
+        await status.failure(logicalId);
+        await this.done(token, owner);
+        return { failureReason: discovery.failureReason! };
+      }
       if (!discovery || ['confirmed', 'cancelled'].includes(discovery.status)) {
+        await status.complete(logicalId);
         await this.done(token, owner);
         return;
       }
@@ -393,6 +438,12 @@ export class TelegramInteractions {
         discovery.cityOverride !== state.city
       )
         discovery = undefined;
+      if (discovery?.status === 'failed') {
+        await status.failure(logicalId);
+        await this.done(token, owner);
+        return { failureReason: discovery.failureReason! };
+      }
+      await status.complete(logicalId);
       if (discovery) {
         const oldToken = this.token({ ...discovery, revision: state.revision });
         const oldMessage = await this.docs.change(
@@ -403,7 +454,16 @@ export class TelegramInteractions {
           }),
         );
         await this.close(oldMessage);
-        await this.propose(discovery, reply.userId, reply.messageId);
+        const outcome = await this.propose(
+          discovery,
+          reply.userId,
+          reply.messageId,
+          logicalId,
+        );
+        if (outcome) {
+          await this.done(token, owner);
+          return outcome;
+        }
       }
       await this.done(token, owner);
     } catch (error) {
@@ -430,4 +490,26 @@ function resolutionMessage(discovery: Discovery): string {
     no_match: 'Город определён, но само место найти не удалось.',
   };
   return `${reasons[discovery.resolutionReason ?? ''] ?? 'Не удалось уверенно определить это место.'} Место не сохранено. Можно изменить город или отменить.`;
+}
+
+export function renderAttribution(value: {
+  provider: string;
+  providerUri?: string;
+}) {
+  const provider = value.provider
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .slice(0, 1000);
+  try {
+    const url = new URL(value.providerUri ?? '');
+    if (
+      ['http:', 'https:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      url.href.length < 1500
+    )
+      return provider + ' ' + url.href;
+  } catch {
+    /* Not every documented URI is a safe clickable web URL. */
+  }
+  return provider;
 }

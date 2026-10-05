@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { GoogleAuth } from 'google-auth-library';
-import type { PoiProvider } from '@places/core';
+import { ProviderFailure, type PoiProvider } from '@places/core';
 import {
   CandidateSchema,
   GoogleIdentitySchema,
@@ -24,6 +24,8 @@ import {
   venueNameScore,
   nameTokens,
   categorySupport,
+  categoryWeight,
+  recognizedCategory,
   GOOGLE_MATCH_THRESHOLD,
   GOOGLE_MATCH_MARGIN,
 } from './place-matching.js';
@@ -37,65 +39,25 @@ type FailureCode =
   | 'google_places_auth_failed'
   | 'google_places_request_failed'
   | 'google_places_response_invalid'
+  | 'google_places_top_level_invalid'
+  | 'google_places_invalid_json'
+  | 'google_places_response_too_large'
+  | 'google_places_adaptation_failed'
   | 'google_places_transient_failure';
-export class GooglePlacesFailure extends Error {
+export class GooglePlacesFailure extends ProviderFailure {
   constructor(readonly code: FailureCode) {
     super(code);
     this.name = 'GooglePlacesFailure';
   }
 }
-const text = z.string().min(1).max(300);
-const Component = z
-  .object({
-    longText: text,
-    shortText: text.optional(),
-    types: z.array(z.string().max(100)).min(1).max(10),
-    languageCode: z.string().max(20).optional(),
-  })
-  .strict();
-const Row = z
-  .object({
-    id: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/),
-    displayName: z
-      .object({ text, languageCode: z.string().max(20).optional() })
-      .strict()
-      .optional(),
-    formattedAddress: z.string().min(1).max(1000).optional(),
-    location: z
-      .object({
-        latitude: z.number().min(-90).max(90),
-        longitude: z.number().min(-180).max(180),
-      })
-      .strict()
-      .optional(),
-    types: z
-      .array(z.string().regex(/^[a-z0-9_]{1,100}$/))
-      .max(30)
-      .default([]),
-    addressComponents: z.array(Component).max(30).default([]),
-    attributions: z
-      .array(
-        z
-          .object({
-            provider: text,
-            providerUri: z
-              .string()
-              .url()
-              .max(1000)
-              .refine((s) => new URL(s).protocol === 'https:'),
-          })
-          .strict(),
-      )
-      .max(10)
-      .optional(),
-  })
-  .strict();
-const ResponseSchema = z
-  .object({
-    places: z.array(Row).max(10).default([]),
-    nextPageToken: z.string().min(1).max(3000).optional(),
-  })
-  .strict();
+import {
+  adaptGoogleRow,
+  searchEnvelope,
+  parseCounts,
+  GOOGLE_BODY_LIMIT,
+  type GoogleParseEvent,
+  type GooglePlaceDto,
+} from './google-places-contract.js';
 // Equality after script/diacritic/punctuation normalization, never edit-distance/ranking/substring venue matching.
 export const normalizedVenueName = (value: string) =>
   value
@@ -103,92 +65,28 @@ export const normalizedVenueName = (value: string) =>
     .replace(/\p{M}/gu, '')
     .toLowerCase()
     .replace(/[^\p{L}\p{N}]/gu, '');
-const travelTypes = new Set([
-  'restaurant',
-  'cafe',
-  'coffee_shop',
-  'bakery',
-  'bar',
-  'pub',
-  'food_court',
-  'store',
-  'shopping_mall',
-  'market',
-  'supermarket',
-  'university',
-  'library',
-  'museum',
-  'historical_place',
-  'historical_landmark',
-  'cultural_landmark',
-  'monument',
-  'tourist_attraction',
-  'park',
-  'national_park',
-  'beach',
-  'botanical_garden',
-  'zoo',
-  'aquarium',
-  'art_gallery',
-  'observation_deck',
-  'hiking_area',
-  'waterfall',
-  'island',
-  'church',
-  'hindu_temple',
-  'mosque',
-  'synagogue',
-  'amusement_park',
-  'garden',
-]);
-const travelType = (types: string[]) =>
-  types.find(
-    (t) =>
-      travelTypes.has(t) || t.endsWith('_restaurant') || t.endsWith('_store'),
-  );
-function geographicMatch(
-  row: z.infer<typeof Row>,
-  locality: Locality,
-): { city: string; countryCode: string } | undefined {
-  const components = row.addressComponents;
-  const countries = components.filter((c) => c.types.includes('country'));
-  if (
-    countries.length !== 1 ||
-    !/^[A-Z]{2}$/.test(countries[0]?.shortText ?? '')
-  )
-    return;
-  const countryCode = countries[0]!.shortText!;
-  if (locality.countryCode && locality.countryCode !== countryCode) return;
-  let cities = components.filter(
-    (c) => c.types.includes('locality') || c.types.includes('postal_town'),
-  );
-  if (!cities.length && countryCode === 'CN') {
-    cities = components.filter(
-      (c) =>
-        c.types.includes('administrative_area_level_1') &&
-        [c.longText, c.shortText].some(
-          (s) =>
-            s &&
-            [
-              'shanghai',
-              'beijing',
-              'tianjin',
-              'chongqing',
-              '上海',
-              '北京',
-              '天津',
-              '重庆',
-            ].includes(normalizedLocality(s)),
-        ),
-    );
+function encodeGoogleId(id: string) {
+  try {
+    return encodeURIComponent(id);
+  } catch {
+    throw new GooglePlacesFailure('google_places_adaptation_failed');
   }
-  // In province-level municipalities level_2 may be a district, not another city.
-  if (!cities.length && countryCode === 'CN')
-    cities = components.filter((c) =>
-      c.types.includes('administrative_area_level_2'),
-    );
-  if (!cities.length) return;
-  const matches = (c: z.infer<typeof Component>) =>
+}
+function geographicEvidence(row: GooglePlaceDto, locality: Locality) {
+  const countryCodes = [
+    ...new Set(
+      row.addressComponents
+        .filter((c) => c.types.includes('country'))
+        .map((c) => c.shortText)
+        .filter((c): c is string => !!c && /^[A-Z]{2}$/.test(c)),
+    ),
+  ];
+  const countryConflict =
+    !!locality.countryCode &&
+    countryCodes.some((c) => c !== locality.countryCode);
+  const countryMatch =
+    !!locality.countryCode && countryCodes.includes(locality.countryCode);
+  const namesMatch = (c: GooglePlaceDto['addressComponents'][number]) =>
     [c.longText, c.shortText].some(
       (s) =>
         s &&
@@ -196,9 +94,45 @@ function geographicMatch(
           (a) => normalizedLocality(a) === normalizedLocality(s),
         ),
     );
-  // Reject a contradictory locality component, even if another component matches the requested city.
-  if (!cities.every(matches)) return;
-  return { city: locality.name, countryCode };
+  const cities = row.addressComponents.filter(
+    (c) =>
+      (c.types.includes('locality') ||
+        (locality.countryCode === 'CN' &&
+          c.types.some((t) =>
+            [
+              'administrative_area_level_1',
+              'administrative_area_level_2',
+            ].includes(t),
+          ) &&
+          [c.longText, c.shortText].some((n) => n?.endsWith('市')))) &&
+      (c.longText || c.shortText),
+  );
+  const cityMatch =
+    cities.some(namesMatch) ||
+    (!cities.length &&
+      row.addressComponents
+        .filter((c) =>
+          c.types.some((t) =>
+            [
+              'postal_town',
+              'administrative_area_level_1',
+              'administrative_area_level_2',
+            ].includes(t),
+          ),
+        )
+        .some(namesMatch));
+  // Canonical locality is stronger than a mailing town/district. Unclear hierarchy is neutral.
+  const cityConflict = !!cities.length && !cities.some(namesMatch);
+  return {
+    countryConflict,
+    countryMatch,
+    cityConflict,
+    cityMatch,
+    address: {
+      ...(cityMatch ? { city: locality.name } : {}),
+      ...(countryCodes.length === 1 ? { countryCode: countryCodes[0] } : {}),
+    },
+  };
 }
 export const normalizedAddress = (value: string) =>
   value
@@ -221,27 +155,48 @@ export const normalizedAddress = (value: string) =>
     );
 function addressSignal(
   clue: string | undefined,
-  row: z.infer<typeof Row>,
+  row: GooglePlaceDto,
 ): 'match' | 'absent' | 'conflict' {
   if (!clue) return 'absent';
   const wanted = normalizedAddress(clue);
   if (wanted.length < 4) return 'absent';
-  const number = wanted.match(/^([0-9]+[a-z]?)\b/u)?.[1];
-  const returnedNumbers = [
-    normalizedAddress(row.formattedAddress ?? '').match(
-      /^([0-9]+[a-z]?)\b/u,
-    )?.[1],
-    ...row.addressComponents
-      .filter((c) => c.types.includes('street_number'))
-      .map((c) => normalizedAddress(c.longText)),
-  ].filter(Boolean);
-  if (number && returnedNumbers.some((n) => n !== number)) return 'conflict';
+  const comparable = (s: string) => {
+    const plain = s
+      .normalize('NFKC')
+      .trim()
+      .replace(/^(?:no\.?|№)\s*/iu, '');
+    if (
+      /^[0-9]+(?:\s*[-–—/]\s*[\p{L}\p{N}]|\s+(?:building|bldg|unit|apt|apartment|suite|room|block)\b)/iu.test(
+        plain,
+      )
+    )
+      return;
+    return normalizedAddress(s).match(/^([0-9]+[a-z]?)(?=\s+[\p{L}]|$)/u)?.[1];
+  };
+  const number = comparable(clue);
+  const explicit = row.addressComponents
+    .filter((c) => c.types.includes('street_number'))
+    .map((c) => c.longText ?? c.shortText ?? '');
+  const sources = [...explicit, row.formattedAddress ?? ''];
+  const returnedNumbers = sources
+    .map(comparable)
+    .filter((n): n is string => !!n);
+  if (
+    number &&
+    returnedNumbers.length &&
+    returnedNumbers.some((n) => n !== number)
+  )
+    return 'conflict';
   const values = [
     row.formattedAddress ?? '',
-    ...row.addressComponents.flatMap((c) => [c.longText, c.shortText ?? '']),
+    ...row.addressComponents.flatMap((c) => [
+      c.longText ?? '',
+      c.shortText ?? '',
+    ]),
   ].map(normalizedAddress);
-  if (values.some((s) => ` ${s} `.includes(` ${wanted} `))) return 'match';
-  return number && returnedNumbers.length ? 'conflict' : 'absent';
+  return values.some((s) => ` ${s} `.includes(` ${wanted} `))
+    ? 'match'
+    : 'absent';
 }
 export type GoogleFilterEvent = {
   event: 'google_places_filter';
@@ -270,16 +225,43 @@ export class GooglePlacesPoi implements PoiProvider {
     private readonly quotaProject: string,
     private readonly request: typeof fetch = fetch,
     private readonly now = Date.now,
-    private readonly diagnostic: (event: GoogleFilterEvent) => void = () => {},
+    private readonly diagnostic: (
+      event: GoogleFilterEvent | GoogleParseEvent,
+    ) => void = () => {},
   ) {
     if (!/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(quotaProject))
       throw new GooglePlacesFailure('google_places_configuration_invalid');
   }
-  private async load<S extends z.ZodTypeAny>(
+  private parseLog(
+    topLevel: GoogleParseEvent['topLevel'],
+    rows: unknown[] = [],
+    credential?: string,
+  ) {
+    const skipped = parseCounts();
+    const usable: GooglePlaceDto[] = [];
+    for (const raw of rows) {
+      const parsed = adaptGoogleRow(raw, credential);
+      if (parsed.code === 'usable') usable.push(parsed.row);
+      else skipped[parsed.code]++;
+    }
+    try {
+      this.diagnostic({
+        event: 'google_places_parse',
+        topLevel,
+        rowsReturned: rows.length,
+        rowsUsable: usable.length,
+        rowsSkipped: rows.length - usable.length,
+        skipped,
+      });
+    } catch {
+      /* best effort */
+    }
+    return usable;
+  }
+  private async load(
     endpoint: string,
     init: { method: 'POST' | 'GET'; fieldMask: string; body?: string },
-    schema: S,
-  ): Promise<z.output<S>> {
+  ): Promise<{ raw: unknown; credential: string }> {
     let token: string;
     try {
       token = await this.accessToken();
@@ -326,7 +308,7 @@ export class GooglePlacesPoi implements PoiProvider {
       throw new GooglePlacesFailure('google_places_transient_failure');
     if (!response.ok)
       throw new GooglePlacesFailure('google_places_request_failed');
-    let data: z.output<S>;
+    let data: unknown;
     try {
       if (!response.body) throw new Error();
       const reader = response.body.getReader(),
@@ -337,24 +319,35 @@ export class GooglePlacesPoi implements PoiProvider {
           const chunk = await reader.read();
           if (chunk.done) break;
           size += chunk.value.byteLength;
-          if (size > 200_000) throw new Error();
+          if (size > GOOGLE_BODY_LIMIT) {
+            this.parseLog('response_too_large');
+            throw new GooglePlacesFailure('google_places_response_too_large');
+          }
           chunks.push(chunk.value);
         }
       } finally {
-        await reader.cancel();
+        try {
+          await reader.cancel();
+        } catch {
+          /* cleanup must not mask the classified failure */
+        }
         reader.releaseLock();
       }
-      data = schema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-      // An unexpected upstream echo must never reach persisted IDs/attributions or Telegram URLs.
-      if (JSON.stringify(data).includes(token)) throw new Error();
-    } catch {
+      try {
+        data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+      } catch {
+        this.parseLog('invalid_json');
+        throw new GooglePlacesFailure('google_places_invalid_json');
+      }
+    } catch (error) {
+      if (error instanceof GooglePlacesFailure) throw error;
       throw new GooglePlacesFailure(
         signal.aborted
           ? 'google_places_transient_failure'
           : 'google_places_response_invalid',
       );
     }
-    return data;
+    return { raw: data, credential: token };
   }
   // Refresh is a read-only, transient provider view. Callers must not save it as a Place.
   async refresh(identity: {
@@ -364,37 +357,40 @@ export class GooglePlacesPoi implements PoiProvider {
     const parsed = GoogleIdentitySchema.safeParse(identity);
     if (!parsed.success)
       throw new GooglePlacesFailure('google_places_request_failed');
-    const row = await this.load(
+    const endpoint =
       'https://places.googleapis.com/v1/places/' +
-        encodeURIComponent(parsed.data.id),
-      {
-        method: 'GET',
-        fieldMask: 'id,displayName,formattedAddress,location,attributions',
-      },
-      Row,
-    );
+      encodeGoogleId(parsed.data.id);
+    // Dot-only opaque IDs cannot be represented as one HTTP path segment; never request a normalized parent URL.
     if (
-      row.id !== parsed.data.id ||
-      !row.displayName ||
-      !row.location ||
-      !row.formattedAddress
+      new URL(endpoint).pathname !==
+      '/v1/places/' + encodeGoogleId(parsed.data.id)
     )
+      throw new GooglePlacesFailure('google_places_adaptation_failed');
+    const loaded = await this.load(endpoint, {
+      method: 'GET',
+      fieldMask: 'id,displayName,formattedAddress,location,attributions',
+    });
+    const row = this.parseLog('ok', [loaded.raw], loaded.credential)[0];
+    if (!row || row.id !== parsed.data.id)
       throw new GooglePlacesFailure('google_places_response_invalid');
-    return PlaceDisplaySchema.parse({
+    const display = PlaceDisplaySchema.safeParse({
       canonicalName: row.displayName.text,
       coordinates: { ...row.location, crs: 'WGS84' },
-      address: { formatted: row.formattedAddress },
+      address: { formatted: row.formattedAddress ?? '' },
       providerIdentity: parsed.data,
       references: [
         {
           provider: 'google-places',
           externalId: row.id,
-          url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeURIComponent(row.id)}`,
+          url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeGoogleId(row.id)}`,
           observedAt: new Date(this.now()).toISOString(),
         },
       ],
       ...(row.attributions?.length ? { attributions: row.attributions } : {}),
     });
+    if (!display.success)
+      throw new GooglePlacesFailure('google_places_adaptation_failed');
+    return display.data;
   }
 
   async resolve(
@@ -484,28 +480,27 @@ export class GooglePlacesPoi implements PoiProvider {
       string,
       { candidate: Candidate; score: number }
     >();
-    let nameMatched = false,
-      categoryMatched = false,
+    let categoryMatched = false,
       geographyMatched = false,
       truncated = false;
     for (const [queryIndex, query] of queries.entries()) {
-      const data = await this.load(
-        GOOGLE_PLACES_ENDPOINT,
-        {
-          method: 'POST',
-          fieldMask: GOOGLE_PLACES_FIELD_MASK,
-          body: JSON.stringify({
-            textQuery: query,
-            languageCode: 'en',
-            pageSize: 10,
-            includePureServiceAreaBusinesses: false,
-            ...(locality.countryCode
-              ? { regionCode: locality.countryCode }
-              : {}),
-          }),
-        },
-        ResponseSchema,
-      );
+      const loaded = await this.load(GOOGLE_PLACES_ENDPOINT, {
+        method: 'POST',
+        fieldMask: GOOGLE_PLACES_FIELD_MASK,
+        body: JSON.stringify({
+          textQuery: query,
+          languageCode: 'en',
+          pageSize: 10,
+          includePureServiceAreaBusinesses: false,
+          ...(locality.countryCode ? { regionCode: locality.countryCode } : {}),
+        }),
+      });
+      const envelope = searchEnvelope(loaded.raw);
+      if (!envelope) {
+        this.parseLog('top_level_invalid');
+        throw new GooglePlacesFailure('google_places_top_level_invalid');
+      }
+      const rows = this.parseLog('ok', envelope.places, loaded.credential);
       const rejected = {
         no_name_match: 0,
         category_conflict: 0,
@@ -518,7 +513,7 @@ export class GooglePlacesPoi implements PoiProvider {
       const event: GoogleFilterEvent = {
         event: 'google_places_filter',
         query: queryIndex + 1,
-        returned: data.places.length,
+        returned: envelope.places.length,
         complete: 0,
         nameStrong: 0,
         categoryCompatible: 0,
@@ -528,11 +523,9 @@ export class GooglePlacesPoi implements PoiProvider {
         result: 'no_match',
         rejected,
       };
-      for (const row of data.places) {
-        if (!row.displayName || !row.location || !row.formattedAddress)
-          continue;
+      for (const row of rows) {
         event.complete++;
-        const comparisons = [clue, ...additional]
+        const comparisons = [clue, ...boundedClues]
           .map((evidence) => {
             const evidenceName =
               'canonicalName' in evidence
@@ -563,49 +556,41 @@ export class GooglePlacesPoi implements PoiProvider {
           .sort(
             (a, b) =>
               b.score +
-              (b.support === 'compatible' ? 0.05 : 0.01) +
+              categoryWeight(b.support) +
               (b.addressState === 'match' ? 0.06 : 0) -
               (a.score +
-                (a.support === 'compatible' ? 0.05 : 0.01) +
+                categoryWeight(a.support) +
                 (a.addressState === 'match' ? 0.06 : 0)),
           );
         if (!comparisons.some((c) => c.score)) {
           rejected.no_name_match++;
           continue;
         }
-        nameMatched = true;
         event.nameStrong++;
         const winning =
-          comparisons.find(
-            (c) =>
-              c.score &&
-              c.support !== 'conflict' &&
-              c.addressState !== 'conflict',
-          ) ?? comparisons.find((c) => c.score && c.support !== 'conflict');
-        const nameScore = winning?.score ?? 0,
-          support = winning?.support ?? 'conflict';
-        const matchingClue = winning?.evidence ?? clue;
-        const category = travelType(row.types);
-        if (!category || support === 'conflict') {
-          rejected.category_conflict++;
-          continue;
-        }
+          comparisons.find((c) => c.score && c.addressState !== 'conflict') ??
+          comparisons.find((c) => c.score);
+        const nameScore = winning!.score,
+          support = winning!.support;
+        const matchingClue = winning!.evidence;
+        const category =
+          recognizedCategory(row.types) ?? matchingClue.category ?? 'place';
+        if (support === 'conflict') rejected.category_conflict++;
+        else if (support !== 'unknown') event.categoryCompatible++;
         categoryMatched = true;
-        event.categoryCompatible++;
-        const country = row.addressComponents.find((c) =>
-          c.types.includes('country'),
-        )?.shortText;
-        if (locality.countryCode && country !== locality.countryCode) {
+        const geography = geographicEvidence(row, locality);
+        if (geography.countryConflict) {
           rejected.country_conflict++;
           continue;
         }
-        const address = geographicMatch(row, locality);
-        if (!address) {
+        if (geography.cityConflict) {
           rejected.locality_conflict++;
           continue;
         }
+        const address = geography.address;
         geographyMatched = true;
-        event.localityCompatible++;
+        if (geography.cityMatch || geography.countryMatch)
+          event.localityCompatible++;
         const addressState = winning!.addressState;
         if (addressState === 'conflict') {
           rejected.address_conflict++;
@@ -615,9 +600,9 @@ export class GooglePlacesPoi implements PoiProvider {
         const score = Math.min(
           1,
           nameScore +
-            0.08 +
-            (locality.countryCode ? 0.04 : 0) +
-            (support === 'compatible' ? 0.05 : 0.01) +
+            (geography.cityMatch ? 0.08 : 0) +
+            (geography.countryMatch ? 0.04 : 0) +
+            categoryWeight(support) +
             (addressState === 'match' ? 0.06 : 0),
         );
         if (score < GOOGLE_MATCH_THRESHOLD) rejected.below_threshold++;
@@ -625,7 +610,7 @@ export class GooglePlacesPoi implements PoiProvider {
         const reference = {
           provider: 'google-places',
           externalId: row.id,
-          url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeURIComponent(row.id)}`,
+          url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeGoogleId(row.id)}`,
           observedAt: new Date(this.now()).toISOString(),
         };
         const parsed = CandidateSchema.safeParse({
@@ -638,7 +623,7 @@ export class GooglePlacesPoi implements PoiProvider {
             .map((s) => s.slice(0, 300)),
           category,
           coordinates: { ...row.location, crs: 'WGS84' },
-          address: { formatted: row.formattedAddress, ...address },
+          address: { formatted: row.formattedAddress ?? '', ...address },
           references: [...input.data.verification.references, reference],
           confidence: matchingClue.confidence,
           resolution: 'deterministic_poi',
@@ -648,7 +633,7 @@ export class GooglePlacesPoi implements PoiProvider {
             : {}),
         });
         if (!parsed.success)
-          throw new GooglePlacesFailure('google_places_response_invalid');
+          throw new GooglePlacesFailure('google_places_adaptation_failed');
         const previous = candidates.get(row.id);
         if (
           previous &&
@@ -660,8 +645,8 @@ export class GooglePlacesPoi implements PoiProvider {
           candidates.set(row.id, { candidate: parsed.data, score });
       }
       if (
-        event.localityCompatible > rejected.address_conflict &&
-        data.nextPageToken
+        event.accepted + rejected.below_threshold > 0 &&
+        envelope.nextPageToken
       )
         truncated = true;
       const ranked = [...candidates.values()].sort((a, b) => b.score - a.score);
@@ -694,7 +679,7 @@ export class GooglePlacesPoi implements PoiProvider {
         : { status: 'unresolved', reason: 'locality_mismatch' };
     return {
       status: 'unresolved',
-      reason: nameMatched ? 'unsupported_category' : 'no_match',
+      reason: 'no_match',
     };
   }
 }

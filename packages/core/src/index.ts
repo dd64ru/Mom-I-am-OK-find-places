@@ -1,8 +1,10 @@
 import {
   DiscoverySchema,
+  ProviderFailureReasonSchema,
   storedCandidate,
   type DiscoveryView,
   type PlaceDisplay,
+  PlaceDisplaySchema,
   VerificationSchema,
   PoiResolutionSchema,
   type Place,
@@ -15,6 +17,15 @@ import {
   type GeographicContext,
   type PoiResolution,
 } from '@places/schemas';
+export class ProviderFailure extends Error {
+  constructor(readonly code: string) {
+    super(code);
+  }
+  terminalReason() {
+    const reason = ProviderFailureReasonSchema.safeParse(this.code);
+    return reason.success ? reason.data : undefined;
+  }
+}
 export interface ImageInput {
   mimeType: 'image/jpeg' | 'image/png' | 'image/webp';
   bytes: Uint8Array;
@@ -120,7 +131,7 @@ export class DiscoveryService {
   async resolve(discovery: Discovery): Promise<DiscoveryView> {
     if (
       !this.verification ||
-      ['confirmed', 'cancelled'].includes(discovery.status)
+      ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
     )
       return discovery;
     const workspace = await this.repository.getWorkspace(discovery.workspaceId);
@@ -129,16 +140,24 @@ export class DiscoveryService {
       cityOverride: discovery.cityOverride,
       workspaceAreaHint: workspace.areaHint,
     };
-    const verified = VerificationSchema.parse(
-      await this.verification.search.verify(discovery.recognition, context),
-    );
-    const resolution = PoiResolutionSchema.parse(
-      await this.verification.poi.resolve(
-        discovery.recognition,
-        verified,
-        context,
-      ),
-    );
+    let resolution: PoiResolution;
+    try {
+      const verified = VerificationSchema.parse(
+        await this.verification.search.verify(discovery.recognition, context),
+      );
+      const adapted = PoiResolutionSchema.safeParse(
+        await this.verification.poi.resolve(
+          discovery.recognition,
+          verified,
+          context,
+        ),
+      );
+      if (!adapted.success) throw new ProviderFailure('poi_adaptation_failed');
+      resolution = adapted.data;
+    } catch (error) {
+      return this.recordFailure(discovery, error);
+    }
+
     const updated = await this.repository.reviseDiscovery(
       discovery.workspaceId,
       discovery.id,
@@ -180,7 +199,38 @@ export class DiscoveryService {
     if ('coordinates' in candidate) return candidate;
     if (!this.verification?.poi.refresh)
       throw new Error('provider_refresh_unavailable');
-    return this.verification.poi.refresh(candidate.providerIdentity);
+    try {
+      const display = PlaceDisplaySchema.safeParse(
+        await this.verification.poi.refresh(candidate.providerIdentity),
+      );
+      if (!display.success) throw new ProviderFailure('poi_adaptation_failed');
+      return display.data;
+    } catch (error) {
+      await this.recordFailure(discovery, error);
+      return;
+    }
+  }
+  private async recordFailure(
+    discovery: Discovery,
+    error: unknown,
+  ): Promise<Discovery> {
+    const reason =
+      error instanceof ProviderFailure ? error.terminalReason() : undefined;
+    if (!reason) throw error;
+    const failed = await this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      { status: 'failed', failureReason: reason, candidates: [] },
+    );
+    if (failed)
+      console.error(
+        JSON.stringify({ event: 'provider_terminal_failure', reason }),
+      );
+    return (
+      failed ??
+      (await this.repository.getDiscovery(discovery.workspaceId, discovery.id))!
+    );
   }
   async requestCity(discovery: Discovery): Promise<Discovery | undefined> {
     return this.repository.reviseDiscovery(

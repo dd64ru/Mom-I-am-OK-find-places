@@ -105,44 +105,71 @@ export function venueNameScore(evidence: string, returned: string): number {
   // A distinctive partial sign requires additional locality/country/category support.
   return 0.72;
 }
+const categoryGroups: [RegExp, (t: string) => boolean][] = [
+  [
+    /cafe|coffee|bakery|restaurant|dining|food|bar|pub/,
+    (t) =>
+      [
+        'cafe',
+        'coffee_shop',
+        'bakery',
+        'restaurant',
+        'food_court',
+        'bar',
+        'pub',
+      ].includes(t) || t.endsWith('_restaurant'),
+  ],
+  [
+    /university|college|school/,
+    (t) =>
+      ['university', 'school', 'college', 'educational_institution'].includes(
+        t,
+      ),
+  ],
+  [
+    /shop|store|retail|market/,
+    (t) =>
+      ['store', 'market', 'supermarket', 'shopping_mall'].includes(t) ||
+      t.endsWith('_store'),
+  ],
+  [/museum/, (t) => t === 'museum' || t.endsWith('_museum')],
+  [
+    /park|garden/,
+    (t) => ['park', 'garden', 'national_park', 'botanical_garden'].includes(t),
+  ],
+  [
+    /station|airport|transport/,
+    (t) =>
+      ['train_station', 'bus_station', 'transit_station', 'airport'].includes(
+        t,
+      ),
+  ],
+  [/street|address|route/, (t) => ['street_address', 'route'].includes(t)],
+];
+export function recognizedCategory(types: string[]) {
+  return types.find((t) => categoryGroups.some(([, match]) => match(t)));
+}
 export function categorySupport(
   category: string,
   types: string[],
-): 'compatible' | 'unknown' | 'conflict' {
+): 'compatible' | 'related' | 'unknown' | 'conflict' {
   const c = category.toLowerCase();
-  const groups: [RegExp, (t: string) => boolean][] = [
-    [
-      /cafe|coffee|bakery/,
-      (t) => ['cafe', 'coffee_shop', 'bakery'].includes(t),
-    ],
-    [
-      /restaurant|dining|food/,
-      (t) =>
-        t === 'restaurant' || t.endsWith('_restaurant') || t === 'food_court',
-    ],
-    [/university|college/, (t) => t === 'university'],
-    [
-      /shop|store|retail|market/,
-      (t) =>
-        t === 'store' ||
-        t.endsWith('_store') ||
-        ['market', 'supermarket', 'shopping_mall'].includes(t),
-    ],
-    [/museum/, (t) => t === 'museum'],
-    [
-      /park|garden/,
-      (t) =>
-        ['park', 'national_park', 'garden', 'botanical_garden'].includes(t),
-    ],
-  ];
-  const group = groups.find(([pattern]) => pattern.test(c));
-  return group
-    ? types.some(group[1])
-      ? 'compatible'
-      : 'conflict'
-    : types.includes(c)
-      ? 'compatible'
-      : 'unknown';
+  const expected = categoryGroups.findIndex(([pattern]) => pattern.test(c));
+  if (types.includes(c)) return 'compatible';
+  if (expected < 0) return 'unknown';
+  if (types.some(categoryGroups[expected]![1])) return 'related';
+  // Unknown/evolving types are neutral. Only known unrelated domains incur a penalty.
+  return types.some((t) => categoryGroups.some(([, match]) => match(t)))
+    ? 'conflict'
+    : 'unknown';
 }
+export const categoryWeight = (support: ReturnType<typeof categorySupport>) =>
+  support === 'compatible'
+    ? 0.05
+    : support === 'related'
+      ? 0.03
+      : support === 'conflict'
+        ? -0.3
+        : 0;
 export const GOOGLE_MATCH_THRESHOLD = 0.88,
   GOOGLE_MATCH_MARGIN = 0.12;

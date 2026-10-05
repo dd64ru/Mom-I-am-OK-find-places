@@ -153,12 +153,24 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
           return;
         }
         if (accepted.kind === 'cityReply') {
-          await imageSlot(docs, async (assertSlot) => {
+          const status = new ProcessingStatus(
+            docs,
+            api,
+            config.WORKSPACE_ID,
+            config.chatId,
+          );
+          await status.start(id, record.messageId, 'city');
+          return imageSlot(docs, async (assertSlot) => {
             await assertOwned();
             await assertSlot();
-            await interactions.cityReply(accepted, promptToken!);
+            const outcome = await interactions.cityReply(
+              accepted,
+              promptToken!,
+            );
+            // A prompt can expire/be superseded while waiting for the global slot.
+            if (!outcome) await status.complete(id);
+            return outcome;
           });
-          return;
         }
         if (accepted.kind === 'command') {
           await assertOwned();
@@ -186,7 +198,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
           config.chatId,
         );
         await status.start(id, record.messageId);
-        await imageSlot(docs, async (assertSlot) => {
+        return imageSlot(docs, async (assertSlot) => {
           const budget = AbortSignal.timeout(200_000);
           let result = await repository.getDiscovery(config.WORKSPACE_ID, id);
           if (!result) {
@@ -271,8 +283,12 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
             result = await interactionService.resolve(result);
           await assertOwned();
           await assertSlot();
+          if (result.status === 'failed') {
+            await status.failure(id);
+            return { failureReason: result.failureReason! };
+          }
           await status.complete(id);
-          await interactions.propose(
+          return interactions.propose(
             result,
             record.userId ?? accepted.userId,
             record.messageId,

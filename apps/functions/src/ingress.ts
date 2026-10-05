@@ -1,8 +1,13 @@
 import { createHash, randomUUID } from 'node:crypto';
 import type { AtomicDocuments } from '@places/providers';
+import {
+  ProviderFailureReasonSchema,
+  type ProviderFailureReason,
+} from '@places/schemas';
 import type { AcceptedMessage } from '@places/worker';
 export interface IngressRecord {
   phase: 'pending' | 'processing' | 'done';
+  failureReason?: ProviderFailureReason;
   sealed?: boolean;
   messageId: number;
   userId?: number;
@@ -75,7 +80,7 @@ export class Ingress {
     process: (
       record: IngressRecord,
       assertOwned: () => Promise<void>,
-    ) => Promise<void>,
+    ) => Promise<void | { failureReason: ProviderFailureReason }>,
   ): Promise<'done' | 'retry'> {
     const owner = randomUUID();
     const deadline = this.now() + 20_000;
@@ -110,12 +115,21 @@ export class Ingress {
           });
         };
         try {
-          await process(claim.state, assertOwned);
+          const outcome = await process(claim.state, assertOwned);
+          const failureReason = outcome
+            ? ProviderFailureReasonSchema.parse(outcome.failureReason)
+            : undefined;
           await this.docs.change(this.path(id), (raw) => {
             if (raw?.owner !== owner || Number(raw.expiresAt) <= this.now())
               throw new Error('ingress_lease_lost');
             return {
-              value: { ...raw, phase: 'done', owner: '', expiresAt: 0 },
+              value: {
+                ...raw,
+                phase: 'done',
+                owner: '',
+                expiresAt: 0,
+                ...(failureReason ? { failureReason } : {}),
+              },
               result: undefined,
             };
           });
