@@ -11,6 +11,7 @@ import {
   type Discovery,
   type Workspace,
   type Candidate,
+  type StoredCandidate,
 } from '@places/schemas';
 import type { PlacesRepository } from '@places/core';
 // Admin SDK uses ADC; security rules do not restrict this trusted runtime.
@@ -127,8 +128,13 @@ export class FirestoreRepository implements PlacesRepository {
           resolution: _,
           providerIdentity: identity,
           references,
-          ...fields
+          ...content
         } = candidate;
+        // Strict durable schema also rejects accidental live Google content on all other write paths.
+        const fields =
+          identity?.provider === 'google-places'
+            ? { providerIdentity: identity }
+            : content;
         const source = references.find((r) =>
           identity
             ? r.provider === identity.provider && r.externalId === identity.id
@@ -203,9 +209,14 @@ function clean(value: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(value));
 }
 
-export function canonicalPlaceId(candidate: Candidate): string {
+export function canonicalPlaceId(
+  candidate: Candidate | StoredCandidate,
+): string {
   const key = candidate.providerIdentity
     ? `poi:${candidate.providerIdentity.provider}:${candidate.providerIdentity.id}`
-    : `geo:${candidate.canonicalName.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu, ' ')}:${candidate.coordinates.latitude.toFixed(6)}:${candidate.coordinates.longitude.toFixed(6)}`;
+    : 'coordinates' in candidate
+      ? `geo:${candidate.canonicalName.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu, ' ')}:${candidate.coordinates.latitude.toFixed(6)}:${candidate.coordinates.longitude.toFixed(6)}`
+      : undefined;
+  if (!key) throw new Error('deterministic_candidate_required');
   return createHash('sha256').update(key).digest('hex');
 }

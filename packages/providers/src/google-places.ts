@@ -3,6 +3,9 @@ import { GoogleAuth } from 'google-auth-library';
 import type { PoiProvider } from '@places/core';
 import {
   CandidateSchema,
+  GoogleIdentitySchema,
+  PlaceDisplaySchema,
+  type PlaceDisplay,
   RecognitionSchema,
   VerificationSchema,
   GeographicContextSchema,
@@ -192,8 +195,10 @@ function geographicMatch(
 }
 const normalizedAddress = (value: string) =>
   value
+    .replace(/№(?=\s*\d)/gu, ' ')
     .normalize('NFKC')
     .toLowerCase()
+    .replace(/\bno\.?\s*(?=\d)/gu, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim()
     .replace(
@@ -231,6 +236,128 @@ export class GooglePlacesPoi implements PoiProvider {
     if (!/^[a-z][a-z0-9-]{4,61}[a-z0-9]$/.test(quotaProject))
       throw new GooglePlacesFailure('google_places_configuration_invalid');
   }
+  private async load<S extends z.ZodTypeAny>(
+    endpoint: string,
+    init: { method: 'POST' | 'GET'; fieldMask: string; body?: string },
+    schema: S,
+  ): Promise<z.output<S>> {
+    let token: string;
+    try {
+      token = await this.accessToken();
+    } catch {
+      throw new GooglePlacesFailure('google_places_adc_unavailable');
+    }
+    if (
+      typeof token !== 'string' ||
+      token.length > 4096 ||
+      !/^[A-Za-z0-9._~+/-]+=*$/.test(token)
+    )
+      throw new GooglePlacesFailure('google_places_configuration_invalid');
+    const signal = AbortSignal.timeout(10_000);
+    let response: Response;
+    try {
+      response = await this.request(endpoint, {
+        method: init.method,
+        redirect: 'error',
+        signal,
+        headers: {
+          Authorization: 'Bearer ' + token,
+          'X-Goog-User-Project': this.quotaProject,
+          'X-Goog-FieldMask': init.fieldMask,
+          'Content-Type': 'application/json',
+        },
+        ...(init.body ? { body: init.body } : {}),
+      });
+    } catch (error) {
+      if (
+        signal.aborted ||
+        (error instanceof DOMException &&
+          ['TimeoutError', 'AbortError'].includes(error.name))
+      )
+        throw new GooglePlacesFailure('google_places_transient_failure');
+      throw new GooglePlacesFailure('google_places_request_failed');
+    }
+    // Never read an error body, which may echo keys or user/provider text.
+    if (response.status === 401 || response.status === 403)
+      throw new GooglePlacesFailure('google_places_auth_failed');
+    if (
+      response.status === 429 ||
+      (response.status >= 500 && response.status <= 599)
+    )
+      throw new GooglePlacesFailure('google_places_transient_failure');
+    if (!response.ok)
+      throw new GooglePlacesFailure('google_places_request_failed');
+    let data: z.output<S>;
+    try {
+      if (!response.body) throw new Error();
+      const reader = response.body.getReader(),
+        chunks: Uint8Array[] = [];
+      let size = 0;
+      try {
+        while (true) {
+          const chunk = await reader.read();
+          if (chunk.done) break;
+          size += chunk.value.byteLength;
+          if (size > 200_000) throw new Error();
+          chunks.push(chunk.value);
+        }
+      } finally {
+        await reader.cancel();
+        reader.releaseLock();
+      }
+      data = schema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
+      // An unexpected upstream echo must never reach persisted IDs/attributions or Telegram URLs.
+      if (JSON.stringify(data).includes(token)) throw new Error();
+    } catch {
+      throw new GooglePlacesFailure(
+        signal.aborted
+          ? 'google_places_transient_failure'
+          : 'google_places_response_invalid',
+      );
+    }
+    return data;
+  }
+  // Refresh is a read-only, transient provider view. Callers must not save it as a Place.
+  async refresh(identity: {
+    provider: string;
+    id: string;
+  }): Promise<PlaceDisplay> {
+    const parsed = GoogleIdentitySchema.safeParse(identity);
+    if (!parsed.success)
+      throw new GooglePlacesFailure('google_places_request_failed');
+    const row = await this.load(
+      'https://places.googleapis.com/v1/places/' +
+        encodeURIComponent(parsed.data.id),
+      {
+        method: 'GET',
+        fieldMask: 'id,displayName,formattedAddress,location,attributions',
+      },
+      Row,
+    );
+    if (
+      row.id !== parsed.data.id ||
+      !row.displayName ||
+      !row.location ||
+      !row.formattedAddress
+    )
+      throw new GooglePlacesFailure('google_places_response_invalid');
+    return PlaceDisplaySchema.parse({
+      canonicalName: row.displayName.text,
+      coordinates: { ...row.location, crs: 'WGS84' },
+      address: { formatted: row.formattedAddress },
+      providerIdentity: parsed.data,
+      references: [
+        {
+          provider: 'google-places',
+          externalId: row.id,
+          url: `https://www.google.com/maps/search/?api=1&query=Google%20Place&query_place_id=${encodeURIComponent(row.id)}`,
+          observedAt: new Date(this.now()).toISOString(),
+        },
+      ],
+      ...(row.attributions?.length ? { attributions: row.attributions } : {}),
+    });
+  }
+
   async resolve(
     recognition: Recognition,
     verification: Verification,
@@ -263,31 +390,11 @@ export class GooglePlacesPoi implements PoiProvider {
       .filter(Boolean)
       .join(', ')
       .slice(0, 800);
-    let token: string;
-    try {
-      token = await this.accessToken();
-    } catch {
-      throw new GooglePlacesFailure('google_places_adc_unavailable');
-    }
-    if (
-      typeof token !== 'string' ||
-      token.length > 4096 ||
-      !/^[A-Za-z0-9._~+/-]+=*$/.test(token)
-    )
-      throw new GooglePlacesFailure('google_places_configuration_invalid');
-    const signal = AbortSignal.timeout(10_000);
-    let response: Response;
-    try {
-      response = await this.request(GOOGLE_PLACES_ENDPOINT, {
+    const data = await this.load(
+      GOOGLE_PLACES_ENDPOINT,
+      {
         method: 'POST',
-        redirect: 'error',
-        signal,
-        headers: {
-          Authorization: 'Bearer ' + token,
-          'X-Goog-User-Project': this.quotaProject,
-          'X-Goog-FieldMask': GOOGLE_PLACES_FIELD_MASK,
-          'Content-Type': 'application/json',
-        },
+        fieldMask: GOOGLE_PLACES_FIELD_MASK,
         body: JSON.stringify({
           textQuery: query,
           languageCode: 'en',
@@ -295,56 +402,9 @@ export class GooglePlacesPoi implements PoiProvider {
           includePureServiceAreaBusinesses: false,
           ...(locality.countryCode ? { regionCode: locality.countryCode } : {}),
         }),
-      });
-    } catch (error) {
-      if (
-        signal.aborted ||
-        (error instanceof DOMException &&
-          ['TimeoutError', 'AbortError'].includes(error.name))
-      )
-        throw new GooglePlacesFailure('google_places_transient_failure');
-      throw new GooglePlacesFailure('google_places_request_failed');
-    }
-    // Never read an error body, which may echo keys or user/provider text.
-    if (response.status === 401 || response.status === 403)
-      throw new GooglePlacesFailure('google_places_auth_failed');
-    if (
-      response.status === 429 ||
-      (response.status >= 500 && response.status <= 599)
-    )
-      throw new GooglePlacesFailure('google_places_transient_failure');
-    if (!response.ok)
-      throw new GooglePlacesFailure('google_places_request_failed');
-    let data: z.infer<typeof ResponseSchema>;
-    try {
-      if (!response.body) throw new Error();
-      const reader = response.body.getReader(),
-        chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        while (true) {
-          const chunk = await reader.read();
-          if (chunk.done) break;
-          size += chunk.value.byteLength;
-          if (size > 200_000) throw new Error();
-          chunks.push(chunk.value);
-        }
-      } finally {
-        await reader.cancel();
-        reader.releaseLock();
-      }
-      data = ResponseSchema.parse(
-        JSON.parse(Buffer.concat(chunks).toString('utf8')),
-      );
-      // An unexpected upstream echo must never reach persisted IDs/attributions or Telegram URLs.
-      if (JSON.stringify(data).includes(token)) throw new Error();
-    } catch {
-      throw new GooglePlacesFailure(
-        signal.aborted
-          ? 'google_places_transient_failure'
-          : 'google_places_response_invalid',
-      );
-    }
+      },
+      ResponseSchema,
+    );
     const aliases = [name, clue.nativeName, ...clue.aliases]
       .filter((s): s is string => !!s)
       .slice(0, 12)
@@ -417,11 +477,13 @@ export class GooglePlacesPoi implements PoiProvider {
 
 export const GOOGLE_PLACES_SCOPE =
   'https://www.googleapis.com/auth/maps-platform.places.textsearch';
+export const GOOGLE_PLACES_DETAILS_SCOPE =
+  'https://www.googleapis.com/auth/maps-platform.places.details';
 export function googlePlacesAdc(
   projectId: string,
   auth: Pick<GoogleAuth, 'getAccessToken'> = new GoogleAuth({
     projectId,
-    scopes: [GOOGLE_PLACES_SCOPE],
+    scopes: [GOOGLE_PLACES_SCOPE, GOOGLE_PLACES_DETAILS_SCOPE],
   }),
 ): () => Promise<string> {
   return async () => {

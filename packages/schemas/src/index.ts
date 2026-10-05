@@ -38,7 +38,7 @@ export const AddressSchema = z
     district: z.string().optional(),
   })
   .strict();
-export const PlaceSchema = z
+const OsmPlaceSchema = z
   .object({
     id: IdSchema,
     workspaceId: IdSchema,
@@ -59,6 +59,34 @@ export const PlaceSchema = z
     attributions: AttributionsSchema.optional(),
   })
   .strict();
+// Google content is display-only. A durable Google Place retains identity and references,
+// never provider display names, address, coordinates, types or attribution content.
+export const GoogleIdentitySchema = z
+  .object({
+    provider: z.literal('google-places'),
+    id: IdSchema,
+  })
+  .strict();
+const GooglePlaceSchema = z
+  .object({
+    id: IdSchema,
+    workspaceId: IdSchema,
+    providerIdentity: GoogleIdentitySchema,
+    source: ReferenceSchema.refine(
+      (r) => r.provider === 'google-places' && !!r.externalId,
+    ),
+    evidence: z.array(ReferenceSchema).min(1),
+    status: z.enum(['confirmed', 'archived']),
+    tags: z.array(z.string()),
+    createdAt: Timestamp,
+    updatedAt: Timestamp,
+  })
+  .strict()
+  .refine((p) => p.source.externalId === p.providerIdentity.id);
+export const PlaceSchema = z.union([
+  GooglePlaceSchema,
+  OsmPlaceSchema.refine((p) => p.source.provider !== 'google-places'),
+]);
 export const ChainSchema = z
   .object({
     id: IdSchema,
@@ -122,6 +150,50 @@ export const CandidateSchema = z
     attributions: AttributionsSchema.optional(),
   })
   .strict();
+export const GoogleStoredCandidateSchema = z
+  .object({
+    resolution: z.literal('deterministic_poi'),
+    providerIdentity: GoogleIdentitySchema,
+    references: z.array(ReferenceSchema).min(1).max(25),
+  })
+  .strict()
+  .refine((c) =>
+    c.references.some(
+      (r) =>
+        r.provider === 'google-places' &&
+        r.externalId === c.providerIdentity.id,
+    ),
+  );
+export const StoredCandidateSchema = z.union([
+  GoogleStoredCandidateSchema,
+  CandidateSchema.refine(
+    (c) =>
+      c.providerIdentity?.provider !== 'google-places' &&
+      !c.references.some((r) => r.provider === 'google-places'),
+  ),
+]);
+export type StoredCandidate = z.infer<typeof StoredCandidateSchema>;
+export function storedCandidate(candidate: Candidate): StoredCandidate {
+  return StoredCandidateSchema.parse(
+    candidate.providerIdentity?.provider === 'google-places'
+      ? {
+          resolution: candidate.resolution,
+          providerIdentity: candidate.providerIdentity,
+          references: candidate.references,
+        }
+      : candidate,
+  );
+}
+// Only for in-memory rendering/projection; never a Firestore Place or Discovery field.
+export const PlaceDisplaySchema = CandidateSchema.pick({
+  canonicalName: true,
+  coordinates: true,
+  address: true,
+  providerIdentity: true,
+  references: true,
+  attributions: true,
+});
+export type PlaceDisplay = z.infer<typeof PlaceDisplaySchema>;
 export const GeographicContextSchema = z
   .object({
     cityOverride: z.string().min(1).max(200).optional(),
@@ -172,7 +244,7 @@ export const DiscoverySchema = z
     workspaceId: IdSchema,
     source: ReferenceSchema,
     recognition: RecognitionSchema,
-    candidates: z.array(CandidateSchema).max(20),
+    candidates: z.array(StoredCandidateSchema).max(20),
     visionProvider: z.string(),
     status: z.enum([
       'needs_confirmation',
@@ -195,6 +267,7 @@ export type Workspace = z.infer<typeof WorkspaceSchema>;
 export type Recognition = z.infer<typeof RecognitionSchema>;
 export type Candidate = z.infer<typeof CandidateSchema>;
 export type Discovery = z.infer<typeof DiscoverySchema>;
+export type DiscoveryView = Discovery & { liveCandidate?: Candidate };
 export type Reference = z.infer<typeof ReferenceSchema>;
 
 // No coordinates or model-supplied URLs in textual verification output.

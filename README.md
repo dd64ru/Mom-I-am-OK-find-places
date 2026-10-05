@@ -57,6 +57,6 @@ Geographic verification receives distinct `cityOverride` and `workspaceAreaHint`
 
 Missing/ambiguous locality may prompt for city. A known locality with an absent, unsupported or ambiguous POI is `unresolved`, with Change city / Cancel and no automatic city-prompt loop. Temporary provider failures retain webhook retry behavior. See [geography](docs/geography.md) for travel feature classifications and conservative matching limits.
 
-Future boundary: **Firestore canonical Places → replaceable external map/export adapters**, for example GeoJSON/KML/GPX or supported third-party APIs/links. No external integration is implemented. Mom-I-am-OK's existing real users may later be attached to workspace membership.
+Future boundary: **Firestore canonical Places → replaceable external map/export adapters** (Google records retain identity/evidence only and refresh transient provider content by Place ID; OSM records keep durable coordinates), for example GeoJSON/KML/GPX or supported third-party APIs/links. No external integration is implemented. Mom-I-am-OK's existing real users may later be attached to workspace membership.
 
 Google Places uses the attached runtime service account through ADC and short-lived OAuth Bearer tokens, with explicit quota project and a custom `serviceusage.services.use`-only runtime role. No Places API key or new secret is needed. Owner preparation and provider limits are documented in [Google Places](docs/google-places.md). Telegram UI is Russian; fixed stage/status/duration telemetry contains no user/provider content.

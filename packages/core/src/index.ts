@@ -1,5 +1,8 @@
 import {
   DiscoverySchema,
+  storedCandidate,
+  type DiscoveryView,
+  type PlaceDisplay,
   VerificationSchema,
   PoiResolutionSchema,
   type Place,
@@ -34,6 +37,7 @@ export interface SearchProvider {
   ): Promise<Verification>;
 }
 export interface PoiProvider {
+  refresh?(identity: { provider: string; id: string }): Promise<PlaceDisplay>;
   resolve(
     recognition: Recognition,
     verification: Verification,
@@ -83,7 +87,7 @@ export class DiscoveryService {
       poi: PoiProvider;
     },
   ) {}
-  async ingest(input: ImageSubmission): Promise<Discovery> {
+  async ingest(input: ImageSubmission): Promise<DiscoveryView> {
     const previous = await this.repository.getDiscovery(
       input.workspaceId,
       input.id,
@@ -113,7 +117,7 @@ export class DiscoveryService {
     );
     return this.verification ? this.resolve(discovery) : discovery;
   }
-  async resolve(discovery: Discovery): Promise<Discovery> {
+  async resolve(discovery: Discovery): Promise<DiscoveryView> {
     if (
       !this.verification ||
       ['confirmed', 'cancelled'].includes(discovery.status)
@@ -135,26 +139,48 @@ export class DiscoveryService {
         context,
       ),
     );
-    return (
-      (await this.repository.reviseDiscovery(
+    const updated = await this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      {
+        candidates:
+          resolution.status === 'resolved'
+            ? [storedCandidate(resolution.candidate)]
+            : [],
+        status:
+          resolution.status === 'resolved'
+            ? 'needs_confirmation'
+            : resolution.status === 'city_unknown'
+              ? 'awaiting_city'
+              : 'unresolved',
+        resolutionReason:
+          resolution.status === 'resolved' ? undefined : resolution.reason,
+      },
+    );
+    const next =
+      updated ??
+      (await this.repository.getDiscovery(
         discovery.workspaceId,
         discovery.id,
-        discovery.revision,
-        {
-          candidates:
-            resolution.status === 'resolved' ? [resolution.candidate] : [],
-          status:
-            resolution.status === 'resolved'
-              ? 'needs_confirmation'
-              : resolution.status === 'city_unknown'
-                ? 'awaiting_city'
-                : 'unresolved',
-          resolutionReason:
-            resolution.status === 'resolved' ? undefined : resolution.reason,
-        },
-      )) ??
-      (await this.repository.getDiscovery(discovery.workspaceId, discovery.id))!
-    );
+      ))!;
+    return {
+      ...next,
+      ...(updated && resolution.status === 'resolved'
+        ? { liveCandidate: resolution.candidate }
+        : {}),
+    };
+  }
+  async displayCandidate(
+    discovery: DiscoveryView,
+  ): Promise<PlaceDisplay | undefined> {
+    if (discovery.candidates.length !== 1) return;
+    if (discovery.liveCandidate) return discovery.liveCandidate;
+    const candidate = discovery.candidates[0]!;
+    if ('coordinates' in candidate) return candidate;
+    if (!this.verification?.poi.refresh)
+      throw new Error('provider_refresh_unavailable');
+    return this.verification.poi.refresh(candidate.providerIdentity);
   }
   async requestCity(discovery: Discovery): Promise<Discovery | undefined> {
     return this.repository.reviseDiscovery(
@@ -167,7 +193,7 @@ export class DiscoveryService {
   async correctCity(
     discovery: Discovery,
     city: string,
-  ): Promise<Discovery | undefined> {
+  ): Promise<DiscoveryView | undefined> {
     const normalized = normalizeCity(city);
     if (!normalized || discovery.status !== 'awaiting_city') return;
     const updated = await this.repository.reviseDiscovery(

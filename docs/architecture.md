@@ -19,17 +19,17 @@ flowchart LR
   R --> S
 ```
 
-`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place contains name/aliases/category, WGS84 coordinates, address, evidence, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by replaceable external map/export or Mom-I-am-OK adapters.
+`core` depends only on schemas, with explicit vision, search, POI and persistence ports. Provider HTTP payloads and Telegram interaction state stay in adapters. Canonical Place is a strict union: OSM/non-Google records retain name/aliases/category, WGS84 coordinates, address and attribution; Google records retain only stable provider identity, evidence references, status/tags and timestamps; it has no Telegram buttons, message IDs or editing fields. Source/evidence references can be consumed later by replaceable external map/export or Mom-I-am-OK adapters.
 
 Firestore hierarchy:
 
 - `workspaces/{id}`: Firebase UID `members`, locale, optional area hint and timestamps. Empty members is a legitimate Telegram-only workspace.
-- `discoveries`: Recognition, actual vision provider, verified deterministic candidates, per-discovery city override, revision, needs_confirmation/awaiting_city/unresolved/confirmed/cancelled, resolution reason and confirmed Place ID.
-- `places`: canonical confirmed/archived geographic places. IDs deterministically dedupe provider identities without merging separate chain branches.
+- `discoveries`: Recognition, actual vision provider, durable deterministic candidates (Google identity/references only; no Google display/location content), per-discovery city override, revision, needs_confirmation/awaiting_city/unresolved/confirmed/cancelled, resolution reason and confirmed Place ID.
+- `places`: canonical confirmed/archived records; Google records intentionally have no durable coordinates/address/name. IDs deterministically dedupe provider identities without merging separate chain branches.
 - `chains`: existing reusable model; linking/branch browsing is future work.
 - `pendingIngress`: projected file/source IDs and debounce/lease metadata; no conversation, captions, raw update or image bytes.
 - `telegramInteractions` / `cityPrompts`: opaque token mappings, exact prompt/proposal IDs, temporary requester ownership, revision, expiry and processing leases; inaccessible to all client reads.
-- Global `_runtime`: image slot, existing credential-free SIWC refresh checkpoint and Nominatim rate gate. `_poiCache`: bounded deterministic POI responses under query hashes.
+- Global `_runtime`: image slot, existing credential-free SIWC refresh checkpoint and Nominatim rate gate. `_poiCache`: bounded Nominatim responses under query hashes; Google responses are never cached.
 
 Discovery confirmation/cancellation and Place creation occur in one Firestore transaction. Revision compare-and-set prevents stale callbacks and verification results overwriting later edits or terminal states. The same OSM identity confirmed from different discoveries gets one Place; exact geographic fallback avoids fuzzy merging. Recognition is saved before search/POI so a retry or city edit can reuse it without downloading images or rerunning vision.
 
@@ -45,4 +45,4 @@ GeographicContext carries explicit per-discovery city correction and optional wo
 
 Future map/export adapters consume the canonical Places boundary; GeoJSON/KML/GPX and supported APIs/links are possible consumers, not implemented features. The repository does not build a custom client. Mom-I-am-OK integration can later attach existing real Firebase UIDs to membership independently of any mapping choice.
 
-Google Places uses runtime ADC, never a Places key/secret or LLM coordinates. Its stable Place ID joins existing provider-identity deduplication. Google references and attributions stay attached to canonical data; future export adapters must honor provider-specific content restrictions. Operational telemetry contains only fixed stage/status/provider/result enums and bounded duration. Telegram labels/prompts/results are Russian. See [Google provider](google-places.md).
+Google Places uses runtime ADC, never a Places key/secret or LLM coordinates. Its stable Place ID joins existing provider-identity deduplication. Google identity/references stay in canonical data; Google names/addresses/coordinates/types/attributions stay in transient provider views. Initial Telegram proposals use an in-memory view; reloaded proposals/future adapters refresh by ID through the optional POI refresh port. Google views are not durable export data, and adapters must honor destination/attribution restrictions. Operational telemetry contains only fixed stage/status/provider/result enums and bounded duration. Telegram labels/prompts/results are Russian. See [Google provider](google-places.md).

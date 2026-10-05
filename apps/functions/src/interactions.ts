@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { DiscoveryService, type PlacesRepository } from '@places/core';
-import type { Discovery } from '@places/schemas';
+import type { Discovery, DiscoveryView } from '@places/schemas';
 import type { AtomicDocuments } from '@places/providers';
 import type { AcceptedMessage } from '@places/worker';
 import type { TelegramTransport } from './telegram-api.js';
@@ -52,7 +52,7 @@ export class TelegramInteractions {
         reply_markup: { inline_keyboard: [] },
       });
   }
-  async propose(discovery: Discovery, userId: number, replyTo: number) {
+  async propose(discovery: DiscoveryView, userId: number, replyTo: number) {
     if (['confirmed', 'cancelled'].includes(discovery.status)) return;
     if (!discovery.recognition.clues.length) {
       await this.api.call('sendMessage', {
@@ -77,8 +77,7 @@ export class TelegramInteractions {
       },
     );
     if (!state.messageId && state.phase === 'active') {
-      const candidate =
-        discovery.candidates.length === 1 ? discovery.candidates[0] : undefined;
+      const candidate = await this.service.displayCandidate(discovery);
       const buttons = {
         inline_keyboard: [
           [

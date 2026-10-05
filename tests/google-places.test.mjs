@@ -9,6 +9,7 @@ import {
   GOOGLE_PLACES_ENDPOINT,
   GOOGLE_PLACES_FIELD_MASK,
   GOOGLE_PLACES_SCOPE,
+  GOOGLE_PLACES_DETAILS_SCOPE,
   canonicalPlaceId,
 } from '@places/providers';
 import { safeDiagnostic } from '../apps/functions/dist/webhook.js';
@@ -654,3 +655,150 @@ test('structured pipeline telemetry contains only fixed enums, status and bounde
   await telemetry.measure(token, async () => 'ok');
   assert.equal(events.length, before);
 });
+
+for (const [clue, address] of [
+  ['No. 158 Anfu Road', '158 Anfu Rd'],
+  ['158 Anfu Rd', 'No. 158 Anfu Road'],
+  ['№ 158 Anfu Road', '158 Anfu Rd'],
+  ['158 Anfu Road', '№ 158 Anfu Rd'],
+  ['No. 158 Anfu Street', '158 Anfu St'],
+  ['158 Anfu Avenue', '№ 158 Anfu Ave'],
+  ['No. 158 Anfu Boulevard', '158 Anfu Blvd'],
+  ['№ 158 Anfu Lane', '158 Anfu Ln'],
+]) {
+  test(`bounded house-number and street normalization: ${clue} / ${address}`, async () => {
+    const evidence = clone(verification);
+    evidence.candidates[0].addressClue = clue;
+    const place = { ...row, formattedAddress: address + ', Shanghai, China' };
+    assert.equal(
+      (await googleFixture({ places: [place] }).resolve(recognition, evidence))
+        .status,
+      'resolved',
+    );
+    for (const bad of [
+      {
+        ...place,
+        formattedAddress: address.replace('158', '1580') + ', Shanghai',
+      },
+      {
+        ...place,
+        formattedAddress: address.replace('158', '159') + ', Shanghai',
+      },
+      {
+        ...place,
+        formattedAddress: address.replace('Anfu', 'Other') + ', Shanghai',
+      },
+      { ...place, displayName: { text: 'Other Cafe' } },
+      {
+        ...place,
+        addressComponents: place.addressComponents.map((c) =>
+          c.types.includes('locality')
+            ? { ...c, longText: 'Guangzhou', shortText: 'Guangzhou' }
+            : c,
+        ),
+      },
+      {
+        ...place,
+        addressComponents: place.addressComponents.map((c) =>
+          c.types.includes('country') ? { ...c, shortText: 'JP' } : c,
+        ),
+      },
+    ])
+      assert.notEqual(
+        (await googleFixture({ places: [bad] }).resolve(recognition, evidence))
+          .status,
+        'resolved',
+      );
+  });
+}
+
+test('Google Place ID refresh retrieves a bounded live view using ADC and no search/user content', async () => {
+  const provider = googleFixture(undefined, async (url, init) => {
+    assert.equal(url, 'https://places.googleapis.com/v1/places/' + row.id);
+    assert.equal(init.method, 'GET');
+    assert.equal(init.body, undefined);
+    assert.equal(init.headers.Authorization, 'Bearer ' + token);
+    assert.equal(init.headers['X-Goog-User-Project'], project);
+    assert.equal(
+      init.headers['X-Goog-FieldMask'],
+      'id,displayName,formattedAddress,location,attributions',
+    );
+    assert.equal(init.redirect, 'error');
+    assert.ok(init.signal instanceof AbortSignal);
+    return new Response(
+      JSON.stringify({ ...row, location: { latitude: 30, longitude: 120 } }),
+    );
+  });
+  const fallback = {
+    resolve: async () =>
+      assert.fail('A stored Google ID cannot be refreshed by substituting OSM'),
+  };
+  const view = await new FallbackPoi(provider, fallback).refresh({
+    provider: 'google-places',
+    id: row.id,
+  });
+  assert.deepEqual(view.coordinates, {
+    latitude: 30,
+    longitude: 120,
+    crs: 'WGS84',
+  });
+  assert.equal(view.address.formatted, row.formattedAddress);
+  assert.deepEqual(view.attributions, row.attributions);
+  assert.equal(view.providerIdentity.id, row.id);
+  assert.equal(view.references[0].observedAt, '2026-01-01T00:00:00.000Z');
+  assert.equal(
+    GOOGLE_PLACES_DETAILS_SCOPE,
+    'https://www.googleapis.com/auth/maps-platform.places.details',
+  );
+});
+
+test('refresh validates complete identity and response identity; unsafe or incomplete provider content fails closed', async () => {
+  for (const identity of [
+    { provider: 'nominatim', id: row.id },
+    { provider: 'google-places', id: '../another' },
+    { provider: 'google-places', id: 'bad?query=content' },
+    { provider: 'google-places', id: '' },
+  ])
+    await assert.rejects(
+      googleFixture(undefined, async () =>
+        assert.fail('invalid ID must not request'),
+      ).refresh(identity),
+      { message: 'google_places_request_failed' },
+    );
+  for (const body of [
+    { ...row, id: 'different-id' },
+    { ...row, location: undefined },
+    { ...row, formattedAddress: undefined },
+    { ...row, displayName: undefined },
+    { ...row, location: { latitude: 1000, longitude: 120 } },
+    { ...row, displayName: { text: token } },
+  ])
+    await assert.rejects(
+      googleFixture(body).refresh({ provider: 'google-places', id: row.id }),
+      { message: 'google_places_response_invalid' },
+    );
+});
+
+for (const [status, code] of [
+  [401, 'auth_failed'],
+  [403, 'auth_failed'],
+  [404, 'request_failed'],
+  [429, 'transient_failure'],
+  [503, 'transient_failure'],
+]) {
+  test(`refresh HTTP ${status} remains a safe error without silently replacing stored identity`, async () => {
+    const provider = googleFixture(undefined, async () => ({
+      status,
+      ok: false,
+      get body() {
+        assert.fail('never read upstream error content');
+      },
+    }));
+    await assert.rejects(
+      new FallbackPoi(provider, {
+        resolve: async () => assert.fail('no fallback on identity refresh'),
+      }).refresh({ provider: 'google-places', id: row.id }),
+      { message: 'google_places_' + code },
+    );
+  });
+}

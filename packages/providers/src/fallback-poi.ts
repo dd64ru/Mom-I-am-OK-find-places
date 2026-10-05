@@ -17,6 +17,11 @@ export class FallbackPoi implements PoiProvider {
       code: 'google_places_fallback_used',
     ) => void = () => {},
   ) {}
+  refresh(identity: { provider: string; id: string }) {
+    if (!this.primary.refresh)
+      throw new GooglePlacesFailure('google_places_configuration_invalid');
+    return this.primary.refresh(identity);
+  }
   resolve(
     recognition: Recognition,
     verification: Verification,

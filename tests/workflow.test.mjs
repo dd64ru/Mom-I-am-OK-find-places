@@ -4,6 +4,9 @@ import {
   WorkspaceSchema,
   CandidateSchema,
   RecognitionSchema,
+  PlaceSchema,
+  DiscoverySchema,
+  storedCandidate,
 } from '@places/schemas';
 import { DiscoveryService } from '@places/core';
 import {
@@ -25,6 +28,7 @@ import {
   recognition as googleRecognition,
   verification as googleVerification,
   googleFixture,
+  row as googleRow,
 } from './fixtures/google-places.mjs';
 
 // Serialize mock transactions and enforce Firestore's read-before-write rule.
@@ -157,6 +161,7 @@ async function setup(options = {}) {
         },
       },
       poi: {
+        refresh: async (identity) => options.poi.refresh(identity),
         resolve: async (_recognition, _verified, context) => {
           calls.poi++;
           if (options.poi)
@@ -252,7 +257,7 @@ const update = (message) => ({
 });
 const policy = { chatId: -100 };
 
-test('Google Places confirmations dedupe by Place ID, persist attribution and use Russian Google proposals', async () => {
+test('Google confirmations dedupe by ID without persisting provider content; live proposals retain attribution', async () => {
   const f = await setup({
     recognition: googleRecognition,
     verified: googleVerification,
@@ -286,7 +291,67 @@ test('Google Places confirmations dedupe by Place ID, persist attribution and us
     place.evidence.find((r) => r.provider === 'google-places').externalId,
     'fixture-google-place-1',
   );
-  assert.equal(place.attributions[0].provider, 'Fixture attribution');
+  assert.deepEqual(place.providerIdentity, {
+    provider: 'google-places',
+    id: 'fixture-google-place-1',
+  });
+  for (const key of [
+    'canonicalName',
+    'nativeName',
+    'aliases',
+    'coordinates',
+    'address',
+    'category',
+    'types',
+    'attributions',
+    'confidence',
+  ]) {
+    assert.equal(Object.hasOwn(place, key), false, key);
+    assert.equal(Object.hasOwn(saved.candidates[0], key), false, key);
+  }
+  const durableJson = JSON.stringify([...f.db.values.values()]);
+  for (const googleOnlyContent of [
+    'Fixture Café',
+    '18 Fixture Rd, Shanghai, China',
+    'Fixture attribution',
+    'https://example.org/provider',
+    '31.23',
+    '121.45',
+  ])
+    assert.equal(
+      durableJson.includes(googleOnlyContent),
+      false,
+      googleOnlyContent,
+    );
+  assert.equal(Object.hasOwn(saved, 'liveCandidate'), false);
+  assert.match(proposal.body.text, /Fixture Café/);
+  assert.match(proposal.body.text, /18 Fixture Rd, Shanghai, China/);
+  assert.equal(
+    PlaceSchema.safeParse({
+      ...place,
+      coordinates: first.liveCandidate.coordinates,
+    }).success,
+    false,
+  );
+  assert.equal(
+    PlaceSchema.safeParse({ ...place, canonicalName: 'Google name' }).success,
+    false,
+  );
+  assert.equal(
+    DiscoverySchema.safeParse({ ...saved, candidates: [first.liveCandidate] })
+      .success,
+    false,
+  );
+  await assert.rejects(
+    f.repository.savePlace({ ...place, address: first.liveCandidate.address }),
+  );
+  assert.equal(
+    PlaceSchema.safeParse({
+      ...place,
+      source: { ...place.source, externalId: 'different' },
+    }).success,
+    false,
+  );
   const second = await f.ingest('google-second');
   await f.interactions.propose(second, 11, 2);
   await f.interactions.callback(button(f.sent));
@@ -1608,4 +1673,133 @@ test('explicit city ambiguity stays unresolved and permits manual correction wit
     f.sent.some((m) => m.body.reply_markup?.force_reply),
     false,
   );
+});
+
+test('Google proposal retry refreshes transient display from stored Place ID without rerunning vision/search or persisting it', async () => {
+  let refreshes = 0;
+  const provider = googleFixture(undefined, async (url, init) => {
+    if (init.method === 'GET') {
+      refreshes++;
+      assert.equal(
+        url,
+        'https://places.googleapis.com/v1/places/fixture-google-place-1',
+      );
+      return new Response(
+        JSON.stringify({
+          ...googleRow,
+          location: { latitude: 30, longitude: 120 },
+        }),
+      );
+    }
+    return new Response(JSON.stringify({ places: [googleRow] }));
+  });
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: googleVerification,
+    poi: provider,
+  });
+  await f.ingest('refresh-google');
+  const saved = await f.repository.getDiscovery('fixture', 'refresh-google');
+  await f.interactions.propose(saved, 11, 1);
+  assert.equal(refreshes, 1);
+  assert.equal(f.calls.vision, 1);
+  assert.equal(f.calls.search, 1);
+  assert.equal(f.calls.poi, 1);
+  assert.match(f.sent[0].body.text, /Fixture Café/);
+  assert.match(f.sent[0].body.text, /Источник: Google Maps/);
+  await f.interactions.callback(button(f.sent));
+  const terminal = await f.repository.getDiscovery('fixture', saved.id);
+  const place = await f.repository.getPlace(
+    'fixture',
+    terminal.confirmedPlaceId,
+  );
+  const before = JSON.stringify([...f.db.values.entries()]);
+  const refreshed = await provider.refresh(place.providerIdentity);
+  assert.equal(refreshes, 2);
+  assert.deepEqual(refreshed.coordinates, {
+    latitude: 30,
+    longitude: 120,
+    crs: 'WGS84',
+  });
+  assert.equal(JSON.stringify([...f.db.values.entries()]), before);
+  assert.equal(
+    PlaceSchema.safeParse({ ...place, ...refreshed }).success,
+    false,
+  );
+});
+
+test('OSM canonical persistence retains original durable content and attribution; Google content cannot masquerade as OSM', async () => {
+  const osm = {
+    ...candidate,
+    attributions: [
+      {
+        provider: 'OpenStreetMap',
+        providerUri: 'https://www.openstreetmap.org/copyright',
+      },
+    ],
+  };
+  const f = await setup({ resolve: () => [osm] });
+  const discovery = await f.ingest('osm-durable');
+  const { place } = await f.service.finish(discovery, 'confirm');
+  for (const key of [
+    'canonicalName',
+    'aliases',
+    'category',
+    'coordinates',
+    'address',
+    'confidence',
+    'attributions',
+  ])
+    assert.deepEqual(place[key], osm[key]);
+  assert.deepEqual(place.source, osm.references[0]);
+  assert.deepEqual(place.evidence, osm.references);
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', discovery.id)).candidates[0],
+    osm,
+  );
+  assert.throws(() =>
+    storedCandidate({
+      ...osm,
+      providerIdentity: undefined,
+      references: [
+        {
+          provider: 'google-places',
+          externalId: 'google-id',
+          observedAt: time,
+        },
+      ],
+    }),
+  );
+  assert.equal(
+    PlaceSchema.safeParse({
+      ...place,
+      source: {
+        provider: 'google-places',
+        externalId: 'google-id',
+        observedAt: time,
+      },
+    }).success,
+    false,
+  );
+});
+
+test('a losing discovery revision cannot attach its stale Google display to the winner', async () => {
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: googleVerification,
+    poi: googleFixture(),
+  });
+  const revise = f.repository.reviseDiscovery.bind(f.repository);
+  f.repository.reviseDiscovery = async (workspace, id, revision) => {
+    await revise(workspace, id, revision, {
+      candidates: [],
+      status: 'unresolved',
+      resolutionReason: 'ambiguous_poi',
+    });
+    return undefined;
+  };
+  const discovery = await f.ingest('google-stale-view');
+  assert.equal(discovery.status, 'unresolved');
+  assert.equal(discovery.liveCandidate, undefined);
+  assert.equal(await f.service.displayCandidate(discovery), undefined);
 });
