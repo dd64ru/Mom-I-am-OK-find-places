@@ -320,11 +320,14 @@ for (const uri of [
     assert.equal(text.includes(uri), /^https?:/u.test(uri));
   });
 test('next-page token has no invented maximum and prevents premature resolution', async () => {
-  assertGoogleAlternatives(
-    await googleFixture({
-      places: [{ ...row, addressComponents: undefined }],
-      nextPageToken: 'x'.repeat(10001),
-    }).resolve(recognition, verification),
+  assert.equal(
+    (
+      await googleFixture({
+        places: [{ ...row, addressComponents: undefined }],
+        nextPageToken: 'x'.repeat(10001),
+      }).resolve(recognition, verification)
+    ).status,
+    'resolved',
   );
   assert.equal(
     (

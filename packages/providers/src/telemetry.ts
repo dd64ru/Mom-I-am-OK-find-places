@@ -17,7 +17,10 @@ const statuses = [
   'city_unknown',
 ] as const;
 export type SearchPhase =
-  'google_first_pass' | 'web_enrichment' | 'google_enriched_pass';
+  | 'google_first_pass'
+  | 'web_enrichment'
+  | 'google_enriched_pass'
+  | 'google_related_pass';
 type Stage = (typeof stages)[number];
 type Status = (typeof statuses)[number];
 export type PipelineEvent =
@@ -68,9 +71,12 @@ export class PipelineTelemetry {
   ): Promise<T> {
     const safePhase =
       phase &&
-      ['google_first_pass', 'web_enrichment', 'google_enriched_pass'].includes(
-        phase,
-      )
+      [
+        'google_first_pass',
+        'web_enrichment',
+        'google_enriched_pass',
+        'google_related_pass',
+      ].includes(phase)
         ? phase
         : undefined;
     const start = this.now();

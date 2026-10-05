@@ -84,6 +84,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
     vision,
   );
   const search: SearchProvider = {
+    normalizeLocality: (city) => rawSearch.normalizeLocality(city),
     verify: (recognition, context) =>
       telemetry.measure(
         'web_verification',
@@ -253,6 +254,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 return result;
               },
             };
+            const scopedPoi = poi.beginAttempt();
             result = await new DiscoveryService(repository, fenced, {
               search: {
                 async verify(recognition, context) {
@@ -265,9 +267,13 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 },
               },
               poi: {
-                async firstPass(recognition, context) {
+                async firstPass(recognition, context, normalization) {
                   budget.throwIfAborted();
-                  const result = await poi.firstPass(recognition, context);
+                  const result = await scopedPoi.firstPass!(
+                    recognition,
+                    context,
+                    normalization,
+                  );
                   budget.throwIfAborted();
                   await assertOwned();
                   await assertSlot();
@@ -275,7 +281,7 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 },
                 async resolve(recognition, verified, context) {
                   budget.throwIfAborted();
-                  const result = await poi.resolve(
+                  const result = await scopedPoi.resolve(
                     recognition,
                     verified,
                     context,

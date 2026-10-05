@@ -40,7 +40,7 @@ test('three comparable branches stay separate and bounded; display ranking never
   assert.equal(result.status, 'alternatives');
   assert.deepEqual(
     result.candidates.map((c) => c.providerIdentity.id),
-    ['a', 'b', 'c'],
+    ['a', 'b', 'c', 'd', 'e'],
   );
   assert.ok(result.candidates.every((c) => c.candidateConfidence === 'low'));
   assert.equal(PoiResolutionSchema.safeParse(result).success, true);
@@ -77,6 +77,11 @@ test('query-relevant weak candidates surface only as low alternatives, including
       ids.map((id) => branch(id, 'Fixture Cafe Airport Branch')),
     );
     const result = await provider.firstPass(recognition);
+    if (new Set(ids).size === 1) {
+      assert.equal(result.status, 'resolved');
+      assert.equal(result.candidate.candidateConfidence, 'low');
+      continue;
+    }
     assert.equal(result.status, 'alternatives');
     assert.equal(result.candidates.length, new Set(ids).size);
     assert.ok(result.candidates.every((c) => c.candidateConfidence === 'low'));
@@ -136,6 +141,7 @@ test('attempt deduplicates across queries and both phases, with stable content-f
     'candidateConfidence',
     'decision',
     'seenInMultipleQueries',
+    'relationship',
   ];
   for (const e of candidates) {
     assert.deepEqual(Object.keys(e).sort(), allowed.toSorted());
@@ -221,7 +227,7 @@ test('oversized valid response retains a bounded processing/telemetry budget and
   );
   const result = await provider.resolve(recognition, verification);
   assert.equal(result.status, 'alternatives');
-  assert.equal(result.candidates.length, 3);
+  assert.equal(result.candidates.length, 8);
   const candidateEvents = events.filter(
     (e) => e.event === 'google_places_candidate',
   );
@@ -245,7 +251,7 @@ test('alternatives schema fails closed for non-Google, missing identity, duplica
   for (const candidates of [
     [],
     [valid, valid],
-    Array(4).fill(valid),
+    Array(9).fill(valid),
     [{ ...valid, providerIdentity: undefined }],
     [{ ...valid, providerIdentity: { provider: 'nominatim', id: 'node/123' } }],
   ])

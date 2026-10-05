@@ -1,6 +1,13 @@
 import { z } from 'zod';
 export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const Timestamp = z.string().datetime();
+export const MAX_CANDIDATES = 8;
+const RelationshipSchema = z.enum([
+  'likely_exact',
+  'plausible_exact',
+  'related_branch',
+  'related_chain_location',
+]);
 const Confidence = z.number().min(0).max(1);
 const AttributionsSchema = z.array(
   z
@@ -139,7 +146,13 @@ export const RecognitionSchema = z
             nativeName: z.string().optional(),
             aliases: z.array(z.string()).max(20),
             category: z.string(),
-            possibleChain: z.string().optional(),
+            possibleChain: z.string().min(1).max(100).optional(),
+            signage: z
+              .string()
+              .min(1)
+              .max(150)
+              .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s))
+              .optional(),
             areaHint: z.string().optional(),
             confidence: Confidence,
           })
@@ -173,12 +186,14 @@ export const CandidateSchema = z
       ])
       .optional(),
     confidence: Confidence,
+    relationship: RelationshipSchema.optional(),
     candidateConfidence: z.enum(['high', 'medium', 'low']).optional(),
     attributions: AttributionsSchema.optional(),
   })
   .strict();
 export const GoogleStoredCandidateSchema = z
   .object({
+    relationship: RelationshipSchema.optional(),
     candidateConfidence: z.enum(['high', 'medium', 'low']).optional(),
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),
     resolution: z.literal('deterministic_poi'),
@@ -212,6 +227,9 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
           ...(candidate.candidateConfidence
             ? { candidateConfidence: candidate.candidateConfidence }
             : {}),
+          ...(candidate.relationship
+            ? { relationship: candidate.relationship }
+            : {}),
           resolution: candidate.resolution,
           providerIdentity: candidate.providerIdentity,
           references: candidate.references,
@@ -221,6 +239,7 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
 }
 // Provider display content is in-memory only; the application confidence enum may be retained on a Discovery.
 export const PlaceDisplaySchema = CandidateSchema.pick({
+  relationship: true,
   candidateConfidence: true,
   canonicalName: true,
   coordinates: true,
@@ -277,7 +296,7 @@ export const PoiResolutionSchema = z.discriminatedUnion('status', [
           ),
         )
         .min(1)
-        .max(3)
+        .max(MAX_CANDIDATES)
         .refine(
           (cs) =>
             new Set(cs.map((c) => c.providerIdentity?.id)).size === cs.length,
@@ -341,6 +360,11 @@ export const DiscoverySchema = z
     resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
     confirmedPlaceId: IdSchema.optional(),
+    confirmedPlaceIds: z.array(IdSchema).min(1).max(MAX_CANDIDATES).optional(),
+    selectedCandidateIndices: z
+      .array(z.number().int().nonnegative())
+      .max(MAX_CANDIDATES)
+      .optional(),
     createdAt: Timestamp,
     updatedAt: Timestamp.optional(),
   })
@@ -356,11 +380,26 @@ export const DiscoverySchema = z
     (d) =>
       d.status !== 'needs_selection' ||
       (d.candidates.length >= 1 &&
-        d.candidates.length <= 3 &&
+        d.candidates.length <= MAX_CANDIDATES &&
         d.candidates.every(
           (c) => c.providerIdentity?.provider === 'google-places',
         )),
     'invalid_selection_state',
+  )
+  .refine(
+    (d) =>
+      !d.selectedCandidateIndices ||
+      (new Set(d.selectedCandidateIndices).size ===
+        d.selectedCandidateIndices.length &&
+        d.selectedCandidateIndices.every((i) => i < d.candidates.length)),
+    'invalid_selection_indices',
+  )
+  .refine(
+    (d) =>
+      !d.confirmedPlaceIds ||
+      (new Set(d.confirmedPlaceIds).size === d.confirmedPlaceIds.length &&
+        (!d.confirmedPlaceId || d.confirmedPlaceIds[0] === d.confirmedPlaceId)),
+    'invalid_confirmed_ids',
   );
 export type Place = z.infer<typeof PlaceSchema>;
 export type Chain = z.infer<typeof ChainSchema>;

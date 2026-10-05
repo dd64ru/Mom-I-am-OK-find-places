@@ -73,7 +73,7 @@ export function projectUpdate(
       callback.data.message.chat.id !== policy.chatId
     )
       return;
-    const match = /^p:([a-f0-9]{32}):([cexs])$/.exec(callback.data.data);
+    const match = /^p:([a-f0-9]{32}):([cexsaz])$/.exec(callback.data.data);
     if (!match)
       return {
         kind: 'callback',
@@ -92,9 +92,13 @@ export function projectUpdate(
           ? 'confirm'
           : match[2] === 'e'
             ? 'city'
-            : match[2] === 's'
-              ? 'select'
-              : 'cancel',
+            : match[2] === 'a'
+              ? 'all'
+              : match[2] === 'z'
+                ? 'clear'
+                : match[2] === 's'
+                  ? 'select'
+                  : 'cancel',
       messageId: callback.data.message.message_id,
       userId: callback.data.from.id,
     };

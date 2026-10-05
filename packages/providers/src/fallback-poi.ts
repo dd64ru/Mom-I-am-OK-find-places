@@ -38,13 +38,14 @@ export class FallbackPoi implements PoiProvider {
   firstPass(
     recognition: Recognition,
     context?: GeographicContext,
+    normalization?: Verification,
   ): Promise<PoiResolution> {
     // First-pass ambiguity gets enrichment before ordinary no-match OSM fallback.
     return this.telemetry.resolve(async () => {
       try {
         return adaptResolution(
           await (this.primary.firstPass
-            ? this.primary.firstPass(recognition, context)
+            ? this.primary.firstPass(recognition, context, normalization)
             : this.primary.resolve(
                 recognition,
                 { status: 'no_evidence', candidates: [], references: [] },

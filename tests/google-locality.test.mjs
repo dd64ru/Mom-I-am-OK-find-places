@@ -176,7 +176,21 @@ for (const [city, type] of [
             },
           ],
           events,
-        ).firstPass(recognition, { cityOverride: 'Guangzhou' })
+        ).firstPass(
+          recognition,
+          { cityOverride: 'Guangzhou' },
+          {
+            status: 'no_evidence',
+            candidates: [],
+            references: [],
+            localityIntent: {
+              input: 'Guangzhou',
+              canonicalName: 'Guangzhou',
+              aliases: ['广州'],
+              confidence: 0.95,
+            },
+          },
+        )
       ).status,
       'resolved',
     );
@@ -294,12 +308,12 @@ for (const [
     'accepted_strong_identity',
   ],
   [
-    'Chinese Shanghai municipality contradicts Guangzhou',
+    'unknown cross-script administrative locality is neutral',
     'Guangzhou',
     [country, { longText: '上海市', types: ['administrative_area_level_1'] }],
     '上海市, 中国',
-    false,
-    'rejected_hard_conflict',
+    true,
+    'accepted_strong_identity',
   ],
   [
     'English Shanghai municipality corroborates Shanghai',
@@ -372,6 +386,7 @@ for (const [
           ![
             'unfamiliar English admin1 remains unknown for explicit Guangzhou',
             'country alone leaves explicit Guangzhou unknown',
+            'unknown cross-script administrative locality is neutral',
           ].includes(scenario)
           ? 'match'
           : decision === 'rejected_hard_conflict'

@@ -42,6 +42,7 @@ export interface VisionProvider {
   ): Promise<VisionResult>;
 }
 export interface SearchProvider {
+  normalizeLocality?(city: string): Promise<Verification['localityIntent']>;
   verify(
     recognition: Recognition,
     context?: GeographicContext,
@@ -53,6 +54,7 @@ export interface PoiProvider {
   firstPass?(
     recognition: Recognition,
     context?: GeographicContext,
+    normalization?: Verification,
   ): Promise<PoiResolution>;
   refresh?(identity: { provider: string; id: string }): Promise<PlaceDisplay>;
   resolve(
@@ -64,6 +66,8 @@ export interface PoiProvider {
 export interface Completion {
   discovery: Discovery;
   place?: Place;
+  places?: Place[];
+  reusedCount?: number;
   changed: boolean;
 }
 export interface PlacesRepository {
@@ -154,8 +158,22 @@ export class DiscoveryService {
         if (!parsed.success) throw new ProviderFailure('poi_adaptation_failed');
         return parsed.data;
       };
+      const intent =
+        context.cityOverride && this.verification.search.normalizeLocality
+          ? await this.verification.search.normalizeLocality(
+              context.cityOverride,
+            )
+          : undefined;
+      const normalization: Verification = {
+        status: 'no_evidence',
+        candidates: [],
+        references: [],
+        ...(intent ? { localityIntent: intent } : {}),
+      };
       const first = poi.firstPass
-        ? adapt(await poi.firstPass(discovery.recognition, context))
+        ? adapt(
+            await poi.firstPass(discovery.recognition, context, normalization),
+          )
         : undefined;
       if (
         first?.status === 'resolved' ||
@@ -163,9 +181,11 @@ export class DiscoveryService {
       ) {
         resolution = first;
       } else {
-        const verified = VerificationSchema.parse(
+        let verified = VerificationSchema.parse(
           await this.verification.search.verify(discovery.recognition, context),
         );
+        if (!verified.localityIntent && intent)
+          verified = { ...verified, localityIntent: intent };
         const enriched = adapt(
           await poi.resolve(discovery.recognition, verified, context),
         );
@@ -205,6 +225,8 @@ export class DiscoveryService {
               : resolution.status === 'city_unknown'
                 ? 'awaiting_city'
                 : 'unresolved',
+        selectedCandidateIndices:
+          resolution.status === 'alternatives' ? [] : undefined,
         resolutionReason:
           resolution.status === 'resolved' ||
           resolution.status === 'alternatives'
@@ -253,6 +275,7 @@ export class DiscoveryService {
       return {
         ...display.data,
         candidateConfidence: candidate.candidateConfidence,
+        relationship: candidate.relationship,
       };
     } catch (error) {
       await this.recordFailure(discovery, error);
@@ -286,7 +309,11 @@ export class DiscoveryService {
       discovery.workspaceId,
       discovery.id,
       discovery.revision,
-      { status: 'awaiting_city', candidates: [] },
+      {
+        status: 'awaiting_city',
+        candidates: [],
+        selectedCandidateIndices: undefined,
+      },
     );
   }
   async correctCity(
@@ -299,30 +326,47 @@ export class DiscoveryService {
       discovery.workspaceId,
       discovery.id,
       discovery.revision,
-      { cityOverride: normalized, candidates: [] },
+      {
+        cityOverride: normalized,
+        candidates: [],
+        selectedCandidateIndices: undefined,
+      },
     );
     return updated ? this.resolve(updated) : undefined;
   }
-  async selectAlternative(
+  async updateSelection(
     discovery: Discovery,
-    index: number,
+    action: 'toggle' | 'all' | 'clear',
+    index?: number,
   ): Promise<Discovery | undefined> {
-    if (
-      discovery.status !== 'needs_selection' ||
-      !Number.isInteger(index) ||
-      index < 0 ||
-      index >= discovery.candidates.length
-    )
-      return;
+    if (discovery.status !== 'needs_selection') return;
+    const selected = new Set(discovery.selectedCandidateIndices ?? []);
+    if (action === 'all')
+      discovery.candidates.forEach((_, i) => selected.add(i));
+    else if (action === 'clear') selected.clear();
+    else {
+      if (
+        index === undefined ||
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= discovery.candidates.length
+      )
+        return;
+      if (selected.has(index)) selected.delete(index);
+      else selected.add(index);
+    }
     return this.repository.reviseDiscovery(
       discovery.workspaceId,
       discovery.id,
       discovery.revision,
       {
-        status: 'needs_confirmation',
-        candidates: [discovery.candidates[index]!],
+        selectedCandidateIndices: [...selected].sort((a, b) => a - b),
       },
     );
+  }
+  // Compatibility port: selecting a checkbox never collapses candidates.
+  selectAlternative(discovery: Discovery, index: number) {
+    return this.updateSelection(discovery, 'toggle', index);
   }
   finish(discovery: Discovery, action: 'confirm' | 'cancel') {
     return this.repository.finishDiscovery(

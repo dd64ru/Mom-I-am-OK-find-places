@@ -35,21 +35,32 @@ export function planPlaceLabels(
       (d) =>
         d.status === 'confirmed' &&
         d.workspaceId === place.workspaceId &&
-        d.confirmedPlaceId === place.id,
+        (d.confirmedPlaceId === place.id ||
+          d.confirmedPlaceIds?.includes(place.id)),
     );
-    const derived = associated.map((d) => ({
-      d,
-      label:
-        d.candidates.length > 1 ||
-        ('providerIdentity' in place &&
-          d.candidates[0]?.providerIdentity?.provider === 'google-places' &&
-          d.candidates[0].providerIdentity.id !== place.providerIdentity.id)
-          ? undefined
-          : recognitionLabel(
-              d.recognition,
-              d.candidates[0]?.recognitionClueIndex,
-            ),
-    }));
+    const derived = associated.map((d) => {
+      const candidate =
+        d.confirmedPlaceIds && 'providerIdentity' in place
+          ? d.candidates.find(
+              (c) =>
+                c.providerIdentity?.provider === 'google-places' &&
+                c.providerIdentity.id === place.providerIdentity.id,
+            )
+          : d.candidates.length === 1
+            ? d.candidates[0]
+            : undefined;
+      const compatible =
+        candidate &&
+        !candidate.relationship?.startsWith('related_') &&
+        (!('providerIdentity' in place) ||
+          candidate.providerIdentity?.id === place.providerIdentity.id);
+      return {
+        d,
+        label: compatible
+          ? recognitionLabel(d.recognition, candidate.recognitionClueIndex)
+          : undefined,
+      };
+    });
     const labels = [
       ...new Set(derived.filter((d) => d.label).map((d) => d.label!.label)),
     ];

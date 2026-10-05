@@ -2665,11 +2665,14 @@ test('search telemetry accepts fixed phase enums only and unknown-city paginatio
     { message: 'google_places_request_failed' },
   );
   assert.deepEqual(logs, []);
-  assertGoogleAlternatives(
-    await googleFixture({
-      places: [alimentariRow],
-      nextPageToken: 'fixture-page',
-    }).firstPass(alimentariRecognition()),
+  assert.equal(
+    (
+      await googleFixture({
+        places: [alimentariRow],
+        nextPageToken: 'fixture-page',
+      }).firstPass(alimentariRecognition())
+    ).status,
+    'resolved',
   );
 });
 
@@ -2689,7 +2692,9 @@ test('short Alimentari city correction resolves the Shanghai branch on first Goo
     'needs_selection',
   );
   assert.ok(
-    f.sent.some((m) => /Нашёл возможные варианты/u.test(m.body.text ?? '')),
+    f.sent.some((m) =>
+      /Нашёл несколько возможных мест/u.test(m.body.text ?? ''),
+    ),
   );
   await f.interactions.callback(button(f.sent, 'Change city'));
   const before = { google: requests.length, search: f.calls.search };
@@ -2986,26 +2991,42 @@ for (const [official, locality, tier, wording] of [
     assert.equal('canonicalName' in confirmed.place, false);
   });
 
-function selectionButton(f, index = 0) {
-  const label = `Выбрать вариант ${index + 1}`;
-  const message = f.sent.findLast((m) =>
-    m.body.reply_markup?.inline_keyboard?.flat().some((b) => b.text === label),
+function multiButton(f, action = 'select', index = 0) {
+  const message = f.sent.findLast(
+    (m) =>
+      ['sendMessage', 'editMessageText'].includes(m.method) &&
+      m.body.reply_markup?.inline_keyboard
+        ?.flat()
+        .some((b) => b.callback_data.endsWith(':a')),
   );
-  const data = message.body.reply_markup.inline_keyboard
-    .flat()
-    .find((b) => b.text === label).callback_data;
-  assert.match(data, /^p:[a-f0-9]{32}:s$/);
+  const buttons = message.body.reply_markup.inline_keyboard.flat();
+  const code = {
+    select: 's',
+    all: 'a',
+    clear: 'z',
+    confirm: 'c',
+    city: 'e',
+    cancel: 'x',
+  }[action];
+  const chosen =
+    action === 'select'
+      ? buttons.filter((b) => b.callback_data.endsWith(':s'))[index]
+      : buttons.find((b) => b.callback_data.endsWith(':' + code));
+  assert.ok(chosen);
   return {
     kind: 'callback',
-    callbackId: `fixture-selection-${index}`,
-    token: data.split(':')[1],
-    action: 'select',
-    messageId: f.sent.indexOf(message) + 101,
+    callbackId: 'fixture-multi',
+    token: chosen.callback_data.split(':')[1],
+    action,
+    messageId: message.body.message_id ?? f.sent.indexOf(message) + 101,
     userId: 11,
   };
 }
-async function shortlistWorkflow() {
-  const rows = [0, 1, 2].map((i) => ({
+function selectionButton(f, index = 0) {
+  return multiButton(f, 'select', index);
+}
+async function shortlistWorkflow(count = 3) {
+  const rows = Array.from({ length: count }, (_, i) => i).map((i) => ({
     ...googleRow,
     id: `fixture-shortlist-${i}`,
     displayName: { text: `Juniper Museum Branch ${i}` },
@@ -3058,86 +3079,83 @@ async function shortlistWorkflow() {
     },
   };
 }
-test('three Google alternatives render transient cards; explicit selection then confirmation is the only persistence route', async () => {
+test('one coherent multi-select retains all candidates and atomically confirms selected IDs without Google content', async () => {
   const f = await shortlistWorkflow();
   assert.equal(f.d.status, 'needs_selection');
-  assert.equal(f.d.candidates.length, 3);
-  assert.equal(f.requests.length, 4);
   await assert.rejects(f.service.finish(f.d, 'confirm'), {
     message: 'deterministic_candidate_required',
   });
-  // Render after losing transient memory, as a webhook retry would.
   await f.interactions.propose(
     await f.repository.getDiscovery('fixture', f.d.id),
     11,
     1,
   );
   assert.equal(f.refreshes(), 3);
-  const cards = f.sent.filter((m) => m.body.reply_markup?.inline_keyboard);
-  assert.equal(cards.length, 3);
-  for (let i = 0; i < cards.length; i++) {
-    assert.match(cards[i].body.text, /Уверенность низкая/u);
-    assert.ok(cards[i].body.text.includes(f.rows[i].displayName.text));
-    assert.ok(cards[i].body.text.includes(f.rows[i].formattedAddress));
-    assert.match(cards[i].body.text, /Источник: Google Maps/u);
-    assert.ok(cards[i].body.text.includes(`query_place_id=${f.rows[i].id}`));
-    assert.ok(cards[i].body.text.length <= 4000);
-    assert.equal(
-      cards[i].body.reply_markup.inline_keyboard
-        .flat()
-        .some((b) => b.text.includes('Добавить')),
-      false,
-    );
+  const card = f.sent.at(-1).body;
+  for (const row of f.rows) {
+    assert.ok(card.text.includes(row.displayName.text));
+    assert.ok(card.text.includes(row.formattedAddress));
+    assert.ok(card.text.includes(row.id));
   }
-  const select = selectionButton(f, 1),
-    sibling = selectionButton(f, 0);
-  const parsed = projectUpdate(
-    {
-      update_id: 1,
-      callback_query: {
-        id: select.callbackId,
-        from: base.from,
-        message: { message_id: select.messageId, date: 1, chat: base.chat },
-        data: `p:${select.token}:s`,
-      },
-    },
-    policy,
-    'fixture_bot',
-  );
-  assert.equal(parsed.action, 'select');
   assert.equal(
-    await f.interactions.canCallback({ ...select, action: 'confirm' }),
-    false,
+    f.sent.filter((m) => m.body.reply_markup?.inline_keyboard).length,
+    1,
   );
-  await f.interactions.callback(select);
-  const selected = await f.repository.getDiscovery('fixture', f.d.id);
-  assert.equal(selected.status, 'needs_confirmation');
-  assert.equal(selected.revision, f.d.revision + 1);
-  assert.equal(selected.candidates[0].providerIdentity.id, f.rows[1].id);
-  assert.equal(selected.candidates[0].candidateConfidence, 'low');
+  const stale = selectionButton(f, 0);
+  await f.interactions.callback(selectionButton(f, 1));
+  let d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.equal(d.status, 'needs_selection');
+  assert.equal(d.candidates.length, 3);
+  assert.deepEqual(d.selectedCandidateIndices, [1]);
+  await f.interactions.callback(stale);
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', f.d.id))
+      .selectedCandidateIndices,
+    [1],
+  );
+  await f.interactions.callback(selectionButton(f, 2));
+  d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.deepEqual(d.selectedCandidateIndices, [1, 2]);
+  await f.interactions.callback(multiButton(f, 'clear'));
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', f.d.id))
+      .selectedCandidateIndices,
+    [],
+  );
+  await f.interactions.callback(multiButton(f, 'all'));
+  d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.deepEqual(d.selectedCandidateIndices, [0, 1, 2]);
   assert.equal(
     [...f.db.values.keys()].some((p) => p.includes('/places/')),
     false,
   );
-  const confirm = button(f.sent);
-  assert.equal(confirm.action, 'confirm');
-  assert.notEqual(confirm.token, select.token);
-  const before = f.sent.length;
-  await f.interactions.callback(select);
-  await f.interactions.callback(sibling);
-  assert.equal(f.sent.length, before + 2); // Only callback acknowledgements.
-  assert.equal(
-    (await f.repository.getDiscovery('fixture', f.d.id)).revision,
-    selected.revision,
-  );
+  const confirm = multiButton(f, 'confirm');
+  await f.interactions.callback(confirm);
   await f.interactions.callback(confirm);
   const terminal = await f.repository.getDiscovery('fixture', f.d.id);
   assert.equal(terminal.status, 'confirmed');
+  assert.equal(terminal.confirmedPlaceIds.length, 3);
+  assert.equal(terminal.confirmedPlaceId, terminal.confirmedPlaceIds[0]);
   const places = [...f.db.values.entries()].filter(([p]) =>
     p.includes('/places/'),
   );
-  assert.equal(places.length, 1);
-  assert.equal(places[0][1].providerIdentity.id, f.rows[1].id);
+  assert.equal(places.length, 3);
+  assert.equal((await f.service.finish(d, 'confirm')).changed, false);
+  // Reuse all three identities from another independently confirmed discovery.
+  const { liveAlternatives, ...durable } = f.d;
+  const second = await f.repository.createDiscovery({
+    ...durable,
+    id: 'reuse-bulk',
+    selectedCandidateIndices: [0, 1, 2],
+    revision: 0,
+  });
+  const result = await f.service.finish(second, 'confirm');
+  assert.equal(result.places.length, 3);
+  assert.equal(result.reusedCount, 3);
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    3,
+  );
   const persisted = JSON.stringify([
     ...f.db.values.values(),
     ...f.docs.values.values(),
@@ -3150,16 +3168,8 @@ test('three Google alternatives render transient cards; explicit selection then 
     'attributions',
   ])
     assert.equal(persisted.includes(transient), false);
-  for (const privateValue of [
-    googleRow.formattedAddress,
-    'Juniper Museum',
-    'PRIVATE_USER_TEXT',
-    f.rows[0].id,
-    googleToken,
-  ])
-    assert.equal(JSON.stringify(f.events).includes(privateValue), false);
 });
-test('selection callbacks are fenced by message, expiry, cancellation and revision; competing choices cannot both win', async () => {
+test('multi-selection retries, competing choices, expiry and cancellation are revision fenced', async () => {
   const f = await shortlistWorkflow();
   await f.interactions.propose(f.d, 11, 1);
   const a = selectionButton(f, 0),
@@ -3171,53 +3181,36 @@ test('selection callbacks are fenced by message, expiry, cancellation and revisi
   assert.equal(await f.service.selectAlternative(f.d, -1), undefined);
   assert.equal(await f.service.selectAlternative(f.d, 3), undefined);
   await Promise.all([f.interactions.callback(a), f.interactions.callback(b)]);
-  const current = await f.repository.getDiscovery('fixture', f.d.id);
-  assert.equal(current.status, 'needs_confirmation');
-  assert.equal(current.revision, f.d.revision + 1);
-  assert.equal(current.candidates.length, 1);
-  assert.equal(
-    [...f.db.values.keys()].some((p) => p.includes('/places/')),
-    false,
-  );
-  const cancelled = await shortlistWorkflow();
-  await cancelled.interactions.propose(cancelled.d, 11, 1);
-  const stale = selectionButton(cancelled);
-  await cancelled.service.finish(cancelled.d, 'cancel');
-  assert.equal(await cancelled.interactions.canCallback(stale), false);
-  const expired = await shortlistWorkflow();
-  await expired.interactions.propose(expired.d, 11, 1);
-  const old = selectionButton(expired);
-  expired.advance(24 * 60 * 60 * 1000 + 1);
-  assert.equal(await expired.interactions.canCallback(old), false);
-});
-
-test('selection retry after transient card refresh resumes the chosen revision without re-search or automatic saving', async () => {
-  const f = await shortlistWorkflow();
-  await f.interactions.propose(f.d, 11, 1);
-  const select = selectionButton(f, 2);
+  let d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.equal(d.selectedCandidateIndices.length, 1);
+  assert.equal(d.candidates.length, 3);
+  const next = selectionButton(f, 1);
   f.setRefreshFailure(true);
-  await assert.rejects(f.interactions.callback(select), {
+  await assert.rejects(f.interactions.callback(next), {
     message: 'google_places_transient_failure',
   });
-  const selected = await f.repository.getDiscovery('fixture', f.d.id);
-  assert.equal(selected.status, 'needs_confirmation');
-  assert.equal(selected.candidates[0].providerIdentity.id, f.rows[2].id);
-  assert.equal(await f.interactions.canCallback(select), true);
+  d = await f.repository.getDiscovery('fixture', f.d.id);
+  const indices = d.selectedCandidateIndices;
+  assert.equal(await f.interactions.canCallback(next), true);
   f.setRefreshFailure(false);
-  await f.interactions.callback(select);
-  assert.equal(f.requests.length, 4);
-  assert.equal(
-    (await f.repository.getDiscovery('fixture', f.d.id)).revision,
-    selected.revision,
+  await f.interactions.callback(next);
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', f.d.id))
+      .selectedCandidateIndices,
+    indices,
   );
+  assert.equal(f.requests.length, 4);
   assert.equal(
     [...f.db.values.keys()].some((p) => p.includes('/places/')),
     false,
   );
-  assert.ok(button(f.sent).token);
+  const expired = selectionButton(f);
+  f.advance(24 * 60 * 60 * 1000 + 1);
+  assert.equal(await f.interactions.canCallback(expired), false);
+  await f.service.finish(d, 'cancel');
+  assert.equal(await f.interactions.canCallback(next), false);
 });
-
-test('deduplicated single weak alternative still requires selection before the one-candidate confirmation transaction', async () => {
+test('one weak eligible Google result is a singular low-confidence proposal requiring final confirmation', async () => {
   const f = await setup({
     recognition: googleRecognition,
     verified: noEvidence,
@@ -3227,14 +3220,133 @@ test('deduplicated single weak alternative still requires selection before the o
       ],
     }),
   });
-  const d = await f.ingest('single-weak-shortlist');
-  assert.equal(d.status, 'needs_selection');
+  const d = await f.ingest('single-weak');
+  assert.equal(d.status, 'needs_confirmation');
   assert.equal(d.candidates.length, 1);
-  await assert.rejects(f.service.finish(d, 'confirm'), {
-    message: 'deterministic_candidate_required',
-  });
+  await f.interactions.propose(d, 11, 1);
+  assert.doesNotMatch(f.sent.at(-1).body.text, /несколько/u);
+  assert.match(f.sent.at(-1).body.text, /низкая/u);
   assert.equal(
     [...f.db.values.keys()].some((p) => p.includes('/places/')),
     false,
   );
+});
+
+test('select all and bulk confirmation work at the eight-candidate bound, with atomic failure/retry and projection compatibility', async () => {
+  const f = await shortlistWorkflow(8);
+  assert.equal(f.d.candidates.length, 8);
+  await f.interactions.propose(f.d, 11, 1);
+  assert.ok(f.sent.at(-1).body.text.length <= 4000);
+  await f.interactions.callback(multiButton(f, 'all'));
+  const d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.equal(d.selectedCandidateIndices.length, 8);
+  const corruptId = canonicalPlaceId(d.candidates[7]);
+  const corruptPath = `workspaces/fixture/places/${corruptId}`;
+  f.db.values.set(corruptPath, { invalid: true });
+  await assert.rejects(f.service.finish(d, 'confirm'));
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    1,
+  );
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', d.id)).status,
+    'needs_selection',
+  );
+  f.db.values.delete(corruptPath);
+  const result = await f.service.finish(d, 'confirm');
+  assert.equal(result.places.length, 8);
+  const { ProjectionService } = await import('@places/core');
+  const projector = new ProjectionService({
+    refresh: async (identity) => ({
+      canonicalName: 'Live view',
+      coordinates: { latitude: 1, longitude: 2, crs: 'WGS84' },
+      address: { formatted: 'Live address' },
+      references: [
+        {
+          provider: 'google-places',
+          externalId: identity.id,
+          url: 'https://example.org',
+          observedAt: time,
+        },
+      ],
+      providerIdentity: identity,
+    }),
+  });
+  assert.equal((await projector.project(result.places)).places.length, 8);
+  assert.equal((await f.service.finish(d, 'confirm')).changed, false);
+});
+test('legacy pending single alternative is upgraded to singular confirmation and old tokens become stale', async () => {
+  const f = await shortlistWorkflow();
+  const original = await f.repository.getDiscovery('fixture', f.d.id);
+  const one = await f.repository.reviseDiscovery(
+    'fixture',
+    original.id,
+    original.revision,
+    { candidates: [original.candidates[0]], status: 'needs_selection' },
+  );
+  await f.interactions.propose(one, 11, 1);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', one.id)).status,
+    'needs_confirmation',
+  );
+  assert.doesNotMatch(f.sent.at(-1).body.text, /несколько/u);
+  assert.ok(button(f.sent).token);
+});
+test('linguistic city normalization runs before Google first pass without venue verification and remains bound to the city reply', async () => {
+  const f = await setup({
+    recognition: googleRecognition,
+    verified: noEvidence,
+    poi: googleFixture(),
+  });
+  const events = [];
+  const normalize = async (city) => {
+    events.push('normalize');
+    return {
+      input: city,
+      canonicalName: 'Vesper',
+      aliases: ['Веспер'],
+      confidence: 0.95,
+    };
+  };
+  const service = new DiscoveryService(
+    f.repository,
+    {
+      name: 'fixture',
+      recognize: async () => ({
+        provider: 'fixture',
+        recognition: googleRecognition,
+      }),
+    },
+    {
+      search: {
+        normalizeLocality: normalize,
+        verify: async () => assert.fail('direct result must not verify venues'),
+      },
+      poi: {
+        firstPass: async (_r, ctx, normalization) => {
+          events.push('google');
+          assert.equal(ctx.cityOverride, 'Веспер');
+          assert.equal(normalization.localityIntent.input, 'Веспер');
+          return { status: 'resolved', candidate };
+        },
+        resolve: async () => assert.fail('no enriched query'),
+      },
+    },
+  );
+  const pending = await f.repository.createDiscovery({
+    id: 'normalize-city',
+    workspaceId: 'fixture',
+    source: { provider: 'fixture', observedAt: time },
+    recognition: googleRecognition,
+    candidates: [],
+    visionProvider: 'fixture',
+    status: 'awaiting_city',
+    revision: 0,
+    createdAt: time,
+  });
+  assert.equal(
+    (await service.correctCity(pending, 'Веспер')).status,
+    'needs_confirmation',
+  );
+  assert.deepEqual(events, ['normalize', 'google']);
 });

@@ -69,6 +69,7 @@ export class FirestoreRepository implements PlacesRepository {
       const next = DiscoverySchema.parse({
         ...current,
         candidates: patch.candidates ?? current.candidates,
+        selectedCandidateIndices: patch.selectedCandidateIndices,
         resolutionReason: patch.resolutionReason,
         failureReason: patch.failureReason,
         status: patch.status ?? current.status,
@@ -105,75 +106,119 @@ export class FirestoreRepository implements PlacesRepository {
         discovery.revision !== revision ||
         ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
       ) {
-        const existing = discovery.confirmedPlaceId
-          ? await tx.get(
-              this.doc(workspaceId, 'places', discovery.confirmedPlaceId),
-            )
-          : undefined;
+        const places = [];
+        for (const placeId of discovery.confirmedPlaceIds ??
+          (discovery.confirmedPlaceId ? [discovery.confirmedPlaceId] : [])) {
+          const existing = await tx.get(
+            this.doc(workspaceId, 'places', placeId),
+          );
+          if (existing.exists) places.push(PlaceSchema.parse(existing.data()));
+        }
         return {
           discovery,
           changed: false,
-          ...(existing?.exists
-            ? { place: PlaceSchema.parse(existing.data()) }
-            : {}),
+          ...(places.length ? { place: places[0], places } : {}),
         };
       }
       const time = new Date().toISOString();
-      let place: Place | undefined;
+      const places: Place[] = [];
+      let reused = 0;
       if (action === 'confirm') {
-        if (
-          discovery.status !== 'needs_confirmation' ||
-          discovery.candidates.length !== 1
-        )
+        const indices =
+          discovery.status === 'needs_selection'
+            ? (discovery.selectedCandidateIndices ?? [])
+            : discovery.status === 'needs_confirmation' &&
+                discovery.candidates.length === 1
+              ? [0]
+              : [];
+        if (!indices.length)
           throw new Error('deterministic_candidate_required');
-        const candidate = discovery.candidates[0]!;
-        const placeId = canonicalPlaceId(candidate);
-        const placeRef = this.doc(workspaceId, 'places', placeId);
-        const existing = await tx.get(placeRef);
-        const {
-          resolution: _,
-          recognitionClueIndex,
-          providerIdentity: identity,
-          references,
-          ...content
-        } = candidate;
-        // Strict durable schema also rejects accidental live Google content on all other write paths.
-        const fields =
-          identity?.provider === 'google-places'
-            ? { providerIdentity: identity }
-            : content;
-        const source = references.find((r) =>
-          identity
-            ? r.provider === identity.provider && r.externalId === identity.id
-            : r.provider !== 'openai-web-search',
-        );
-        if (!source || candidate.resolution !== 'deterministic_poi')
-          throw new Error('deterministic_candidate_required');
-        place = existing.exists
-          ? PlaceSchema.parse(existing.data())
-          : PlaceSchema.parse({
-              ...fields,
-              ...recognitionLabel(discovery.recognition, recognitionClueIndex),
-              id: placeId,
-              workspaceId,
-              source,
-              evidence: references,
-              status: 'confirmed',
-              tags: [],
-              createdAt: time,
-              updatedAt: time,
-            });
-        if (!existing.exists) tx.create(placeRef, clean(place));
+        const entries = [
+          ...new Map(
+            indices.map((i) => {
+              const candidate = discovery.candidates[i]!;
+              return [canonicalPlaceId(candidate), candidate] as const;
+            }),
+          ).entries(),
+        ];
+        // Firestore requires all reads before any write; one bounded atomic transaction.
+        const snapshots = [];
+        for (const [placeId] of entries)
+          snapshots.push(
+            await tx.get(this.doc(workspaceId, 'places', placeId)),
+          );
+        const writes: {
+          ref: ReturnType<FirestoreRepository['doc']>;
+          place: Place;
+        }[] = [];
+        for (const [index, [placeId, candidate]] of entries.entries()) {
+          const placeRef = this.doc(workspaceId, 'places', placeId),
+            existing = snapshots[index]!;
+          const {
+            resolution: _,
+            recognitionClueIndex,
+            relationship: _relationship,
+            candidateConfidence: _candidateConfidence,
+            providerIdentity: identity,
+            references,
+            ...content
+          } = candidate;
+          // Strict durable schema also rejects accidental live Google content on all other write paths.
+          const fields =
+            identity?.provider === 'google-places'
+              ? { providerIdentity: identity }
+              : content;
+          const source = references.find((r) =>
+            identity
+              ? r.provider === identity.provider && r.externalId === identity.id
+              : r.provider !== 'openai-web-search',
+          );
+          if (!source || candidate.resolution !== 'deterministic_poi')
+            throw new Error('deterministic_candidate_required');
+          const place = existing.exists
+            ? PlaceSchema.parse(existing.data())
+            : PlaceSchema.parse({
+                ...fields,
+                ...(candidate.relationship?.startsWith('related_')
+                  ? {}
+                  : recognitionLabel(
+                      discovery.recognition,
+                      recognitionClueIndex,
+                    )),
+                id: placeId,
+                workspaceId,
+                source,
+                evidence: references,
+                status: 'confirmed',
+                tags: [],
+                createdAt: time,
+                updatedAt: time,
+              });
+          places.push(place);
+          if (existing.exists) reused++;
+          else writes.push({ ref: placeRef, place });
+        }
+        for (const { ref, place } of writes) tx.create(ref, clean(place));
       }
       const next = DiscoverySchema.parse({
         ...discovery,
         status: action === 'confirm' ? 'confirmed' : 'cancelled',
         revision: revision + 1,
-        ...(place ? { confirmedPlaceId: place.id } : {}),
+        ...(places.length
+          ? {
+              confirmedPlaceId: places[0]!.id,
+              confirmedPlaceIds: places.map((p) => p.id),
+            }
+          : {}),
         updatedAt: time,
       });
       tx.set(ref, clean(next));
-      return { discovery: next, changed: true, ...(place ? { place } : {}) };
+      return {
+        discovery: next,
+        changed: true,
+        ...(places.length ? { place: places[0], places } : {}),
+        reusedCount: reused,
+      };
     });
   }
   async setArea(workspaceId: string, area: string) {

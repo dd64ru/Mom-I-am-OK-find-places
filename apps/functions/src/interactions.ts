@@ -22,7 +22,7 @@ interface Interaction {
   userId?: number;
   replyId?: number;
   city?: string;
-  action?: 'confirm' | 'city' | 'cancel' | 'select';
+  action?: 'confirm' | 'city' | 'cancel' | 'select' | 'all' | 'clear';
   selectionIndex?: number;
   owner?: string;
   leaseUntil?: number;
@@ -95,6 +95,19 @@ export class TelegramInteractions {
       await this.prompt(discovery, userId, replyTo);
       return;
     }
+    if (
+      discovery.status === 'needs_selection' &&
+      discovery.candidates.length === 1
+    ) {
+      const revised = await this.repository.reviseDiscovery(
+        this.workspace,
+        discovery.id,
+        discovery.revision,
+        { status: 'needs_confirmation', selectedCandidateIndices: undefined },
+      );
+      if (revised) return this.propose(revised, userId, replyTo, statusId);
+      return;
+    }
     if (discovery.status === 'needs_selection')
       return this.shortlist(discovery, userId, replyTo, statusId);
     const token = this.token(discovery);
@@ -145,9 +158,11 @@ export class TelegramInteractions {
           ].join('\n')
         : '© Участники OpenStreetMap (ODbL)';
       const confidenceText = google
-        ? candidate?.candidateConfidence === 'high'
-          ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
-          : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
+        ? candidate?.relationship?.startsWith('related_')
+          ? 'Связанная точка сети (предположение). Уверенность низкая — проверь на карте и подтверди.'
+          : candidate?.candidateConfidence === 'high'
+            ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
+            : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
         : '';
       const message =
         candidate && !google && candidate.address.formatted
@@ -161,7 +176,7 @@ export class TelegramInteractions {
           : await this.api.call('sendMessage', {
               ...common,
               text: (candidate
-                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${candidate.address.city ?? ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
+                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${google ? 'Город по данным Google: ' : ''}${candidate.address.city ?? 'не указан'}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
                 : resolutionMessage(discovery)
               ).slice(0, 4000),
             });
@@ -176,26 +191,18 @@ export class TelegramInteractions {
     userId: number,
     replyTo: number,
     statusId: string,
+    editMessageId?: number,
   ) {
+    const rootToken = this.token(discovery, 'multi');
+    const existing = await this.docs.change(this.path(rootToken), (raw) => ({
+      result: raw?.messageId,
+    }));
+    if (existing && !editMessageId) return;
+    const selected = new Set(discovery.selectedCandidateIndices ?? []);
+    const cards: string[] = [],
+      keyboard: { text: string; callback_data: string }[][] = [];
+    const tokens = [rootToken];
     for (let index = 0; index < discovery.candidates.length; index++) {
-      const token = this.token(discovery, `selection-${index}`);
-      const state = await this.docs.change<Interaction>(
-        this.path(token),
-        (raw) => {
-          const next: Interaction = {
-            discoveryId: discovery.id,
-            revision: discovery.revision,
-            expiresAt: this.now() + LIFETIME,
-            phase: 'active',
-            selectionIndex: index,
-          };
-          return {
-            value: raw ?? { ...next },
-            result: (raw ?? next) as unknown as Interaction,
-          };
-        },
-      );
-      if (state.messageId || state.phase !== 'active') continue;
       const candidate = await this.service.displayCandidate(discovery, index);
       if (!candidate) {
         const current = await this.repository.getDiscovery(
@@ -206,40 +213,68 @@ export class TelegramInteractions {
           return this.propose(current, userId, replyTo, statusId);
         return;
       }
+      const token = this.token(discovery, `selection-${index}`);
+      tokens.push(token);
       const link =
         candidate.references.find((r) => r.provider === 'google-places')?.url ??
         '';
-      const attribution = [
-        'Источник: Google Maps',
-        ...(candidate.attributions ?? []).map(renderAttribution),
-      ].join('\n');
-      const message = await this.api.call('sendMessage', {
-        chat_id: this.chat,
-        reply_parameters: { message_id: replyTo },
-        text: `Нашёл возможные варианты. Уверенность низкая — проверь на карте и выбери. Выбор ещё не сохраняет место.\n\n${index + 1}. ${candidate.canonicalName.slice(0, 300)}\n${link}\n${candidate.address.city ?? ''}\n${candidate.address.formatted.slice(0, 1500)}\n${attribution}`.slice(
-          0,
-          4000,
-        ),
-        reply_markup: {
-          inline_keyboard: [
-            [
-              {
-                text: `Выбрать вариант ${index + 1}`,
-                callback_data: `p:${token}:s`,
-              },
-            ],
-            [
-              { text: '✏️ Изменить город', callback_data: `p:${token}:e` },
-              { text: '❌ Отмена', callback_data: `p:${token}:x` },
-            ],
-          ],
+      const relation =
+        candidate.relationship === 'likely_exact'
+          ? 'Вероятно место с фото'
+          : candidate.relationship?.startsWith('related_')
+            ? 'Связанная точка сети (предположение)'
+            : 'Возможный вариант';
+      cards.push(
+        `${index + 1}. ${candidate.canonicalName.slice(0, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city?.slice(0, 40) ?? 'не указан'}\n${candidate.address.formatted.slice(0, 80)}\n${link}\nИсточник: Google Maps${(candidate.attributions ?? []).map((a) => '\n' + renderAttribution(a)).join('')}`,
+      );
+      keyboard.push([
+        {
+          text: `${selected.has(index) ? '☑️' : '☐'} ${index + 1}. ${candidate.canonicalName.slice(0, 40)}`,
+          callback_data: `p:${token}:s`,
         },
-      });
+      ]);
+    }
+    keyboard.push([
+      { text: 'Выбрать все', callback_data: `p:${rootToken}:a` },
+      { text: 'Снять выбор', callback_data: `p:${rootToken}:z` },
+    ]);
+    if (selected.size)
+      keyboard.push([
+        {
+          text: `✅ Добавить выбранные (${selected.size})`,
+          callback_data: `p:${rootToken}:c`,
+        },
+      ]);
+    keyboard.push([
+      { text: '✏️ Изменить город', callback_data: `p:${rootToken}:e` },
+      { text: '❌ Отмена', callback_data: `p:${rootToken}:x` },
+    ]);
+    const text = `Нашёл несколько возможных мест. Уверенность выбора низкая — проверь на карте. Выбрано: ${selected.size}. Места сохраняются только после «Добавить выбранные».\n\n${cards.join('\n\n')}`;
+    if (text.length > 4000) throw new Error('telegram_shortlist_too_large');
+    const sent = await this.api.call(
+      editMessageId ? 'editMessageText' : 'sendMessage',
+      {
+        chat_id: this.chat,
+        ...(editMessageId
+          ? { message_id: editMessageId }
+          : { reply_parameters: { message_id: replyTo } }),
+        text,
+        reply_markup: { inline_keyboard: keyboard },
+      },
+    );
+    const messageId = editMessageId ?? sent.message_id;
+    for (const [i, token] of tokens.entries())
       await this.docs.change(this.path(token), (raw) => ({
-        value: { ...raw, messageId: message.message_id },
+        value: raw ?? {
+          discoveryId: discovery.id,
+          revision: discovery.revision,
+          expiresAt: this.now() + LIFETIME,
+          phase: 'active',
+          messageId,
+          ...(i ? { selectionIndex: i - 1 } : {}),
+        },
         result: undefined,
       }));
-    }
   }
   private async prompt(discovery: Discovery, userId: number, replyTo: number) {
     const token = this.token(discovery, 'prompt');
@@ -438,8 +473,12 @@ export class TelegramInteractions {
         (callback.action !== 'select' ||
           (state.selectionIndex !== undefined &&
             discovery.status === 'needs_selection')) &&
+        (!['all', 'clear'].includes(callback.action) ||
+          discovery.status === 'needs_selection') &&
         (callback.action !== 'confirm' ||
-          discovery.status === 'needs_confirmation')
+          discovery.status === 'needs_confirmation' ||
+          (discovery.status === 'needs_selection' &&
+            !!discovery.selectedCandidateIndices?.length))
       );
     return (
       state.action === callback.action &&
@@ -448,8 +487,8 @@ export class TelegramInteractions {
         (discovery.revision === state.revision + 1 &&
           (callback.action === 'city'
             ? discovery.status === 'awaiting_city'
-            : callback.action === 'select'
-              ? discovery.status === 'needs_confirmation'
+            : ['select', 'all', 'clear'].includes(callback.action)
+              ? discovery.status === 'needs_selection'
               : ['confirmed', 'cancelled', 'failed'].includes(
                   discovery.status,
                 ))))
@@ -483,21 +522,34 @@ export class TelegramInteractions {
         await this.done(callback.token, owner);
         return;
       }
-      if (callback.action === 'select') {
-        if (
-          discovery.revision === state.revision &&
-          state.selectionIndex !== undefined
-        )
-          discovery = await this.service.selectAlternative(
+      if (
+        callback.action === 'select' ||
+        callback.action === 'all' ||
+        callback.action === 'clear'
+      ) {
+        if (discovery.revision === state.revision)
+          discovery = await this.service.updateSelection(
             discovery,
+            callback.action === 'select' ? 'toggle' : callback.action,
             state.selectionIndex,
           );
         if (
           discovery?.revision === state.revision + 1 &&
-          discovery.status === 'needs_confirmation'
+          discovery.status === 'needs_selection'
         ) {
-          await this.close(state.messageId);
-          await this.propose(discovery, callback.userId, callback.messageId);
+          console.info(
+            JSON.stringify({
+              event: 'place_selection',
+              selectedCount: discovery.selectedCandidateIndices?.length ?? 0,
+            }),
+          );
+          await this.shortlist(
+            discovery,
+            callback.userId,
+            callback.messageId,
+            discovery.id,
+            state.messageId,
+          );
         }
       } else if (callback.action === 'city') {
         if (discovery.revision === state.revision)
@@ -523,12 +575,21 @@ export class TelegramInteractions {
           result.changed ||
           ['confirmed', 'cancelled'].includes(result.discovery.status)
         ) {
+          console.info(
+            JSON.stringify({
+              event: 'place_bulk_confirmation',
+              confirmedCount: result.places?.length ?? (result.place ? 1 : 0),
+              reusedCount: 'reusedCount' in result ? result.reusedCount : 0,
+            }),
+          );
           await this.close(state.messageId);
           await this.api.call('sendMessage', {
             chat_id: this.chat,
             text: result.changed
               ? result.place
-                ? 'Добавлено в сохранённые места.'
+                ? result.places && result.places.length > 1
+                  ? `Добавлено мест: ${result.places.length}.`
+                  : 'Добавлено в сохранённые места.'
                 : 'Отменено. Место не добавлено.'
               : 'Это действие уже обработано.',
             reply_parameters: { message_id: callback.messageId },

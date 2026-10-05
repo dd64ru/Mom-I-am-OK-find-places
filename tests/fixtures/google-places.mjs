@@ -75,7 +75,7 @@ export function googleFixture(body = { places: [row] }, request, telemetry) {
 
 export function assertGoogleAlternatives(result, count) {
   assert.equal(result.status, 'alternatives');
-  assert.ok(result.candidates.length >= 1 && result.candidates.length <= 3);
+  assert.ok(result.candidates.length >= 1 && result.candidates.length <= 8);
   if (count !== undefined) assert.equal(result.candidates.length, count);
   assert.equal(
     new Set(result.candidates.map((c) => c.providerIdentity.id)).size,

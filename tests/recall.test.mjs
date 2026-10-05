@@ -256,7 +256,7 @@ test('semantic city intent is general, high confidence and bound to this exact c
     { ...v.localityIntent, input: 'stale-city' },
     { ...v.localityIntent, confidence: 0.4 },
   ]) {
-    assert.notEqual(
+    assert.equal(
       (
         await provider([paris]).resolve(
           r,

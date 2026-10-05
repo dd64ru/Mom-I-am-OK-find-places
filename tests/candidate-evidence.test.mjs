@@ -253,9 +253,10 @@ test('unrelated generic-only identity stays unresolved; supported weak identity 
     const result = await provider([
       { ...alimentari, displayName: { text: name } },
     ]).resolve(recognition(), noEvidence, { cityOverride: 'Shanghai' });
-    if (name === 'Alimentari Airport Branch')
-      assertGoogleAlternatives(result, 1);
-    else
+    if (name === 'Alimentari Airport Branch') {
+      assert.equal(result.status, 'resolved');
+      assert.equal(result.candidate.candidateConfidence, 'low');
+    } else
       assert.deepEqual(result, {
         status: 'unresolved',
         reason: 'insufficient_evidence',
@@ -294,11 +295,11 @@ test('weak relevant Google identity remains a human-selection alternative withou
       return { status: 'unresolved', reason: 'no_match' };
     },
   });
-  assertGoogleAlternatives(await fallback.firstPass(recognition()), 1);
+  assert.equal((await fallback.firstPass(recognition())).status, 'resolved');
   assert.equal(calls, 0);
-  assertGoogleAlternatives(
-    await fallback.resolve(recognition(), noEvidence),
-    1,
+  assert.equal(
+    (await fallback.resolve(recognition(), noEvidence)).status,
+    'resolved',
   );
   assert.equal(calls, 0);
 });

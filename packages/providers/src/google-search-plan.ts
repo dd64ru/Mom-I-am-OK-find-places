@@ -5,7 +5,8 @@ import type {
 } from '@places/schemas';
 import { normalizedLocality, type Locality } from './locality.js';
 import { nameTokens } from './place-matching.js';
-export type GooglePhase = 'google_first_pass' | 'google_enriched_pass';
+export type GooglePhase =
+  'google_first_pass' | 'google_enriched_pass' | 'google_related_pass';
 type Clue = Recognition['clues'][number] | Verification['candidates'][number];
 const name = (c: Clue) => ('canonicalName' in c ? c.canonicalName : c.name);
 // Eligibility uses schema-valid clues, never an AI confidence/city threshold.
@@ -16,7 +17,10 @@ export function googleSearchPlan(
 ) {
   const cited =
     v.status === 'verified' && v.references.length ? v.candidates : [];
-  const clues: Clue[] = (cited.length ? cited : r.clues)
+  const clues: Clue[] = [
+    ...r.clues.filter((c) => c.signage),
+    ...(cited.length ? cited : r.clues),
+  ]
     .slice(0, 3)
     .sort((a, b) => b.confidence - a.confidence);
   const intent =
@@ -85,6 +89,11 @@ export function googleSearchPlan(
   const primary = clues[0];
   if (!primary) return { clues, locality, queries: [] as string[] };
   const variants: { clue: Clue; text: string }[] = [
+    ...r.clues
+      .filter((c) => c.signage)
+      .sort((a, b) => b.confidence - a.confidence)
+      .slice(0, 1)
+      .map((c) => ({ clue: c, text: c.signage! })),
     ...clues.map((c) => ({ clue: c, text: c.nativeName || name(c) })),
     ...clues.flatMap((c) =>
       [

@@ -259,11 +259,14 @@ test('multiple candidates or a truncated page remain ambiguous; repeated identic
       places: [row, { ...row, id: 'fixture-google-place-2' }],
     }).resolve(recognition, verification),
   );
-  assertGoogleAlternatives(
-    await googleFixture({
-      places: [row],
-      nextPageToken: 'fixture-next-page',
-    }).resolve(recognition, verification),
+  assert.equal(
+    (
+      await googleFixture({
+        places: [row],
+        nextPageToken: 'fixture-next-page',
+      }).resolve(recognition, verification)
+    ).status,
+    'resolved',
   );
   assert.equal(
     (
@@ -712,7 +715,7 @@ test('Google Place ID refresh retrieves a bounded live view using ADC and no sea
     assert.equal(init.headers['X-Goog-User-Project'], project);
     assert.equal(
       init.headers['X-Goog-FieldMask'],
-      'id,displayName,formattedAddress,location,attributions',
+      'id,displayName,formattedAddress,location,addressComponents,attributions',
     );
     assert.equal(init.redirect, 'error');
     assert.ok(init.signal instanceof AbortSignal);

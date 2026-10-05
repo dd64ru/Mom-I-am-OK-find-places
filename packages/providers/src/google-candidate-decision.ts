@@ -90,7 +90,7 @@ export function decideCandidate(
 }
 export type GoogleDecisionEvent = {
   event: 'google_places_decision';
-  phase: 'google_first_pass' | 'google_enriched_pass';
+  phase: 'google_first_pass' | 'google_enriched_pass' | 'google_related_pass';
   query: number;
   nameEvidence: NameMatch['nameEvidence'];
   nameRankPermille: number;
@@ -112,5 +112,9 @@ export type GoogleCandidateEvent = Omit<
   candidateSlot: number;
   providerRank: number;
   seenInMultipleQueries: boolean;
-  decision: CandidateDecision | 'eligible_weak_alternative';
+  relationship: 'likely_exact' | 'plausible_exact' | 'related_chain_location';
+  decision:
+    | CandidateDecision
+    | 'eligible_weak_alternative'
+    | 'eligible_related_location';
 };
