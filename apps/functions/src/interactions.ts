@@ -3,11 +3,12 @@ import { createHash, randomUUID } from 'node:crypto';
 import { DiscoveryService, type PlacesRepository } from '@places/core';
 import {
   MAX_SEARCH_BRANDS,
+  MAX_CANDIDATES,
   type Discovery,
   type DiscoveryView,
   type ProviderFailureReason,
 } from '@places/schemas';
-import type { AtomicDocuments } from '@places/providers';
+import { canonicalPlaceId, type AtomicDocuments } from '@places/providers';
 import type { AcceptedMessage } from '@places/worker';
 import { ProcessingStatus } from './processing-status.js';
 import { ingressId } from './ingress.js';
@@ -217,7 +218,7 @@ export class TelegramInteractions {
         inline_keyboard: [
           [
             ...(candidate
-              ? [{ text: '✅ Добавить', callback_data: `p:${token}:c` }]
+              ? [{ text: '💾 Сохранить место', callback_data: `p:${token}:c` }]
               : []),
             { text: '✏️ Изменить город', callback_data: `p:${token}:e` },
             { text: '❌ Отмена', callback_data: `p:${token}:x` },
@@ -231,6 +232,10 @@ export class TelegramInteractions {
         reply_markup: buttons,
       };
       const google = candidate?.providerIdentity?.provider === 'google-places';
+      const savedNotice =
+        google && (await this.alreadySaved(discovery))
+          ? '✅ Уже сохранено\n'
+          : '';
       const attribution = google
         ? [
             'Источник: Google Maps',
@@ -256,7 +261,7 @@ export class TelegramInteractions {
           : await this.api.call('sendMessage', {
               ...common,
               text: (candidate
-                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${google ? 'Город по данным Google: ' : ''}${candidate.address.city ?? 'не указан'}${google && candidate.address.providerContext ? '\nРегион по данным Google (не подтверждённый город): ' + compact(candidate.address.providerContext, 100) : ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
+                ? `${confidenceText ? confidenceText + '\n' : ''}${savedNotice}${candidate.canonicalName.slice(0, 300)}\n${google ? 'Город по данным Google: ' : ''}${candidate.address.city ?? 'не указан'}${google && candidate.address.providerContext ? '\nРегион по данным Google (не подтверждённый город): ' + compact(candidate.address.providerContext, 100) : ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
                 : resolutionMessage(discovery)
               ).slice(0, 4000),
             });
@@ -265,6 +270,21 @@ export class TelegramInteractions {
         result: undefined,
       }));
     }
+  }
+  private async alreadySaved(
+    discovery: Discovery,
+    index = 0,
+  ): Promise<boolean> {
+    // Application reads only: no provider refresh and no Google display fields.
+    if (index < 0 || index >= MAX_CANDIDATES) return false;
+    const candidate = discovery.candidates[index];
+    if (candidate?.providerIdentity?.provider !== 'google-places') return false;
+    return (
+      (await this.repository.getPlace(
+        this.workspace,
+        canonicalPlaceId(candidate),
+      )) !== undefined
+    );
   }
   private discoveryButtons(discovery: Discovery, token: string) {
     if (discovery.recognition.mode === 'recommendation_list')
@@ -315,12 +335,16 @@ export class TelegramInteractions {
       },
     ]);
     if (discovery.recognition.clues.length <= MAX_SEARCH_BRANDS)
-      keyboard.push([{ text: 'Выбрать все', callback_data: `p:${root}:a` }]);
-    keyboard.push([{ text: 'Снять выбор', callback_data: `p:${root}:z` }]);
+      keyboard.push([
+        { text: '☑️ Отметить все бренды', callback_data: `p:${root}:a` },
+      ]);
+    keyboard.push([
+      { text: '⬜ Снять выбор брендов', callback_data: `p:${root}:z` },
+    ]);
     if (selected.size)
       keyboard.push([
         {
-          text: `🔎 Искать выбранные (${selected.size})`,
+          text: `🔎 Найти точки выбранных брендов (${selected.size})`,
           callback_data: `p:${root}:q`,
         },
       ]);
@@ -337,7 +361,7 @@ export class TelegramInteractions {
       : await this.api.call('sendMessage', {
           ...body,
           reply_parameters: { message_id: replyTo },
-          text: `Нашёл публичные рекомендации. Выбери до ${MAX_SEARCH_BRANDS} брендов для отдельных поисков в твоём городе. Остальные можно выбрать отдельной попыткой — «Изменить выбор брендов». Ничего не сохраняется автоматически.\n\n${discovery.recognition.clues.map((c, i) => `${i + 1}. ${compact(c.name, 120)}${c.confidence < 0.8 ? ' (название требует проверки)' : ''}`).join('\n')}${discovery.recognition.recommendationsTruncated ? '\nПоказаны первые восемь рекомендаций; для остальных пришли отдельный фрагмент списка.' : ''}`,
+          text: `Нашёл публичные рекомендации. Выбери до ${MAX_SEARCH_BRANDS} брендов для отдельных поисков в твоём городе. Остальные можно выбрать отдельной попыткой — «Изменить выбор брендов». Выбор брендов и поиск ничего не сохраняют. Затем выбери найденные места и нажми «Сохранить выбранные места».\n\n${discovery.recognition.clues.map((c, i) => `${i + 1}. ${compact(c.name, 120)}${c.confidence < 0.8 ? ' (название требует проверки)' : ''}`).join('\n')}${discovery.recognition.recommendationsTruncated ? '\nПоказаны первые восемь рекомендаций; для остальных пришли отдельный фрагмент списка.' : ''}`,
         });
     const messageId = editMessageId ?? Number(sent.message_id);
     for (const [i, token] of [
@@ -413,11 +437,14 @@ export class TelegramInteractions {
               ]?.name
             : undefined;
         const group = brand ? `Рекомендация: ${compact(brand, 60)}\n` : '';
+        const savedNotice = (await this.alreadySaved(discovery, index))
+          ? '\n✅ Уже сохранено'
+          : '';
         overview.push(
-          `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
+          `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}${savedNotice}`,
         );
         const card: ShortlistText = {
-          text: `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}${candidate.address.providerContext ? '\nРегион Google (город не подтверждён): ' + compact(candidate.address.providerContext, 80) : ''}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
+          text: `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}${savedNotice}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}${candidate.address.providerContext ? '\nРегион Google (город не подтверждён): ' + compact(candidate.address.providerContext, 80) : ''}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
           entities: [],
         };
         appendLink(card, 'Google Maps', link);
@@ -450,13 +477,16 @@ export class TelegramInteractions {
       ]);
     }
     keyboard.push([
-      { text: 'Выбрать все', callback_data: `p:${rootToken}:a` },
-      { text: 'Снять выбор', callback_data: `p:${rootToken}:z` },
+      {
+        text: '☑️ Отметить все найденные места',
+        callback_data: `p:${rootToken}:a`,
+      },
+      { text: '⬜ Снять выбор мест', callback_data: `p:${rootToken}:z` },
     ]);
     if (selected.size)
       keyboard.push([
         {
-          text: `✅ Добавить выбранные (${selected.size})`,
+          text: `💾 Сохранить выбранные места (${selected.size})`,
           callback_data: `p:${rootToken}:c`,
         },
       ]);
@@ -467,8 +497,8 @@ export class TelegramInteractions {
     ]);
     const intro =
       discovery.recognition.mode === 'recommendation_list'
-        ? 'Места по выбранным рекомендациям сгруппированы по брендам. Проверь варианты на карте и выбери конкретные места. Сохранение — только после «Добавить выбранные».'
-        : 'Нашёл несколько возможных мест. Проверь варианты на карте. Места сохраняются только после «Добавить выбранные».';
+        ? 'Здесь только найденные места выбранных брендов, сгруппированные по рекомендациям. «Отметить все найденные места» отмечает эти места, а не все бренды исходного списка. Проверь варианты на карте. Выбор мест ничего не сохраняет — нажми «Сохранить выбранные места».'
+        : 'Нашёл несколько возможных мест. Проверь варианты на карте. Выбор мест ничего не сохраняет — нажми «Сохранить выбранные места».';
     let messageId = editMessageId;
     if (controlsOnly) {
       await this.api.call('editMessageReplyMarkup', {
@@ -907,10 +937,11 @@ export class TelegramInteractions {
             chat_id: this.chat,
             text: result.changed
               ? result.place
-                ? result.places && result.places.length > 1
-                  ? `Добавлено мест: ${result.places.length}.`
-                  : 'Добавлено в сохранённые места.'
-                : 'Отменено. Место не добавлено.'
+                ? confirmationMessage(
+                    result.places?.length ?? 1,
+                    result.reusedCount ?? 0,
+                  )
+                : 'Отменено. Место не сохранено.'
               : 'Это действие уже обработано.',
             reply_parameters: { message_id: callback.messageId },
           });
@@ -1116,4 +1147,15 @@ function shortlistPages(
     pages.push(combineText(`Варианты и источники (${page + 1})`, group));
   }
   return pages;
+}
+
+function confirmationMessage(total: number, reused: number): string {
+  if (total === 1)
+    return reused === 1
+      ? 'Это место уже было сохранено. Дубликат не создан.'
+      : 'Место сохранено.';
+  if (reused === total)
+    return `Все ${total} мест уже были сохранены. Дубликаты не созданы.`;
+  if (!reused) return `Сохранено новых мест: ${total}.`;
+  return `Сохранено мест: ${total}. Новых: ${total - reused}. Уже было сохранено: ${reused}.`;
 }

@@ -265,7 +265,7 @@ async function setup(options = {}) {
 }
 function button(sent, action = 'Confirm') {
   const label =
-    { Confirm: 'Добавить', 'Change city': 'Изменить город', Cancel: 'Отмена' }[
+    { Confirm: 'Сохранить', 'Change city': 'Изменить город', Cancel: 'Отмена' }[
       action
     ] ?? action;
   const message = sent.findLast((m) =>
@@ -318,7 +318,7 @@ test('Google confirmations dedupe by ID without persisting provider content; liv
   assert.deepEqual(
     proposal.body.reply_markup.inline_keyboard.flat().map((b) => b.text),
     [
-      '✅ Добавить',
+      '💾 Сохранить место',
       '✏️ Изменить город',
       '❌ Отмена',
       '🔎 Найти другие / похожие места',
@@ -412,9 +412,7 @@ test('Google confirmations dedupe by ID without persisting provider content; liv
     [...f.db.values.keys()].filter((path) => path.includes('/places/')).length,
     1,
   );
-  assert.ok(
-    f.sent.some((m) => m.body.text === 'Добавлено в сохранённые места.'),
-  );
+  assert.ok(f.sent.some((m) => m.body.text === 'Место сохранено.'));
 });
 
 test('Google ambiguous/no-match discoveries cannot be confirmed; Russian city/cancel results preserve ownership', async () => {
@@ -441,7 +439,7 @@ test('Google ambiguous/no-match discoveries cannot be confirmed; Russian city/ca
   await assert.rejects(g.service.finish(unresolved, 'confirm'));
   await g.interactions.callback(button(g.sent, 'Cancel'));
   assert.ok(
-    g.sent.some((m) => m.body.text === 'Отменено. Место не добавлено.'),
+    g.sent.some((m) => m.body.text === 'Отменено. Место не сохранено.'),
   );
   assert.equal(
     [...g.db.values.keys()].filter((path) => path.includes('/places/')).length,
@@ -2903,7 +2901,7 @@ test('production Alimentari partial with English Shanghai admin component resolv
     f.sent.some((m) =>
       m.body.reply_markup?.inline_keyboard
         ?.flat()
-        .some((b) => b.text === '✅ Добавить'),
+        .some((b) => b.text === '💾 Сохранить место'),
     ),
   );
 });
@@ -2989,7 +2987,7 @@ for (const [official, locality, tier, wording] of [
     assert.match(card.text, /https:\/\/www.google.com\/maps\/search/u);
     assert.ok(
       card.reply_markup.inline_keyboard[0].some(
-        (b) => b.text === '✅ Добавить',
+        (b) => b.text === '💾 Сохранить место',
       ),
     );
     assert.equal(
@@ -3527,7 +3525,7 @@ test('eight-candidate Google request counts: initial reconstruction 8; toggle/al
     f.sent.some((m) =>
       m.body.reply_markup?.inline_keyboard
         ?.flat()
-        .some((b) => b.text === '✅ Добавить выбранные (8)'),
+        .some((b) => b.text === '💾 Сохранить выбранные места (8)'),
     ),
   );
 });
@@ -4547,4 +4545,262 @@ test('single Google confirmation proposal offers related lookup, fenced after ci
   assert.equal(await f.interactions.canCallback(related), false);
   await f.interactions.callback(related);
   assert.equal(f.requests.length, before);
+});
+
+async function seedSavedCandidates(f, indices) {
+  const stored = await f.repository.getDiscovery('fixture', f.d.id);
+  const prior = await f.repository.createDiscovery(
+    DiscoverySchema.parse({
+      ...stored,
+      id: `${f.d.id}-saved-history`,
+      revision: 0,
+      status:
+        f.d.candidates.length === 1 ? 'needs_confirmation' : 'needs_selection',
+      selectedCandidateIndices:
+        f.d.candidates.length === 1 ? undefined : indices,
+    }),
+  );
+  return f.service.finish(prior, 'confirm');
+}
+function trackExistingPlaceReads(f) {
+  const reads = [];
+  const get = f.repository.getPlace.bind(f.repository);
+  f.repository.getPlace = async (workspace, id) => {
+    reads.push({ workspace, id });
+    return get(workspace, id);
+  };
+  return reads;
+}
+test('brand and physical-Place controls make searching, selection and final saving distinct without messages on toggles', async () => {
+  const f = await recommendationsWorkflow();
+  await f.interactions.propose(f.d, 11, 1);
+  const brands = f.sent.at(-1).body;
+  const brandButtons = brands.reply_markup.inline_keyboard
+    .flat()
+    .map((b) => b.text);
+  assert.ok(brandButtons.includes('☑️ Отметить все бренды'));
+  assert.ok(brandButtons.includes('⬜ Снять выбор брендов'));
+  assert.match(brands.text, /Выбор брендов и поиск ничего не сохраняют/);
+  const sentBefore = f.sent.filter((m) => m.method === 'sendMessage').length;
+  await f.interactions.callback(recommendationButton(f, 'all'));
+  assert.equal(
+    f.sent.filter((m) => m.method === 'sendMessage').length,
+    sentBefore,
+  );
+  assert.ok(
+    f.sent
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .some((b) => b.text === '🔎 Найти точки выбранных брендов (4)'),
+  );
+  let d = await f.repository.getDiscovery('fixture', f.d.id);
+  d = await f.service.searchBrands(d);
+  d = await f.service.correctCity(d, 'Vesper');
+  await f.interactions.propose(d, 11, 1);
+  const placeMessage = f.sent.findLast((m) =>
+    m.body.reply_markup?.inline_keyboard
+      ?.flat()
+      .some((b) => b.callback_data.endsWith(':b')),
+  );
+  const placeButtons = placeMessage.body.reply_markup.inline_keyboard
+    .flat()
+    .map((b) => b.text);
+  assert.ok(placeButtons.includes('☑️ Отметить все найденные места'));
+  assert.ok(placeButtons.includes('⬜ Снять выбор мест'));
+  assert.match(placeMessage.body.text, /Выбор мест ничего не сохраняет/);
+  assert.match(placeMessage.body.text, /а не все бренды исходного списка/);
+  const before = f.sent.filter((m) => m.method === 'sendMessage').length;
+  await f.interactions.callback(recommendationButton(f, 'all'));
+  assert.equal(f.sent.filter((m) => m.method === 'sendMessage').length, before);
+  assert.ok(
+    f.sent
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .some((b) => b.text === '💾 Сохранить выбранные места (8)'),
+  );
+  assert.equal(
+    [...f.db.values.keys()].some((p) => p.includes('/places/')),
+    false,
+  );
+  assert.equal(f.details(), 0);
+});
+test('one saved candidate is marked by bounded read-only canonical-ID checks; mixed shortlist stays selectable with no provider reads on controls', async () => {
+  const f = await shortlistWorkflow(8);
+  const seeded = await seedSavedCandidates(f, [3]);
+  const reads = trackExistingPlaceReads(f);
+  const beforePlaces = [...f.db.values.keys()].filter((p) =>
+    p.includes('/places/'),
+  ).length;
+  const beforeQueries = f.requests.length;
+  await f.interactions.propose(f.d, 11, 1);
+  assert.equal(reads.length, 8);
+  assert.deepEqual(
+    reads.map((r) => r.id),
+    f.d.candidates.map(canonicalPlaceId),
+  );
+  assert.ok(reads.every((r) => r.workspace === 'fixture'));
+  const text = f.sent
+    .filter((m) => m.body.text)
+    .map((m) => m.body.text)
+    .join('\n');
+  assert.equal((text.match(/✅ Уже сохранено/g) ?? []).length, 1);
+  assert.match(text, /4\. Juniper Museum Branch 3[^\n]*\n✅ Уже сохранено/);
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    beforePlaces,
+    'lookup cannot write',
+  );
+  for (const action of ['select', 'all', 'clear', 'all', 'confirm']) {
+    await f.interactions.callback(multiButton(f, action));
+    assert.equal(
+      reads.length,
+      8,
+      'no additional existing-place checks on checkbox/confirm',
+    );
+    assert.equal(f.refreshes(), 0);
+    assert.equal(f.requests.length, beforeQueries);
+  }
+  const saved = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.equal(saved.confirmedPlaceIds.length, 8);
+  assert.ok(saved.confirmedPlaceIds.includes(seeded.place.id));
+  const places = [...f.db.values.entries()]
+    .filter(([p]) => p.includes('/places/'))
+    .map(([, v]) => v);
+  assert.equal(places.length, 8);
+  for (const p of places)
+    for (const field of [
+      'canonicalName',
+      'address',
+      'coordinates',
+      'attributions',
+      'category',
+    ])
+      assert.equal(field in p, false);
+  const interactionText = JSON.stringify([...f.docs.values.values()]);
+  assert.equal(interactionText.includes('Juniper Museum Branch'), false);
+  assert.equal(interactionText.includes(googleRow.formattedAddress), false);
+});
+for (const [count, existing, expected] of [
+  [1, 0, 'Место сохранено.'],
+  [1, 1, 'Это место уже было сохранено. Дубликат не создан.'],
+  [6, 0, 'Сохранено новых мест: 6.'],
+  [6, 2, 'Сохранено мест: 6. Новых: 4. Уже было сохранено: 2.'],
+  [6, 6, 'Все 6 мест уже были сохранены. Дубликаты не созданы.'],
+])
+  test(`confirmation text reflects ${count - existing} new / ${existing} reused Places without changing history or retry behavior`, async () => {
+    const f = await shortlistWorkflow(count);
+    let prior;
+    if (existing)
+      prior = await seedSavedCandidates(
+        f,
+        Array.from({ length: existing }, (_, i) => i),
+      );
+    const reads = trackExistingPlaceReads(f);
+    await f.interactions.propose(f.d, 11, 1);
+    assert.equal(reads.length, count);
+    const initialText = f.sent
+      .filter((m) => m.body.text)
+      .map((m) => m.body.text)
+      .join('\n');
+    assert.equal(
+      (initialText.match(/✅ Уже сохранено/g) ?? []).length,
+      existing,
+    );
+    let callback;
+    if (count === 1) callback = button(f.sent);
+    else {
+      await f.interactions.callback(multiButton(f, 'all'));
+      callback = multiButton(f, 'confirm');
+    }
+    await f.interactions.callback(callback);
+    assert.equal(f.sent.at(-1).body.text, expected);
+    assert.equal(f.refreshes(), 0);
+    assert.equal(reads.length, count);
+    const d = await f.repository.getDiscovery('fixture', f.d.id);
+    assert.equal(d.status, 'confirmed');
+    assert.equal(d.confirmedPlaceId, d.confirmedPlaceIds[0]);
+    assert.equal(
+      [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+      count,
+    );
+    if (prior) {
+      const history = await f.repository.getDiscovery(
+        'fixture',
+        prior.discovery.id,
+      );
+      assert.equal(history.status, 'confirmed');
+      assert.ok(
+        history.confirmedPlaceIds.every((id) =>
+          d.confirmedPlaceIds.includes(id),
+        ),
+      );
+      assert.notEqual(history.id, d.id);
+    }
+    const before = f.sent.length;
+    await f.interactions.callback(callback);
+    assert.equal(
+      f.sent.length,
+      before + 1,
+      'replay only acknowledges; it does not save or send a second success',
+    );
+    const repeated = await f.service.finish(f.d, 'confirm');
+    assert.equal(repeated.changed, false);
+    assert.equal(
+      [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+      count,
+    );
+  });
+test('interrupted post-confirmation UI retry never reports reused Places as newly created or duplicates provenance', async () => {
+  const f = await shortlistWorkflow(6);
+  await seedSavedCandidates(f, [0, 1, 2, 3, 4, 5]);
+  await f.interactions.propose(f.d, 11, 1);
+  await f.interactions.callback(multiButton(f, 'all'));
+  const callback = multiButton(f, 'confirm');
+  f.setMarkupFailure(true);
+  await assert.rejects(
+    f.interactions.callback(callback),
+    /telegram_request_failed/,
+  );
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).status,
+    'confirmed',
+  );
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    6,
+  );
+  f.setMarkupFailure(false);
+  await f.interactions.callback(callback);
+  assert.equal(f.sent.at(-1).body.text, 'Это действие уже обработано.');
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/discoveries/')).length,
+    2,
+  );
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    6,
+  );
+  assert.equal(f.refreshes(), 0);
+});
+test('eight already-saved Places with pathological display content retain four-message and text bounds', async () => {
+  const f = await shortlistWorkflow(8, pathologicalRow);
+  await seedSavedCandidates(f, [0, 1, 2, 3, 4, 5, 6, 7]);
+  const reads = trackExistingPlaceReads(f);
+  await f.interactions.propose(f.d, 11, 1);
+  const messages = f.sent.filter((m) => m.method === 'sendMessage');
+  assert.equal(messages.length, MAX_SHORTLIST_MESSAGES);
+  assert.ok(messages.every((m) => m.body.text.length < 4000));
+  assert.equal(
+    messages
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .filter((b) => b.callback_data.endsWith(':s')).length,
+    8,
+  );
+  assert.equal(
+    (messages.at(-1).body.text.match(/✅ Уже сохранено/g) ?? []).length,
+    8,
+  );
+  assert.equal(reads.length, 8);
+  assert.equal(f.refreshes(), 0);
 });
