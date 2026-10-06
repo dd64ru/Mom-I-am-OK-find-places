@@ -72,6 +72,8 @@ export function validateFeedGeojson(body) {
             'tags',
             'provider',
             'category',
+            'city',
+            'address',
             'sourceLink',
             'attribution',
           ].includes(key),
@@ -79,8 +81,17 @@ export function validateFeedGeojson(body) {
     )
       fail();
     if (
+      ['category', 'city', 'address'].some(
+        (key) =>
+          key in props &&
+          (typeof props[key] !== 'string' || !props[key].trim()),
+      )
+    )
+      fail();
+    // Google features may carry only application-owned city/category, never an address.
+    if (
       props.provider === 'google-places' &&
-      ['category', 'sourceLink', 'attribution'].some((key) => key in props)
+      ['address', 'sourceLink', 'attribution'].some((key) => key in props)
     )
       fail();
   }

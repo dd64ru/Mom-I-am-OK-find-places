@@ -124,12 +124,20 @@ export class ProjectionService {
               )
                 throw new Error('projection_identity_mismatch');
               const coordinates = CoordinatesSchema.parse(view.coordinates);
+              // city/category come only from application-owned mapMetadata; a Google
+              // feature never carries an address.
               output.push(
                 ProjectedPlaceSchema.parse({
                   id: place.id,
                   label,
                   coordinates,
                   tags: [...place.tags],
+                  ...(place.mapMetadata?.city
+                    ? { city: place.mapMetadata.city.value }
+                    : {}),
+                  ...(place.mapMetadata?.category
+                    ? { category: place.mapMetadata.category.value }
+                    : {}),
                   providerIdentity: place.providerIdentity,
                 }),
               );
@@ -144,6 +152,13 @@ export class ProjectionService {
                 label,
                 coordinates: place.coordinates,
                 category: place.category,
+                // Independently licensed OSM/Nominatim address, exposed with OSM attribution.
+                ...(place.address.city?.trim()
+                  ? { city: place.address.city.trim() }
+                  : {}),
+                ...(place.address.formatted.trim()
+                  ? { address: place.address.formatted.trim() }
+                  : {}),
                 tags: [...place.tags],
                 providerIdentity: {
                   provider: place.source.provider,
@@ -191,6 +206,8 @@ export function geojson(places: readonly ProjectedPlace[]) {
         provider: p.providerIdentity.provider,
         ...(osmAttribution(p) ? { attribution: osmAttribution(p) } : {}),
         ...(p.category !== undefined ? { category: p.category } : {}),
+        ...(p.city !== undefined ? { city: p.city } : {}),
+        ...(p.address !== undefined ? { address: p.address } : {}),
         ...(p.sourceLink ? { sourceLink: p.sourceLink } : {}),
       },
     })),

@@ -62,6 +62,16 @@ node scripts/backfill-place-labels.mjs \
 
 Inspect aggregate planned/unresolved/alreadyLabeled counts. Current multi-confirmation (`confirmedPlaceIds`) and legacy single confirmation (`confirmedPlaceId`) are supported; each uniquely associated original candidate/clue is checked. Related branches and ambiguous identities never acquire the photographed venue's label. Missing independent labels remain excluded from the feed, making it incomplete. Never substitute Google displayName. Only later, after separate explicit owner review/approval, use `--apply` if needed; it revalidates associations transactionally and never overwrites existing labels. This development task does not run production backfill.
 
+Optional map metadata (`mapMetadata.city` / `mapMetadata.category`) for existing Google Places uses the same association rule, also **plan first**:
+
+```sh
+npm run build
+node scripts/backfill-place-map-metadata.mjs \
+  --project mom-im-ok-places --workspace <reviewed-workspace-id> --plan
+```
+
+Output is aggregate counts only (googlePlaces, planned, city/category planned, present, unavailable, conflict). Missing metadata does not make the feed incomplete; it only leaves a point without a city/category. Never substitute Google formattedAddress, address components or types. `--apply` stays a separate explicit owner decision; no production plan or apply has been run.
+
 After secure custody/import and smoke are complete:
 
 ```sh

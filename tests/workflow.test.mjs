@@ -2854,6 +2854,80 @@ test('confirmation persists the bound independent recognition label, never Googl
   assert.equal(second.place.labelSource, 'user');
 });
 
+test('confirmation persists application-owned map metadata: user city and Recognition category, never Google address/types/display, and keeps existing metadata on dedupe', async () => {
+  const r = alimentariRecognition(0.99);
+  // An application category the Google types cannot corroborate keeps the first pass.
+  r.clues[0].category = 'unknown-venue';
+  const branch = {
+    ...alimentariRow,
+    displayName: { text: 'Alimentari Grande Riverside (Donghu Road Branch)' },
+    types: ['establishment', 'point_of_interest'],
+    formattedAddress: '18 Donghu Road, Shanghai, China',
+    addressComponents: [
+      { longText: 'Shanghai', types: ['administrative_area_level_1'] },
+      { longText: 'China', shortText: 'CN', types: ['country'] },
+    ],
+  };
+  const f = await setup({
+    recognition: r,
+    verify: () => assert.fail('first pass suffices'),
+    poi: alimentariProvider([branch]),
+  });
+  const pending = await f.repository.createDiscovery({
+    id: 'metadata-user-city',
+    workspaceId: 'fixture',
+    recognition: r,
+    source: { provider: 'telegram', observedAt: time },
+    candidates: [],
+    visionProvider: 'fixture',
+    status: 'awaiting_city',
+    revision: 1,
+    createdAt: time,
+  });
+  const d = await f.service.correctCity(pending, 'Shanghai');
+  assert.equal(d.status, 'needs_confirmation');
+  const first = await f.service.finish(d, 'confirm');
+  assert.deepEqual(first.place.mapMetadata, {
+    city: { value: 'Shanghai', source: 'user' },
+    category: { value: 'unknown-venue', source: 'recognition' },
+  });
+  const stored = JSON.stringify(
+    await f.repository.getPlace('fixture', first.place.id),
+  );
+  for (const prohibited of [
+    'Donghu',
+    'Riverside',
+    'formatted',
+    'addressComponents',
+    'point_of_interest',
+    'establishment',
+    'district',
+  ])
+    assert.equal(stored.includes(prohibited), false, prohibited);
+  // A reused canonical Place is never rewritten, so a stronger existing value survives.
+  await f.repository.savePlace({
+    ...first.place,
+    mapMetadata: {
+      city: { value: 'My Shanghai', source: 'user' },
+      category: { value: 'My cafe', source: 'user' },
+    },
+  });
+  const again = await f.repository.createDiscovery({
+    ...pending,
+    id: 'metadata-dedupe',
+    cityOverride: undefined,
+  });
+  const second = await f.service.finish(
+    await f.service.correctCity(again, 'Shanghai'),
+    'confirm',
+  );
+  assert.equal(second.place.id, first.place.id);
+  assert.deepEqual(second.place.mapMetadata, {
+    city: { value: 'My Shanghai', source: 'user' },
+    category: { value: 'My cafe', source: 'user' },
+  });
+});
+
 test('production Alimentari partial with English Shanghai admin component resolves first pass after city intent is available, skipping web and showing Add', async () => {
   const r = alimentariRecognition(0.99);
   r.clues[0].category = 'unknown-venue';

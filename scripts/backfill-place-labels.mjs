@@ -6,10 +6,11 @@ import { planPlaceLabels } from '@places/core';
 import { DiscoverySchema, IdSchema, PlaceSchema } from '@places/schemas';
 const fingerprint = (value) =>
   createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export async function backfillPlaceLabels(db, workspace, mode = 'plan') {
+export const placeFingerprint = fingerprint;
+// Shared bounded, workspace-scoped scan of confirmed Places and Discoveries for every
+// owner backfill (labels, map metadata). Fails closed before any write.
+export async function scanConfirmedScope(db, workspace) {
   IdSchema.parse(workspace);
-  if (!['plan', 'apply'].includes(mode))
-    throw new Error('backfill_mode_invalid');
   const root = db.collection('workspaces').doc(workspace);
   const [placeRows, discoveryRows] = await Promise.all([
     root
@@ -34,8 +35,17 @@ export async function backfillPlaceLabels(db, workspace, mode = 'plan') {
         throw new Error('backfill_scope_invalid');
       return value;
     });
-  const places = parseScoped(placeRows, PlaceSchema),
-    discoveries = parseScoped(discoveryRows, DiscoverySchema);
+  return {
+    root,
+    places: parseScoped(placeRows, PlaceSchema),
+    discoveries: parseScoped(discoveryRows, DiscoverySchema),
+  };
+}
+export async function backfillPlaceLabels(db, workspace, mode = 'plan') {
+  IdSchema.parse(workspace);
+  if (!['plan', 'apply'].includes(mode))
+    throw new Error('backfill_mode_invalid');
+  const { root, places, discoveries } = await scanConfirmedScope(db, workspace);
   const plan = planPlaceLabels(places, discoveries);
   let applied = 0,
     stale = 0;

@@ -8,6 +8,31 @@ Canonical Firestore Places → `ProjectionService` → GeoJSON / GPX / KML. This
 
 For example, recognition “Happy Harbour” becomes a durable recognition label even when Google calls the venue “OH Bay”. Recognition “Grande Alimentari” stays our label when the provider returns “Alimentari Grande”. The Google Place keeps its stable identity, source/evidence references, label provenance, status/tags/timestamps. It still has no durable Google display/location content. OSM canonical persistence remains intact; unlabeled OSM projections can use their independently licensed canonicalName.
 
+## Application-owned map metadata
+
+A Google Place may carry an optional strict `mapMetadata` object so map clients can group and describe points without any Google display content:
+
+```json
+{
+  "mapMetadata": {
+    "city": { "value": "Shanghai", "source": "user" },
+    "category": { "value": "restaurant", "source": "recognition" }
+  }
+}
+```
+
+Both fields are optional (the object, when present, holds at least one), single-line, trimmed, bounded (city 200, category 100 characters) and carry an explicit provenance enum. Neither enum contains a provider value. Derivation (`mapMetadataFor`, used by confirmation and the backfill):
+
+- **city**: `Discovery.cityOverride`, the city the user typed (`user`), first. Otherwise the bound Recognition clue's own `areaHint` (`recognition`), and only for the photographed venue itself; a related branch/chain location never inherits it. Candidate address/city, Google formattedAddress, address components and district are never read: the durable Google stored candidate does not even contain them. No city is inferred from the Google response; without an independent city the field is omitted.
+- **category**: the bound Recognition clue's own `category` (`recognition`), never Google types. A related branch of the same deterministically bound clue may inherit it because it describes the same brand.
+- **binding**: the same rule as labels (`recognitionClue`): the candidate's `recognitionClueIndex`, or the only clue of a single-clue Recognition. Several unbound clues are ambiguous and give no clue-derived value.
+
+New confirmed Google Places persist the metadata when derivable. A reused canonical Place is never rewritten on confirmation, so existing application/user metadata is never replaced by a weaker source. Existing documents without the field keep parsing. OSM Places keep their independently licensed `address`/`category` and have no `mapMetadata`.
+
+### Map metadata backfill
+
+`scripts/backfill-place-map-metadata.mjs` (same arguments as the label backfill; `--plan` is the default, writes need `--apply`) derives only missing fields from persisted confirmed Discoveries through the shared `confirmedAssociations` rule. Per field, the strongest source present (`user` before `recognition`) must agree on exactly one value; otherwise the field is counted as a conflict and skipped. Existing values are never replaced. Apply re-reads the Place and its contributing Discoveries in a transaction, checks the Place fingerprint and the re-derived additions, and writes only `mapMetadata` (existing fields win) and `updatedAt`. No Google request, aggregate counts only. It has not been run against production.
+
 ## Owner backfill
 
 Build with Node 22, then plan for the explicitly selected project/workspace:
@@ -23,13 +48,13 @@ An explicitly authorized future apply re-reads each Place and its contributing D
 
 ## Projection and adapters
 
-`ProjectedPlace` is a separate transient model: stable internal id, application label, WGS84 coordinates, tags, providerIdentity and optional independently sourced category/sourceLink. It is never a canonical Place or Firestore write payload.
+`ProjectedPlace` is a separate transient model: stable internal id, application label, WGS84 coordinates, tags, providerIdentity and optional independently sourced category/city/address/sourceLink. It is never a canonical Place or Firestore write payload. Its schema refuses an `address` on a Google feature.
 
-OSM uses stored coordinates and existing category/source identity. Google hydration calls the existing bounded ADC-authenticated Place ID refresh. Only the returned matching identity and valid coordinates are consumed. Google displayName, formattedAddress, category/types and attribution are excluded from both the projection and every export. The label remains ours. Missing Google labels are skipped without an API call; backfill supplies those labels independently.
+OSM uses stored coordinates, existing category/source identity, its stored `address.city` and `address.formatted`. Google hydration calls the existing bounded ADC-authenticated Place ID refresh. Only the returned matching identity and valid coordinates are consumed; a Google feature's city/category come only from its application-owned `mapMetadata`. Google displayName, formattedAddress, address components, category/types and attribution are excluded from both the projection and every export. The label remains ours. Missing Google labels are skipped without an API call; backfill supplies those labels independently.
 
 At most 100 confirmed Places are read, with four concurrent refreshes, a maximum ten seconds per refresh and a thirty-second total hydration budget. A failed/timed-out refresh, wrong identity or malformed coordinates skips that feature and increments fixed aggregate diagnostics; successful siblings remain. Expired budget prevents new refreshes. There is no durable coordinate cache. A workspace exceeding the initial 100-place bound receives a fixed feed_limit_exceeded response rather than a silently incomplete export. Secret/read timeouts are five/ten seconds; the function deadline is sixty seconds.
 
-GeoJSON is RFC 7946 FeatureCollection/Point output with `[longitude, latitude]`, stable internal Feature.id, label/tags/provider and optional OSM category/sourceLink. No CRS extension is emitted. GPX 1.1 contains WGS84 waypoints with our label as name. KML 2.2 contains named placemarks and longitude,latitude Points. All three adapters include fixed OpenStreetMap contributor/copyright credit only on OSM features/waypoints/placemarks; this never consumes Google attribution. Both XML adapters escape text and omit invalid XML characters. All formats derive from the same validated objects, sort by stable internal id, and omit generated timestamps so identical projections serialize identically.
+GeoJSON is RFC 7946 FeatureCollection/Point output with `[longitude, latitude]`, stable internal Feature.id, label/tags/provider and the optional properties below. No CRS extension is emitted. GPX 1.1 contains WGS84 waypoints with our label as name. KML 2.2 contains named placemarks and longitude,latitude Points. All three adapters include fixed OpenStreetMap contributor/copyright credit only on OSM features/waypoints/placemarks; this never consumes Google attribution. Both XML adapters escape text and omit invalid XML characters. All formats derive from the same validated objects, sort by stable internal id, and omit generated timestamps so identical projections serialize identically.
 
 Google coordinate hydration remains provider-derived transient content; exports must not be treated as independently owned Google coordinates or an unrestricted reusable Google dataset. A fresh Place ID lookup does not remove [Google Places policies](https://developers.google.com/maps/documentation/places/web-service/policies) or destination restrictions. This task implements the requested restricted coordinate projection; it does not certify arbitrary external retention/redistribution. OSM consumers retain their existing OSM/ODbL obligations and source identity.
 
@@ -39,17 +64,20 @@ The primary application request is `GET /placesFeed?format=geojson` with `Author
 
 Successful 200/304 responses include `X-Places-Feed-Version: 1`. A GeoJSON 200 has `Content-Type: application/geo+json; charset=utf-8` and an RFC 7946 `FeatureCollection`. Each feature has:
 
-| Field                 | v1 contract                                                                                         |
-| --------------------- | --------------------------------------------------------------------------------------------------- |
-| `type`                | `Feature`                                                                                           |
-| `id`                  | Stable internal canonical Place ID, unique within the snapshot; never the Google Place ID           |
-| `geometry`            | `Point`, WGS84 `coordinates: [longitude, latitude]`; longitude -180..180, latitude -90..90          |
-| `properties.label`    | Application-owned recognition/user label; OSM may use independently licensed canonicalName          |
-| `properties.tags`     | Array of application tags                                                                           |
-| `properties.provider` | Enum: `google-places`, `nominatim`, `osm`                                                           |
-| Optional properties   | Independently licensed OSM `category`, `sourceLink`, fixed `attribution`; absent on Google features |
+| Field                 | v1 contract                                                                                      |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| `type`                | `Feature`                                                                                        |
+| `id`                  | Stable internal canonical Place ID, unique within the snapshot; never the Google Place ID        |
+| `geometry`            | `Point`, WGS84 `coordinates: [longitude, latitude]`; longitude -180..180, latitude -90..90       |
+| `properties.label`    | Application-owned recognition/user label; OSM may use independently licensed canonicalName       |
+| `properties.tags`     | Array of application tags                                                                        |
+| `properties.provider` | Enum: `google-places`, `nominatim`, `osm`                                                        |
+| `properties.city`     | Optional. Google: only `mapMetadata.city`. OSM/Nominatim: its stored independently licensed city |
+| `properties.category` | Optional. Google: only `mapMetadata.category`. OSM/Nominatim: its stored category                |
+| `properties.address`  | Optional. OSM/Nominatim stored formatted address only. **Always absent on Google features**      |
+| Other optional        | OSM `sourceLink` and fixed `attribution`; absent on Google features                              |
 
-No Google displayName, formatted address, types/category, attribution payload, query or raw Place ID is exposed. No Telegram data, credentials or additional recognition source text is exposed. Unknown persisted providers and malformed Places are excluded as invalid rather than exported as arbitrary enum values. There is no CRS extension. Features sort by internal ID. ID/label semantics, coordinate order, provider enum and required property types are stable in v1. Additive optional independently sourced fields or new aggregate headers may be introduced without changing version; consumers must ignore unknown fields/headers. Changes to required fields, existing semantics or provider enum require a new version and an explicit consumer migration. Exact ETag values/body bytes are not compatibility promises; source changes may change both.
+`city`, `category` and `address` are additive optional fields under the v1 rule below; the feed version stays 1. No Google displayName, formatted address, address components, types/category, attribution payload, query or raw Place ID is exposed. No Telegram data, credentials or additional recognition source text is exposed. Unknown persisted providers and malformed Places are excluded as invalid rather than exported as arbitrary enum values. There is no CRS extension. Features sort by internal ID. ID/label semantics, coordinate order, provider enum and required property types are stable in v1. Additive optional independently sourced fields or new aggregate headers may be introduced without changing version; consumers must ignore unknown fields/headers. Changes to required fields, existing semantics or provider enum require a new version and an explicit consumer migration. Exact ETag values/body bytes are not compatibility promises; source changes may change both.
 
 GET is the only feed method (including HEAD rejection): other methods return 405 with `Allow: GET`. Missing/malformed/incorrect authentication returns 401; unsupported formats/unknown request parameters return 400. Unavailable secret/Firestore or scope mismatch returns fixed 503 `feed_unavailable`. More than 100 confirmed Places or truncation returns hard 503 `feed_limit_exceeded`; this is never a successful capped snapshot. Errors never include provider bodies or user data. No create/update/delete endpoint or canonical write port exists.
 

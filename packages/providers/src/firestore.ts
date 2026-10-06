@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Firestore } from '@google-cloud/firestore';
 import {
   IdSchema,
+  mapMetadataFor,
   recognitionLabel,
   WorkspaceSchema,
   PlaceSchema,
@@ -168,9 +169,18 @@ export class FirestoreRepository implements PlacesRepository {
             ...content
           } = candidate;
           // Strict durable schema also rejects accidental live Google content on all other write paths.
+          // Application-owned map metadata (user city / Recognition category) only on a
+          // Google Place; OSM keeps its independently licensed address/category.
+          const mapMetadata =
+            identity?.provider === 'google-places'
+              ? mapMetadataFor(discovery, candidate)
+              : undefined;
           const fields =
             identity?.provider === 'google-places'
-              ? { providerIdentity: identity }
+              ? {
+                  providerIdentity: identity,
+                  ...(mapMetadata ? { mapMetadata } : {}),
+                }
               : content;
           const source = references.find((r) =>
             identity

@@ -148,6 +148,41 @@ test('smoke validates unique internal IDs, coordinates and licensed provider pro
       /^Error: feed_smoke_failed$/,
     );
 });
+test('smoke accepts additive city/category on Google and city/category/address on OSM, but never a Google address', () => {
+  const withProps = (properties) => ({
+    ...body(),
+    features: [{ ...feature, properties }],
+  });
+  assert.equal(
+    validateFeedGeojson(
+      withProps({ ...feature.properties, city: 'C', category: 'K' }),
+    ),
+    1,
+  );
+  assert.equal(
+    validateFeedGeojson(
+      withProps({
+        label: 'L',
+        tags: [],
+        provider: 'nominatim',
+        city: 'C',
+        category: 'K',
+        address: 'A',
+        attribution: 'OSM',
+      }),
+    ),
+    1,
+  );
+  for (const properties of [
+    { ...feature.properties, address: 'PRIVATE_ADDRESS' },
+    { ...feature.properties, city: '' },
+    { ...feature.properties, category: 7 },
+  ])
+    assert.throws(
+      () => validateFeedGeojson(withProps(properties)),
+      /^Error: feed_smoke_failed$/,
+    );
+});
 test('smoke fails safely on upstream exceptions, rejects credential URLs and never echoes input or response bodies', async () => {
   const token = randomBytes(32).toString('base64url');
   for (const url of [

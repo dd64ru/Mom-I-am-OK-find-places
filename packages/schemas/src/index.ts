@@ -87,6 +87,38 @@ const OsmPlaceSchema = z
   })
   .strict()
   .refine(labelPair);
+// Application-owned map metadata. Every value is independent of the Google response:
+// `user` city is the Discovery.cityOverride the user typed; `recognition` values come from
+// our own Recognition clue. Google displayName/formattedAddress/types/district never enter.
+const MAX_MAP_CITY = 200;
+const MAX_MAP_CATEGORY = 100;
+const mapMetadataText = (max: number) =>
+  z
+    .string()
+    .trim()
+    .min(1)
+    .max(max)
+    .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s));
+export const MapMetadataSchema = z
+  .object({
+    city: z
+      .object({
+        value: mapMetadataText(MAX_MAP_CITY),
+        source: z.enum(['user', 'recognition']),
+      })
+      .strict()
+      .optional(),
+    category: z
+      .object({
+        value: mapMetadataText(MAX_MAP_CATEGORY),
+        source: z.enum(['recognition', 'user']),
+      })
+      .strict()
+      .optional(),
+  })
+  .strict()
+  .refine((m) => m.city !== undefined || m.category !== undefined);
+export type MapMetadata = z.infer<typeof MapMetadataSchema>;
 // Google content is display-only. A durable Google Place retains identity and references,
 // never provider display names, address, coordinates, types or attribution content.
 export const GoogleIdentitySchema = z
@@ -100,6 +132,7 @@ const GooglePlaceSchema = z
     id: IdSchema,
     workspaceId: IdSchema,
     ...optionalLabel,
+    mapMetadata: MapMetadataSchema.optional(),
     providerIdentity: GoogleIdentitySchema,
     source: ReferenceSchema.refine(
       (r) => r.provider === 'google-places' && !!r.externalId,
@@ -291,6 +324,9 @@ export const ProjectedPlaceSchema = z
     coordinates: CoordinatesSchema,
     tags: z.array(z.string()),
     category: z.string().optional(),
+    city: z.string().min(1).optional(),
+    // Independently licensed (OSM/Nominatim) formatted address only; never Google content.
+    address: z.string().min(1).optional(),
     providerIdentity: z.union([
       GoogleIdentitySchema,
       z
@@ -300,7 +336,13 @@ export const ProjectedPlaceSchema = z
     ]),
     sourceLink: z.string().url().optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    (p) =>
+      p.providerIdentity.provider !== 'google-places' ||
+      p.address === undefined,
+    'google_address_forbidden',
+  );
 export type ProjectedPlace = z.infer<typeof ProjectedPlaceSchema>;
 export const GeographicContextSchema = z
   .object({
@@ -523,21 +565,67 @@ export const VerificationSchema = z
   .strict();
 export type Verification = z.infer<typeof VerificationSchema>;
 
+// The single clue-association rule shared by labels and map metadata: an explicit bound
+// index, or the only clue of a single-clue Recognition. Multiple unbound clues are ambiguous.
+export function recognitionClue(recognition: Recognition, index?: number) {
+  const selected = index ?? (recognition.clues.length === 1 ? 0 : undefined);
+  return selected === undefined ? undefined : recognition.clues[selected];
+}
+const singleLine = (text: string) =>
+  text
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(/\s+/gu, ' ')
+    .trim();
 // This function reads independent Recognition only, never provider display or verification.
 export function recognitionLabel(
   recognition: Recognition,
   index?: number,
 ): ApplicationLabel | undefined {
-  const selected = index ?? (recognition.clues.length === 1 ? 0 : undefined);
-  if (selected === undefined) return;
-  const name = recognition.clues[selected]?.name;
+  const name = recognitionClue(recognition, index)?.name;
   if (!name) return;
   const parsed = ApplicationLabelSchema.safeParse({
-    label: name
-      .replace(/[\u0000-\u001f\u007f]/gu, ' ')
-      .replace(/\s+/gu, ' ')
-      .trim(),
+    label: singleLine(name),
     labelSource: 'recognition',
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+const metadataValue = (text: string | undefined, max: number) => {
+  const value = text === undefined ? '' : singleLine(text);
+  return value && value.length <= max ? value : undefined;
+};
+// Map metadata for one confirmed candidate, from application-owned inputs only. The candidate
+// is the durable stored form (a Google stored candidate has no provider display fields), so
+// Google address/city/types are structurally unreachable here.
+//   city:     Discovery.cityOverride (user) first; otherwise the bound clue's own areaHint
+//             (recognition), and only for the photographed venue itself, never a related branch.
+//   category: the bound clue's own category (recognition); a related branch of the same
+//             deterministic clue may inherit it, because it describes the same brand.
+export function mapMetadataFor(
+  discovery: Pick<Discovery, 'recognition' | 'cityOverride'>,
+  candidate: {
+    recognitionClueIndex?: number;
+    relationship?: string;
+  },
+): MapMetadata | undefined {
+  const related = candidate.relationship?.startsWith('related_') ?? false;
+  const clue = recognitionClue(
+    discovery.recognition,
+    candidate.recognitionClueIndex,
+  );
+  const userCity = metadataValue(discovery.cityOverride, MAX_MAP_CITY);
+  const recognitionCity = related
+    ? undefined
+    : metadataValue(clue?.areaHint, MAX_MAP_CITY);
+  const category = metadataValue(clue?.category, MAX_MAP_CATEGORY);
+  const parsed = MapMetadataSchema.safeParse({
+    ...(userCity
+      ? { city: { value: userCity, source: 'user' } }
+      : recognitionCity
+        ? { city: { value: recognitionCity, source: 'recognition' } }
+        : {}),
+    ...(category
+      ? { category: { value: category, source: 'recognition' } }
+      : {}),
   });
   return parsed.success ? parsed.data : undefined;
 }

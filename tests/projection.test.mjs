@@ -357,8 +357,10 @@ test('projection uses durable OSM and transient refreshed Google coordinates; mi
   assert.equal(result.counts.providerFailures, 1);
   assert.equal(result.counts.missingLabels, 1);
   assert.equal(calls.length, 2);
-  for (const prohibited of ['PROHIBITED_', 'address', 'attributions', 'types'])
-    assert.equal(JSON.stringify(result).includes(prohibited), false);
+  assert.equal(JSON.stringify(result).includes('PROHIBITED_'), false);
+  // OSM may expose its own independently licensed address; Google never does.
+  for (const prohibited of ['address', 'attributions', 'types'])
+    assert.equal(JSON.stringify(result.places[0]).includes(prohibited), false);
 });
 test('identity mismatch and malformed hydrated coordinates cannot enter projection', async () => {
   for (const returned of [
