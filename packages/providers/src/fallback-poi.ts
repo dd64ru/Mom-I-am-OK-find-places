@@ -54,6 +54,7 @@ export class FallbackPoi implements PoiProvider {
         );
       } catch (error) {
         if (
+          recognition.mode === 'recommendation_list' ||
           !(error instanceof GooglePlacesFailure) ||
           error.code !== 'google_places_transient_failure'
         )
@@ -87,6 +88,7 @@ export class FallbackPoi implements PoiProvider {
         );
       } catch (error) {
         if (
+          recognition.mode === 'recommendation_list' ||
           !(error instanceof GooglePlacesFailure) ||
           error.code !== 'google_places_transient_failure'
         )
@@ -102,6 +104,7 @@ export class FallbackPoi implements PoiProvider {
         );
       }
       if (
+        recognition.mode === 'recommendation_list' ||
         result.status === 'resolved' ||
         result.status === 'alternatives' ||
         ['locality_conflict', 'no_place_evidence'].includes(result.reason)

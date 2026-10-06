@@ -1,5 +1,6 @@
 import {
   DiscoverySchema,
+  MAX_SEARCH_BRANDS,
   ProviderFailureReasonSchema,
   storedCandidate,
   type DiscoveryView,
@@ -131,17 +132,32 @@ export class DiscoveryService {
         recognition,
         candidates: [],
         visionProvider: provider,
-        status: 'needs_confirmation',
+        status:
+          recognition.mode === 'recommendation_list'
+            ? 'awaiting_brands'
+            : 'needs_confirmation',
+        ...(recognition.mode === 'recommendation_list'
+          ? { selectedBrandIndices: [] }
+          : {}),
         revision: 0,
         createdAt: new Date().toISOString(),
       }),
     );
-    return this.verification ? this.resolve(discovery) : discovery;
+    this.diagnostic({
+      event: 'recognition_mode',
+      mode: recognition.mode ?? 'single_venue',
+      identities: recognition.clues.length,
+    });
+    return this.verification && discovery.status !== 'awaiting_brands'
+      ? this.resolve(discovery)
+      : discovery;
   }
   async resolve(discovery: Discovery): Promise<DiscoveryView> {
     if (
       !this.verification ||
-      ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
+      ['confirmed', 'cancelled', 'failed', 'awaiting_brands'].includes(
+        discovery.status,
+      )
     )
       return discovery;
     const workspace = await this.repository.getWorkspace(discovery.workspaceId);
@@ -149,6 +165,10 @@ export class DiscoveryService {
     const context: GeographicContext = {
       cityOverride: discovery.cityOverride,
       workspaceAreaHint: workspace.areaHint,
+      ...(discovery.selectedBrandIndices
+        ? { selectedBrandIndices: discovery.selectedBrandIndices }
+        : {}),
+      ...(discovery.relatedRequested ? { relatedRequested: true } : {}),
     };
     const poi = this.verification.poi.beginAttempt?.() ?? this.verification.poi;
     let resolution: PoiResolution;
@@ -202,6 +222,8 @@ export class DiscoveryService {
           )
         : undefined;
       if (
+        (discovery.recognition.mode === 'recommendation_list' &&
+          first !== undefined) ||
         first?.status === 'resolved' ||
         (first?.status === 'unresolved' && first.reason === 'no_place_evidence')
       ) {
@@ -402,6 +424,101 @@ export class DiscoveryService {
         candidates: [],
         selectedCandidateIndices: undefined,
       },
+    );
+    return updated ? this.resolve(updated) : undefined;
+  }
+  private diagnostic(event: object) {
+    try {
+      console.info(JSON.stringify(event));
+    } catch {
+      /* best effort */
+    }
+  }
+  async updateBrandSelection(
+    discovery: Discovery,
+    action: 'toggle' | 'all' | 'clear',
+    index?: number,
+  ) {
+    if (discovery.status !== 'awaiting_brands') return;
+    const selected = new Set(discovery.selectedBrandIndices ?? []);
+    if (action === 'all') {
+      // Never implicitly choose a subset of an oversized list.
+      if (discovery.recognition.clues.length > MAX_SEARCH_BRANDS) return;
+      discovery.recognition.clues.forEach((_, i) => selected.add(i));
+    } else if (action === 'clear') selected.clear();
+    else {
+      if (
+        index === undefined ||
+        !Number.isInteger(index) ||
+        index < 0 ||
+        index >= discovery.recognition.clues.length
+      )
+        return;
+      if (selected.has(index)) selected.delete(index);
+      else if (selected.size < MAX_SEARCH_BRANDS) selected.add(index);
+      else return;
+    }
+    return this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      { selectedBrandIndices: [...selected].sort((a, b) => a - b) },
+    );
+  }
+  async searchBrands(discovery: Discovery): Promise<DiscoveryView | undefined> {
+    if (
+      discovery.status !== 'awaiting_brands' ||
+      !discovery.selectedBrandIndices?.length
+    )
+      return;
+    this.diagnostic({
+      event: 'recommendation_selection',
+      selectedCount: discovery.selectedBrandIndices.length,
+    });
+    const updated = await this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      {
+        status: discovery.cityOverride ? 'needs_confirmation' : 'awaiting_city',
+      },
+    );
+    return updated && updated.cityOverride ? this.resolve(updated) : updated;
+  }
+  async requestBrands(discovery: Discovery) {
+    if (discovery.recognition.mode !== 'recommendation_list') return;
+    return this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      {
+        status: 'awaiting_brands',
+        candidates: [],
+        selectedCandidateIndices: undefined,
+      },
+    );
+  }
+  async requestRelated(
+    discovery: Discovery,
+  ): Promise<DiscoveryView | undefined> {
+    if (
+      discovery.recognition.mode === 'recommendation_list' ||
+      discovery.relatedRequested ||
+      !discovery.candidates.some(
+        (c) => c.providerIdentity?.provider === 'google-places',
+      ) ||
+      !['needs_confirmation', 'needs_selection'].includes(discovery.status)
+    )
+      return;
+    this.diagnostic({
+      event: 'optional_related_discovery',
+      outcome: 'requested',
+    });
+    const updated = await this.repository.reviseDiscovery(
+      discovery.workspaceId,
+      discovery.id,
+      discovery.revision,
+      { relatedRequested: true, selectedCandidateIndices: undefined },
     );
     return updated ? this.resolve(updated) : undefined;
   }

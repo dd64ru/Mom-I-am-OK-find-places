@@ -1,10 +1,11 @@
 import { CitySessions } from './city-sessions.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { DiscoveryService, type PlacesRepository } from '@places/core';
-import type {
-  Discovery,
-  DiscoveryView,
-  ProviderFailureReason,
+import {
+  MAX_SEARCH_BRANDS,
+  type Discovery,
+  type DiscoveryView,
+  type ProviderFailureReason,
 } from '@places/schemas';
 import type { AtomicDocuments } from '@places/providers';
 import type { AcceptedMessage } from '@places/worker';
@@ -36,7 +37,16 @@ interface Interaction {
   userId?: number;
   replyId?: number;
   city?: string;
-  action?: 'confirm' | 'city' | 'cancel' | 'select' | 'all' | 'clear';
+  action?:
+    | 'confirm'
+    | 'city'
+    | 'cancel'
+    | 'select'
+    | 'all'
+    | 'clear'
+    | 'search'
+    | 'brands'
+    | 'related';
   selectionIndex?: number;
   owner?: string;
   leaseUntil?: number;
@@ -157,13 +167,16 @@ export class TelegramInteractions {
       });
       return;
     }
+    if (discovery.status === 'awaiting_brands')
+      return this.brands(discovery, replyTo);
     if (discovery.status === 'awaiting_city' && !discovery.cityOverride) {
       await this.prompt(discovery, userId, replyTo);
       return;
     }
     if (
       discovery.status === 'needs_selection' &&
-      discovery.candidates.length === 1
+      discovery.candidates.length === 1 &&
+      discovery.recognition.mode !== 'recommendation_list'
     ) {
       const revised = await this.repository.reviseDiscovery(
         this.workspace,
@@ -209,6 +222,7 @@ export class TelegramInteractions {
             { text: '✏️ Изменить город', callback_data: `p:${token}:e` },
             { text: '❌ Отмена', callback_data: `p:${token}:x` },
           ],
+          ...this.discoveryButtons(discovery, token),
         ],
       };
       const common = {
@@ -225,7 +239,7 @@ export class TelegramInteractions {
         : '© Участники OpenStreetMap (ODbL)';
       const confidenceText = google
         ? candidate?.relationship?.startsWith('related_')
-          ? 'Связанная точка сети (предположение). Уверенность низкая — проверь на карте и подтверди.'
+          ? 'Потенциально связанное место (не подтверждённая принадлежность к сети). Уверенность низкая — проверь на карте и подтверди.'
           : candidate?.candidateConfidence === 'high'
             ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
             : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
@@ -251,6 +265,98 @@ export class TelegramInteractions {
         result: undefined,
       }));
     }
+  }
+  private discoveryButtons(discovery: Discovery, token: string) {
+    if (discovery.recognition.mode === 'recommendation_list')
+      return [
+        [{ text: '📋 Изменить выбор брендов', callback_data: `p:${token}:b` }],
+      ];
+    const offered =
+      !discovery.relatedRequested &&
+      discovery.candidates.some(
+        (c) => c.providerIdentity?.provider === 'google-places',
+      );
+    try {
+      console.info(
+        JSON.stringify({
+          event: 'optional_related_discovery',
+          outcome: offered ? 'offered' : 'not_offered',
+        }),
+      );
+    } catch {
+      /* best effort */
+    }
+    return offered
+      ? [
+          [
+            {
+              text: '🔎 Найти другие / похожие места',
+              callback_data: `p:${token}:r`,
+            },
+          ],
+        ]
+      : [];
+  }
+  private async brands(
+    discovery: Discovery,
+    replyTo: number,
+    editMessageId?: number,
+  ) {
+    const root = this.token(discovery, 'brands');
+    const already = await this.docs.change(this.path(root), (raw) => ({
+      result: raw?.messageId,
+    }));
+    if (already && !editMessageId) return;
+    const selected = new Set(discovery.selectedBrandIndices ?? []);
+    const keyboard = discovery.recognition.clues.map((c, i) => [
+      {
+        text: `${selected.has(i) ? '☑️' : '☐'} ${i + 1}. ${compact(c.name, 45)}`,
+        callback_data: `p:${this.token(discovery, `brand-${i}`)}:s`,
+      },
+    ]);
+    if (discovery.recognition.clues.length <= MAX_SEARCH_BRANDS)
+      keyboard.push([{ text: 'Выбрать все', callback_data: `p:${root}:a` }]);
+    keyboard.push([{ text: 'Снять выбор', callback_data: `p:${root}:z` }]);
+    if (selected.size)
+      keyboard.push([
+        {
+          text: `🔎 Искать выбранные (${selected.size})`,
+          callback_data: `p:${root}:q`,
+        },
+      ]);
+    keyboard.push([{ text: '❌ Отмена', callback_data: `p:${root}:x` }]);
+    const body = {
+      chat_id: this.chat,
+      reply_markup: { inline_keyboard: keyboard },
+    };
+    const sent = editMessageId
+      ? await this.api.call('editMessageReplyMarkup', {
+          ...body,
+          message_id: editMessageId,
+        })
+      : await this.api.call('sendMessage', {
+          ...body,
+          reply_parameters: { message_id: replyTo },
+          text: `Нашёл публичные рекомендации. Выбери до ${MAX_SEARCH_BRANDS} брендов для отдельных поисков в твоём городе. Остальные можно выбрать отдельной попыткой — «Изменить выбор брендов». Ничего не сохраняется автоматически.\n\n${discovery.recognition.clues.map((c, i) => `${i + 1}. ${compact(c.name, 120)}${c.confidence < 0.8 ? ' (название требует проверки)' : ''}`).join('\n')}${discovery.recognition.recommendationsTruncated ? '\nПоказаны первые восемь рекомендаций; для остальных пришли отдельный фрагмент списка.' : ''}`,
+        });
+    const messageId = editMessageId ?? Number(sent.message_id);
+    for (const [i, token] of [
+      root,
+      ...discovery.recognition.clues.map((_, i) =>
+        this.token(discovery, `brand-${i}`),
+      ),
+    ].entries())
+      await this.docs.change(this.path(token), (raw) => ({
+        value: raw ?? {
+          discoveryId: discovery.id,
+          revision: discovery.revision,
+          expiresAt: this.now() + LIFETIME,
+          phase: 'active',
+          messageId,
+          ...(i ? { selectionIndex: i - 1 } : {}),
+        },
+        result: undefined,
+      }));
   }
   private async shortlist(
     discovery: DiscoveryView,
@@ -293,16 +399,25 @@ export class TelegramInteractions {
           candidate.references.find((r) => r.provider === 'google-places')
             ?.url ?? '';
         const relation =
-          candidate.relationship === 'likely_exact'
-            ? 'Вероятно место с фото'
-            : candidate.relationship?.startsWith('related_')
-              ? 'Связанная точка сети (предположение)'
-              : 'Возможный вариант';
+          discovery.recognition.mode === 'recommendation_list'
+            ? 'Возможное место по рекомендации; уверенность низкая — проверь на карте'
+            : candidate.relationship === 'likely_exact'
+              ? 'Вероятно место с фото'
+              : candidate.relationship?.startsWith('related_')
+                ? 'Потенциально связанное место (предположение)'
+                : 'Возможный вариант';
+        const brand =
+          discovery.recognition.mode === 'recommendation_list'
+            ? discovery.recognition.clues[
+                discovery.candidates[index]?.recognitionClueIndex ?? -1
+              ]?.name
+            : undefined;
+        const group = brand ? `Рекомендация: ${compact(brand, 60)}\n` : '';
         overview.push(
-          `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
+          `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
         );
         const card: ShortlistText = {
-          text: `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}${candidate.address.providerContext ? '\nРегион Google (город не подтверждён): ' + compact(candidate.address.providerContext, 80) : ''}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
+          text: `${group}${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}${candidate.address.providerContext ? '\nРегион Google (город не подтверждён): ' + compact(candidate.address.providerContext, 80) : ''}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
           entities: [],
         };
         appendLink(card, 'Google Maps', link);
@@ -345,12 +460,15 @@ export class TelegramInteractions {
           callback_data: `p:${rootToken}:c`,
         },
       ]);
+    keyboard.push(...this.discoveryButtons(discovery, rootToken));
     keyboard.push([
       { text: '✏️ Изменить город', callback_data: `p:${rootToken}:e` },
       { text: '❌ Отмена', callback_data: `p:${rootToken}:x` },
     ]);
     const intro =
-      'Нашёл несколько возможных мест. Проверь варианты на карте. Места сохраняются только после «Добавить выбранные».';
+      discovery.recognition.mode === 'recommendation_list'
+        ? 'Места по выбранным рекомендациям сгруппированы по брендам. Проверь варианты на карте и выбери конкретные места. Сохранение — только после «Добавить выбранные».'
+        : 'Нашёл несколько возможных мест. Проверь варианты на карте. Места сохраняются только после «Добавить выбранные».';
     let messageId = editMessageId;
     if (controlsOnly) {
       await this.api.call('editMessageReplyMarkup', {
@@ -613,9 +731,25 @@ export class TelegramInteractions {
         !['confirmed', 'cancelled', 'failed'].includes(discovery.status) &&
         (callback.action !== 'select' ||
           (state.selectionIndex !== undefined &&
-            discovery.status === 'needs_selection')) &&
+            ['needs_selection', 'awaiting_brands'].includes(
+              discovery.status,
+            ))) &&
         (!['all', 'clear'].includes(callback.action) ||
-          discovery.status === 'needs_selection') &&
+          ['needs_selection', 'awaiting_brands'].includes(discovery.status)) &&
+        (callback.action !== 'all' ||
+          discovery.status !== 'awaiting_brands' ||
+          discovery.recognition.clues.length <= MAX_SEARCH_BRANDS) &&
+        (callback.action !== 'search' ||
+          (discovery.status === 'awaiting_brands' &&
+            !!discovery.selectedBrandIndices?.length)) &&
+        (callback.action !== 'brands' ||
+          discovery.recognition.mode === 'recommendation_list') &&
+        (callback.action !== 'related' ||
+          (discovery.recognition.mode !== 'recommendation_list' &&
+            !discovery.relatedRequested &&
+            discovery.candidates.some(
+              (c) => c.providerIdentity?.provider === 'google-places',
+            ))) &&
         (callback.action !== 'confirm' ||
           discovery.status === 'needs_confirmation' ||
           (discovery.status === 'needs_selection' &&
@@ -625,11 +759,19 @@ export class TelegramInteractions {
       state.action === callback.action &&
       state.userId === callback.userId &&
       (discovery.revision === state.revision ||
+        (['search', 'related'].includes(callback.action) &&
+          discovery.revision >= state.revision + 1 &&
+          discovery.revision <= state.revision + 2) ||
+        (callback.action === 'brands' &&
+          discovery.revision === state.revision + 1 &&
+          discovery.status === 'awaiting_brands') ||
         (discovery.revision === state.revision + 1 &&
           (callback.action === 'city'
             ? discovery.status === 'awaiting_city'
             : ['select', 'all', 'clear'].includes(callback.action)
-              ? discovery.status === 'needs_selection'
+              ? ['needs_selection', 'awaiting_brands'].includes(
+                  discovery.status,
+                )
               : ['confirmed', 'cancelled', 'failed'].includes(
                   discovery.status,
                 ))))
@@ -669,15 +811,24 @@ export class TelegramInteractions {
         callback.action === 'clear'
       ) {
         if (discovery.revision === state.revision)
-          discovery = await this.service.updateSelection(
+          discovery = await (
+            discovery.status === 'awaiting_brands'
+              ? this.service.updateBrandSelection.bind(this.service)
+              : this.service.updateSelection.bind(this.service)
+          )(
             discovery,
             callback.action === 'select' ? 'toggle' : callback.action,
             state.selectionIndex,
           );
         if (
           discovery?.revision === state.revision + 1 &&
-          discovery.status === 'needs_selection'
+          ['needs_selection', 'awaiting_brands'].includes(discovery.status)
         ) {
+          if (discovery.status === 'awaiting_brands') {
+            await this.brands(discovery, callback.messageId, state.messageId);
+            await this.done(callback.token, owner);
+            return;
+          }
           console.info(
             JSON.stringify({
               event: 'place_selection',
@@ -694,6 +845,26 @@ export class TelegramInteractions {
             state.continuationMessageIds,
           );
         }
+      } else if (['search', 'brands', 'related'].includes(callback.action)) {
+        if (discovery.revision === state.revision) {
+          discovery =
+            callback.action === 'search'
+              ? await this.service.searchBrands(discovery)
+              : callback.action === 'brands'
+                ? await this.service.requestBrands(discovery)
+                : await this.service.requestRelated(discovery);
+        } else if (
+          discovery.revision === state.revision + 1 &&
+          callback.action !== 'brands' &&
+          discovery.status !== 'awaiting_city'
+        ) {
+          discovery = await this.service.resolve(discovery);
+        }
+        if (discovery && discovery.revision > state.revision) {
+          await this.cleanupContinuations(state);
+          await this.close(state.messageId);
+          await this.propose(discovery, callback.userId, callback.messageId);
+        }
       } else if (callback.action === 'city') {
         if (discovery.revision === state.revision)
           discovery = await this.service.requestCity(discovery);
@@ -708,7 +879,10 @@ export class TelegramInteractions {
         await this.cleanupContinuations(state);
         await this.close(state.messageId);
         await this.prompt(discovery, callback.userId, callback.messageId);
-      } else {
+      } else if (
+        callback.action === 'confirm' ||
+        callback.action === 'cancel'
+      ) {
         const result = await this.repository.finishDiscovery(
           this.workspace,
           discovery.id,
@@ -932,7 +1106,7 @@ function shortlistPages(
 ): ShortlistText[] {
   const combined = combineText(intro, cards);
   if (combined.text.length <= 3800) return [combined];
-  // Each card has fixed field/credit budgets (< 1000 UTF-16 units). Three
+  // Each card has fixed field/credit/independent-brand budgets (< 1200 UTF-16 units). Three
   // cards per page and the eight-candidate domain bound mean at most 3 pages.
   const pages: ShortlistText[] = [];
   for (let page = 0; page < MAX_SHORTLIST_CONTINUATIONS; page++) {

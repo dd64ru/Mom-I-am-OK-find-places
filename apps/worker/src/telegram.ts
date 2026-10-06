@@ -16,7 +16,16 @@ export type AcceptedMessage =
       kind: 'callback';
       callbackId: string;
       token: string;
-      action: 'confirm' | 'city' | 'cancel' | 'select' | 'all' | 'clear';
+      action:
+        | 'confirm'
+        | 'city'
+        | 'cancel'
+        | 'select'
+        | 'all'
+        | 'clear'
+        | 'search'
+        | 'brands'
+        | 'related';
       messageId: number;
       userId: number;
     }

@@ -69,6 +69,9 @@ export class FirestoreRepository implements PlacesRepository {
       const next = DiscoverySchema.parse({
         ...current,
         candidates: patch.candidates ?? current.candidates,
+        selectedBrandIndices:
+          patch.selectedBrandIndices ?? current.selectedBrandIndices,
+        relatedRequested: patch.relatedRequested ?? current.relatedRequested,
         selectedCandidateIndices: patch.selectedCandidateIndices,
         resolutionReason: patch.resolutionReason,
         failureReason: patch.failureReason,
@@ -80,6 +83,7 @@ export class FirestoreRepository implements PlacesRepository {
       if (
         ![
           'needs_confirmation',
+          'awaiting_brands',
           'needs_selection',
           'awaiting_city',
           'unresolved',

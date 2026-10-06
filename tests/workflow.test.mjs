@@ -166,6 +166,9 @@ async function setup(options = {}) {
     },
     {
       search: {
+        ...(options.normalizeLocality
+          ? { normalizeLocality: options.normalizeLocality }
+          : {}),
         verify: async (_recognition, context) => {
           calls.search++;
           return options.verify
@@ -314,7 +317,12 @@ test('Google confirmations dedupe by ID without persisting provider content; liv
   assert.doesNotMatch(proposal.body.text, /OpenStreetMap/);
   assert.deepEqual(
     proposal.body.reply_markup.inline_keyboard.flat().map((b) => b.text),
-    ['✅ Добавить', '✏️ Изменить город', '❌ Отмена'],
+    [
+      '✅ Добавить',
+      '✏️ Изменить город',
+      '❌ Отмена',
+      '🔎 Найти другие / похожие места',
+    ],
   );
   const callback = button(f.sent);
   const raced = await Promise.allSettled([
@@ -3829,17 +3837,22 @@ for (const firstKind of ['alternatives', 'city_unknown'])
         assert.deepEqual(d.liveAlternatives, f.first.candidates);
       else assert.equal(d.resolutionReason, f.first.reason);
       assert.equal(f.resolved(), 0);
-      assert.deepEqual(logs.map(JSON.parse), [
-        {
-          event: 'optional_web_enrichment',
-          outcome: 'degraded',
-          reason:
-            web === 'throws'
-              ? 'verification_failed'
-              : 'verification_unavailable',
-          result: firstKind,
-        },
-      ]);
+      assert.deepEqual(
+        logs
+          .map(JSON.parse)
+          .filter((e) => e.event === 'optional_web_enrichment'),
+        [
+          {
+            event: 'optional_web_enrichment',
+            outcome: 'degraded',
+            reason:
+              web === 'throws'
+                ? 'verification_failed'
+                : 'verification_unavailable',
+            result: firstKind,
+          },
+        ],
+      );
     });
 
 test('successful web enrichment still uses enriched Google decision instead of first alternatives', async () => {
@@ -3900,3 +3913,535 @@ for (const failure of ['google', 'adaptation', 'web-schema'])
       assert.equal(d.candidates.length, 0);
     }
   });
+
+const recommendationNames = ['Cedar Gallery', 'Кедровый Дом', '風鈴堂', 'AX'];
+async function recommendationsWorkflow(count = 4, options = {}) {
+  const names = [
+    ...recommendationNames,
+    'Hazel Hall',
+    'Birch Hall',
+    'Willow Hall',
+    'Maple Gallery',
+  ].slice(0, count);
+  const queries = [],
+    events = [];
+  let details = 0;
+  const rows = names.flatMap((name, index) =>
+    [0, 1].map((branch) => ({
+      id: `recommendation-${index}-${branch}`,
+      displayName: { text: `${name} (Section ${branch} branch)` },
+      location: { latitude: 1, longitude: 2 },
+      types: ['museum'],
+      formattedAddress: '20 Test Road, Vesper',
+      addressComponents: [
+        { longText: 'Vesper', types: ['locality'] },
+        { longText: 'Country', shortText: 'FR', types: ['country'] },
+      ],
+      attributions: options.long
+        ? Array.from({ length: 80 }, () => ({ provider: '🧭'.repeat(2000) }))
+        : [{ provider: 'Fixture Credit' }],
+    })),
+  );
+  const poi = new GooglePlacesPoi(
+    async () => googleToken,
+    googleProject,
+    async (url, init) => {
+      if (init.method === 'GET') {
+        details++;
+        return Response.json(rows.find((r) => String(url).endsWith(r.id)));
+      }
+      const q = JSON.parse(init.body).textQuery;
+      queries.push(q);
+      const brand = names.findIndex((n) => q.startsWith(n + ','));
+      return Response.json({
+        places:
+          options.emptyBrand === brand
+            ? []
+            : rows.filter((r) => r.id.startsWith(`recommendation-${brand}-`)),
+      });
+    },
+    Date.now,
+    (e) => events.push(e),
+  );
+  const f = await setup({
+    recognition: {
+      mode: 'recommendation_list',
+      visibleText: ['PRIVATE_LIST_UI_USERNAME'],
+      clues: names.map((name) => ({
+        name,
+        aliases: [],
+        category: 'museum',
+        confidence: 0.95,
+        recommendationEvidence: 'editorial',
+      })),
+    },
+    poi,
+    verified: noEvidence,
+    normalizeLocality: async (city) => ({
+      input: city,
+      canonicalName: 'Vesper',
+      aliases: ['Веспер'],
+      countryCode: 'FR',
+      confidence: 1,
+    }),
+    telegramFailure: options.telegramFailure,
+  });
+  const d = await f.ingest('recommendation-list');
+  return { ...f, d, names, rows, queries, events, details: () => details };
+}
+function recommendationButton(f, action, index = 0) {
+  const code = {
+    select: 's',
+    all: 'a',
+    clear: 'z',
+    search: 'q',
+    brands: 'b',
+    related: 'r',
+    city: 'e',
+    cancel: 'x',
+    confirm: 'c',
+  }[action];
+  const message = f.sent.findLast(
+    (m) =>
+      ['sendMessage', 'editMessageText', 'editMessageReplyMarkup'].includes(
+        m.method,
+      ) &&
+      m.body.reply_markup?.inline_keyboard
+        ?.flat()
+        .some((b) => b.callback_data.endsWith(':' + code)),
+  );
+  const buttons = message.body.reply_markup.inline_keyboard
+    .flat()
+    .filter((b) => b.callback_data.endsWith(':' + code));
+  const chosen = buttons[index];
+  assert.ok(chosen);
+  return {
+    kind: 'callback',
+    callbackId: 'fixture-recommendations',
+    token: chosen.callback_data.split(':')[1],
+    action,
+    messageId: message.body.message_id ?? f.sent.indexOf(message) + 101,
+    userId: 11,
+  };
+}
+async function searchRecommendations(f, city = 'Веспер') {
+  await f.interactions.propose(f.d, 11, 1);
+  await f.interactions.callback(recommendationButton(f, 'all'));
+  await f.interactions.callback(recommendationButton(f, 'search'));
+  const prompt = f.sent.findLast((m) => m.body.reply_markup?.force_reply);
+  const reply = {
+    kind: 'cityReply',
+    messageId: 50,
+    promptId: f.sent.indexOf(prompt) + 101,
+    userId: 11,
+    city,
+  };
+  const token = await f.interactions.canReply(reply);
+  assert.ok(token);
+  await f.interactions.cityReply(reply, token);
+  return f.repository.getDiscovery('fixture', f.d.id);
+}
+test('recommendation screenshot starts with independent brand choice and no network search or Place before choice/city', async () => {
+  const f = await recommendationsWorkflow();
+  assert.equal(f.d.status, 'awaiting_brands');
+  assert.equal(f.queries.length, 0);
+  assert.equal(f.calls.search, 0);
+  await f.interactions.propose(f.d, 11, 1);
+  assert.ok(
+    recommendationNames.every((n) => f.sent.at(-1).body.text.includes(n)),
+  );
+  assert.equal(
+    f.sent
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .filter((b) => b.callback_data.endsWith(':s')).length,
+    4,
+  );
+  const old = recommendationButton(f, 'select', 0);
+  await f.interactions.callback(old);
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', f.d.id)).selectedBrandIndices,
+    [0],
+  );
+  assert.equal(
+    await f.interactions.canCallback(old),
+    false,
+    'old brand revision is fenced',
+  );
+  const root = recommendationButton(f, 'clear');
+  assert.equal(
+    await f.interactions.canCallback({ ...root, action: 'confirm' }),
+    false,
+  );
+  assert.equal(
+    await f.interactions.canCallback({ ...root, action: 'related' }),
+    false,
+  );
+  assert.equal(
+    await f.interactions.canCallback({ ...root, messageId: 999 }),
+    false,
+  );
+  assert.equal(f.queries.length, 0);
+  assert.equal(f.details(), 0);
+  assert.equal(
+    [...f.db.values.keys()].some((p) => p.includes('/places/')),
+    false,
+  );
+});
+test('four brands are searched in the corrected city and eight individual Places confirm atomically, then reuse', async () => {
+  const f = await recommendationsWorkflow();
+  let d = await searchRecommendations(f);
+  assert.equal(d.status, 'needs_selection');
+  assert.equal(d.candidates.length, 8);
+  assert.deepEqual(
+    f.queries,
+    recommendationNames.map((n) => `${n}, Vesper, FR`),
+  );
+  assert.equal(f.details(), 0, 'live Google rows need no Details');
+  const text = f.sent
+    .filter((m) => m.body.text)
+    .map((m) => m.body.text)
+    .join('\n');
+  assert.ok(
+    recommendationNames.every((n) => text.includes(`Рекомендация: ${n}`)),
+  );
+  assert.match(text, /Google Maps/);
+  assert.match(text, /Fixture Credit/);
+  for (const action of ['select', 'all', 'clear', 'all', 'confirm'])
+    await f.interactions.callback(recommendationButton(f, action));
+  assert.equal(f.details(), 0);
+  assert.equal(f.queries.length, 4);
+  d = await f.repository.getDiscovery('fixture', d.id);
+  assert.equal(d.status, 'confirmed');
+  assert.equal(d.confirmedPlaceIds.length, 8);
+  assert.equal(d.confirmedPlaceId, d.confirmedPlaceIds[0]);
+  const places = [...f.db.values.entries()]
+    .filter(([p]) => p.includes('/places/'))
+    .map(([, v]) => v);
+  assert.equal(places.length, 8);
+  for (const p of places) {
+    assert.ok(recommendationNames.includes(p.label));
+    for (const key of [
+      'canonicalName',
+      'coordinates',
+      'address',
+      'attributions',
+      'category',
+    ])
+      assert.equal(key in p, false);
+  }
+  const second = await f.ingest('recommendation-second');
+  let next = await f.service.updateBrandSelection(second, 'all');
+  next = await f.service.searchBrands(next);
+  next = await f.service.correctCity(next, 'Vesper');
+  next = await f.service.updateSelection(next, 'all');
+  const reused = await f.service.finish(next, 'confirm');
+  assert.equal(reused.reusedCount, 8);
+  assert.deepEqual(reused.discovery.confirmedPlaceIds, d.confirmedPlaceIds);
+  assert.equal(
+    [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+    8,
+  );
+});
+test('oversized recommendation list requires explicit subset; remaining brands can be searched separately in the same city', async () => {
+  const f = await recommendationsWorkflow(8);
+  await f.interactions.propose(f.d, 11, 1);
+  assert.equal(
+    f.sent
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .some((b) => b.callback_data.endsWith(':a')),
+    false,
+  );
+  for (let i = 0; i < 5; i++)
+    await f.interactions.callback(recommendationButton(f, 'select', i));
+  const full = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.equal(
+    await f.service.updateBrandSelection(full, 'toggle', 5),
+    undefined,
+  );
+  assert.equal(await f.service.updateBrandSelection(full, 'all'), undefined);
+  assert.equal(f.queries.length, 0);
+  let d = await f.service.searchBrands(full);
+  d = await f.service.correctCity(d, 'Веспер');
+  assert.equal(f.queries.length, 5);
+  assert.equal(d.candidates.length, 8);
+  await f.interactions.propose(d, 11, 1);
+  await f.interactions.callback(recommendationButton(f, 'brands'));
+  await f.interactions.callback(recommendationButton(f, 'clear'));
+  for (const i of [5, 6, 7])
+    await f.interactions.callback(recommendationButton(f, 'select', i));
+  await f.interactions.callback(recommendationButton(f, 'search'));
+  d = await f.repository.getDiscovery('fixture', f.d.id);
+  assert.deepEqual(d.selectedBrandIndices, [5, 6, 7]);
+  assert.equal(d.cityOverride, 'Веспер');
+  assert.deepEqual(
+    f.queries.slice(5),
+    f.names.slice(5).map((n) => `${n}, Vesper, FR`),
+  );
+  assert.equal(
+    [...f.db.values.keys()].some((p) => p.includes('/places/')),
+    false,
+  );
+});
+test('one zero-result recommendation retains successful brands, and city correction applies consistently to the retained selection', async () => {
+  const f = await recommendationsWorkflow(4, { emptyBrand: 1 });
+  let d = await searchRecommendations(f);
+  assert.deepEqual(
+    [...new Set(d.candidates.map((c) => c.recognitionClueIndex))],
+    [0, 2, 3],
+  );
+  d = await f.service.requestCity(d);
+  d = await f.service.correctCity(d, 'Vesper');
+  assert.deepEqual(
+    f.queries.slice(4),
+    recommendationNames.map((n) => `${n}, Vesper, FR`),
+  );
+  assert.deepEqual(d.selectedBrandIndices, [0, 1, 2, 3]);
+  assert.equal(f.calls.vision, 1);
+});
+test('grouped pathological recommendation shortlist retains four-message bound, eight choices and cleanup when returning to brands', async () => {
+  const f = await recommendationsWorkflow(4, { long: true });
+  const before = f.sent.length;
+  await searchRecommendations(f);
+  const messages = f.sent
+    .slice(before)
+    .filter((m) => m.method === 'sendMessage' && m.body.entities);
+  assert.equal(messages.length, MAX_SHORTLIST_MESSAGES);
+  assert.ok(messages.every((m) => m.body.text.length < 4000));
+  assert.equal(
+    messages.reduce(
+      (n, m) =>
+        n +
+        (m.body.entities?.filter((e) => e.url?.includes('query_place_id'))
+          .length ?? 0),
+      0,
+    ),
+    16,
+  ); // Maps link + shortened attribution link, each candidate.
+  const last = f.sent.findLast((m) =>
+    m.body.reply_markup?.inline_keyboard
+      ?.flat()
+      .some((b) => b.callback_data.endsWith(':b')),
+  );
+  assert.equal(
+    last.body.reply_markup.inline_keyboard
+      .flat()
+      .filter((b) => b.callback_data.endsWith(':s')).length,
+    8,
+  );
+  const deletedBefore = f.sent.filter(
+    (m) => m.method === 'deleteMessage',
+  ).length;
+  await f.interactions.callback(recommendationButton(f, 'brands'));
+  assert.equal(
+    f.sent.filter((m) => m.method === 'deleteMessage').length - deletedBefore,
+    MAX_SHORTLIST_CONTINUATIONS,
+  );
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).status,
+    'awaiting_brands',
+  );
+});
+test('related lookup is user initiated without possibleChain; new locations remain potential, unrelated/wrong-city rows excluded', async () => {
+  const queries = [],
+    events = [];
+  let details = 0;
+  const seed = {
+    id: 'related-seed',
+    displayName: { text: 'Cedar Gallery' },
+    location: { latitude: 1, longitude: 2 },
+    types: ['museum'],
+    formattedAddress: '20 Road, Vesper',
+    addressComponents: [{ longText: 'Vesper', types: ['locality'] }],
+  };
+  const poi = new GooglePlacesPoi(
+    async () => googleToken,
+    googleProject,
+    async (_url, init) => {
+      if (init.method === 'GET') {
+        details++;
+        return Response.json(seed);
+      }
+      const q = JSON.parse(init.body).textQuery;
+      queries.push(q);
+      return Response.json({
+        places: q.includes('locations')
+          ? [
+              seed,
+              {
+                ...seed,
+                id: 'related-other',
+                displayName: { text: 'Cedar Gallery (North branch)' },
+              },
+              {
+                ...seed,
+                id: 'unrelated',
+                displayName: { text: 'Maple Gallery' },
+              },
+              {
+                ...seed,
+                id: 'wrong',
+                addressComponents: [
+                  { longText: 'Other City', types: ['locality'] },
+                ],
+              },
+            ]
+          : [seed],
+      });
+    },
+    Date.now,
+    (e) => events.push(e),
+  );
+  const f = await setup({
+    recognition: {
+      mode: 'single_venue',
+      visibleText: ['PRIVATE_SIGN_OCR'],
+      clues: [
+        {
+          name: 'Cedar Gallery',
+          signage: 'Cedar Gallery',
+          aliases: [],
+          category: 'museum',
+          confidence: 1,
+        },
+      ],
+    },
+    verified: noEvidence,
+    poi,
+  });
+  const d = await f.ingest('optional-related');
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(
+    queries.some((q) => q.includes('locations')),
+    false,
+  );
+  await f.interactions.propose(d, 11, 1);
+  const request = recommendationButton(f, 'related');
+  await f.interactions.callback(request);
+  const found = await f.repository.getDiscovery('fixture', d.id);
+  assert.equal(found.status, 'needs_selection');
+  assert.deepEqual(
+    found.candidates.map((c) => c.providerIdentity.id),
+    ['related-seed', 'related-other'],
+  );
+  assert.equal(found.candidates[1].relationship, 'related_chain_location');
+  assert.equal(found.recognition.clues[0].possibleChain, undefined);
+  assert.equal(queries.filter((q) => q.includes('locations')).length, 1);
+  assert.ok(queries.length <= 5);
+  assert.equal(details, 0);
+  assert.match(
+    f.sent
+      .filter((m) => m.body.text)
+      .map((m) => m.body.text)
+      .join('\n'),
+    /Потенциально связанное место/,
+  );
+  assert.equal(await f.interactions.canCallback(request), false);
+  assert.equal(
+    [...f.db.values.keys()].some((p) => p.includes('/places/')),
+    false,
+  );
+  await f.interactions.callback(recommendationButton(f, 'all'));
+  await f.interactions.callback(recommendationButton(f, 'confirm'));
+  assert.equal(details, 0);
+  const related = [...f.db.values.values()].find(
+    (p) =>
+      p.providerIdentity?.id === 'related-other' && p.status === 'confirmed',
+  );
+  assert.equal(
+    related.label,
+    undefined,
+    'tentative branch does not inherit photographed label',
+  );
+});
+test('new opaque recommendation/related callback codes pass webhook projection without conveying names or city', () => {
+  for (const [code, action] of [
+    ['q', 'search'],
+    ['b', 'brands'],
+    ['r', 'related'],
+  ]) {
+    const u = {
+      update_id: 50,
+      callback_query: {
+        id: 'fixture',
+        from: { id: 11, is_bot: false },
+        message: {
+          message_id: 1,
+          date: 1,
+          chat: { id: -100, type: 'supergroup' },
+        },
+        data: `p:${'a'.repeat(32)}:${code}`,
+      },
+    };
+    const projected = projectUpdate(u, policy, 'fixture_bot');
+    assert.equal(projected.action, action);
+    assert.equal(projected.token, 'a'.repeat(32));
+  }
+});
+test('brand search callback resumes after closing-menu failure without repeating Google queries or vision', async () => {
+  let failClose = false;
+  const f = await recommendationsWorkflow(4, {
+    telegramFailure: (method) => {
+      if (failClose && method === 'editMessageReplyMarkup')
+        throw new Error('telegram_request_failed');
+    },
+  });
+  let d = await f.service.updateBrandSelection(f.d, 'all');
+  d = await f.service.searchBrands(d);
+  d = await f.service.correctCity(d, 'Vesper');
+  d = await f.service.requestBrands(d);
+  await f.interactions.propose(d, 11, 1);
+  const callback = recommendationButton(f, 'search');
+  failClose = true;
+  await assert.rejects(
+    f.interactions.callback(callback),
+    /telegram_request_failed/,
+  );
+  const after = f.queries.length;
+  assert.equal(after, 8);
+  assert.equal(await f.interactions.canCallback(callback), true);
+  failClose = false;
+  await f.interactions.callback(callback);
+  assert.equal(f.queries.length, after);
+  assert.equal(f.calls.vision, 1);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', d.id)).status,
+    'needs_selection',
+  );
+  assert.equal(await f.interactions.canCallback(callback), false);
+});
+test('recommendation and optional-chain lifecycle telemetry is fixed, content-free mode/count/outcome data', async () => {
+  const f = await recommendationsWorkflow();
+  const logs = [],
+    old = console.info;
+  console.info = (value) => logs.push(JSON.parse(value));
+  try {
+    const d = await f.ingest('recommendation-telemetry');
+    let selected = await f.service.updateBrandSelection(d, 'all');
+    selected = await f.service.searchBrands(selected);
+    const city = await f.service.correctCity(selected, 'Веспер');
+    await f.interactions.propose(city, 11, 1);
+  } finally {
+    console.info = old;
+  }
+  assert.deepEqual(
+    logs.find((e) => e.event === 'recognition_mode'),
+    { event: 'recognition_mode', mode: 'recommendation_list', identities: 4 },
+  );
+  assert.deepEqual(
+    logs.find((e) => e.event === 'recommendation_selection'),
+    { event: 'recommendation_selection', selectedCount: 4 },
+  );
+  const text = JSON.stringify(logs);
+  for (const privateValue of [
+    ...recommendationNames,
+    'Веспер',
+    'Vesper',
+    'PRIVATE_LIST_UI_USERNAME',
+    'recommendation-0-0',
+    '20 Test Road',
+    googleToken,
+  ])
+    assert.equal(text.includes(privateValue), false);
+});

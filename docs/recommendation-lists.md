@@ -1,0 +1,44 @@
+# Public recommendation screenshots and optional related discovery
+
+Recognition distinguishes two inputs instead of applying one matching heuristic to both:
+
+- `single_venue` (also the default for legacy Recognition): one physical photographed venue, with up to three competing clues and separate bounded storefront `signage`. Existing direct proposals and optional `possibleChain` inference continue unchanged.
+- `recommendation_list`: up to **eight** distinct explicitly named public venues/brands. Each clue has `recommendationEvidence` (`numbered_list`, `caption`, or `editorial`), its original name/native script, aliases, category and confidence. List names are not storefront signage. Usernames, UI labels, unrelated comments, private messages and incidental OCR are excluded by both Vision adapters' shared instructions. Raw `visibleText` never supplies a search identity. The strict list schema rejects missing recommendation evidence, signage-bearing list entries, duplicate identities and oversized lists. If the image contains more than eight recommendations, Vision must set `recommendationsTruncated`; the UI requests a separate fragment for the remainder.
+
+Production observations motivated this separation: a storefront could produce useful signage without optional chain evidence; a four-brand editorial screenshot could collapse into one mixed weak identity. Neither case justifies inventing membership or treating arbitrary OCR as a brand. Vision remains probabilistic: mocked protocol fixtures verify preservation/contract/planning, not visual accuracy on every real image. Manual acceptance should check four separate visible recommendations, native names, and exclusion of social UI/private text.
+
+## Brand choice → locality → independent searches → Place choice
+
+List ingest persists independent Recognition and starts in `awaiting_brands`, without web, Places, Details or Place writes. Telegram shows each recommendation and lets the user toggle identities, clear, and search selected entries. **At most five brands** can be selected per attempt. Select all exists only when the list fits that bound; a longer list requires an explicit subset. No entries are silently selected or discarded. “Изменить выбор брендов” returns to the complete extracted list for a separate attempt, preserving the chosen city. Uncertain extracted names are marked for inspection.
+
+A list search requires the user's explicit city; workspace/vision area hints cannot substitute. City correction normalizes the same accepted user input for every selected brand. Each brand gets **one** full-identity Google Text Search query (native name when supplied), with that city and accepted country constraint. Names are never combined. The entire list attempt uses at most **five requests**, ten processed rows each, with the existing ten-second/8 MiB request bounds. The list consumes its own allocation rather than also executing single-venue web/enriched/chain passes. A repeated enriched call on the same transient provider attempt reuses its result without spending another list budget. Multi-brand no-match/partial failure is not sent into a single-clue Nominatim lookup; single-venue fallback remains unchanged.
+
+Each brand has isolated matching/ranking state and a stable `recognitionClueIndex` back to the independent recommendation. Results from another selected brand cannot authorize that query's candidates or become its chain. Short names retain full exact identity, including explicitly marked branch metadata; weak/partial short token matches cannot authorize unrelated results. Existing meaningful evidence classes apply to longer names. Reliable city/country/comparable house-number contradictions block results. A hard contradiction for a repeated provider ID also blocks that ID across sibling responses. Unknown provider locality stays uncertain human-review evidence; it never changes the explicit user search scope.
+
+An empty/identity-unmatched result or classified transient failure affects that brand only; successful siblings survive. Auth/permission/configuration/parser/adaptation errors remain visible and fail closed. If all brands lack usable results and a transient provider failed, normal retry behavior remains. No successful candidates are fabricated from provider failures.
+
+Aggregation deduplicates **Place IDs**, never similar names. Round-robin allocation gives each successful selected brand its first slot before extra locations; results are then grouped by recommendation. The final bound remains **eight individual Places**. A one-location list still uses explicit Place selection, not automatic confirmation. Branches of one brand and locations from different brands can be selected together. Extra results beyond the displayed eight are not saved; changing the selected subset can give a brand more display slots.
+
+## User-initiated related-location lookup
+
+A meaningful Google single-venue proposal offers “Найти другие / похожие места”, even when Vision omitted `possibleChain`. This action is separate from list brand selection and never manufactures a `possibleChain` value in Recognition. It starts one new bounded resolution attempt using the retained public venue/signage identity and a compatible eligible Google seed. Suitability still requires meaningful bounded brand identity; generic/ambiguous tokens cannot authorize a lookup.
+
+Existing locality safeguards remain: accepted normalization may scope an unknown-provider-locality seed to the user's explicit city; without it, explicit locality must match. With no user city, only reliable and unambiguous structured provider locality can supply scope. Hard conflicts exclude seeds/results; arbitrary formatted address text does not establish verified locality. The new attempt retains the single-venue maximum of **two initial + two enriched + one related Text Search request**, never a chain loop.
+
+New locations are displayed as **potentially related**, with low confidence and independent Maps links. Structured name/category support may suggest a relationship; it does not prove chain membership. Subsequent successful web enrichment cannot promote those new locations into an exact photographed venue merely by repeating the same brand. No Chain record/chainId is created, and a potentially related saved Place does not inherit the photograph's independent label. Checkbox choice and confirmation remain required.
+
+## Persistence, fencing and diagnostics
+
+Discovery stores mode/evidence, selected brand indices, `relatedRequested`, opaque Google identities, independent clue associations and application confidence/relationship metadata. It does not store Google display names, addresses, coordinates, types or credits. The UI uses live rows or ID-based refresh. Canonical Google Places keep the existing identity-only licensing boundary; independently extracted public recommendation names may provide application labels. OSM persistence is unchanged. No feed, projection, migration, backfill or IAM changes are needed.
+
+Brand and Place controls share message/revision/expiry/lease fencing. Brand toggles do no provider reads; Place toggles/all/clear/confirmation do **zero Details requests**. Callback retries resume the applied revision rather than applying a selection twice or repeating a completed search. Returning to brands, changing city, cancelling or confirming closes the old controls and best-effort deletes/invalidates up to three old continuation IDs. Cleanup cannot roll back confirmed Places or poison retries. Grouped eight-candidate renders retain the **four-message maximum** and Telegram text/entity/attribution budgets. Atomic confirmation, deduplication/reuse and `confirmedPlaceId` compatibility are unchanged.
+
+Content-free diagnostics:
+
+- `recognition_mode`: fixed `single_venue`/`recommendation_list` mode and identity count.
+- `recommendation_selection`: selected brand count.
+- `recommendation_brand_search`: ordinal brand slot, allocated query count, eligible/displayed counts and fixed outcome (`results`, `empty_response`, `no_match`, `insufficient_evidence`, `locality_mismatch`, `geographic_conflict`, `transient_failure`). Eligible counts precede the global display bound.
+- `optional_related_discovery`: `offered`, `not_offered`, or `requested` only.
+- Existing locality/related/filter diagnostics retain fixed enums and counts.
+
+No event contains names, city/query/image text, usernames, addresses, coordinates, Place IDs, tokens or upstream bodies. Automated synthetic fixtures cover Latin, Cyrillic and Han identities, short names, independent requests, selection budgets, sibling failures, hard conflicts, branch provenance, retries, eight-Place atomic confirmation/reuse, pagination/cleanup, licensing and privacy. No deploy/live API mutation is part of these changes.

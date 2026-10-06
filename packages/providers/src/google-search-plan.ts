@@ -86,6 +86,25 @@ export function googleSearchPlan(
         source: 'verified',
       };
   }
+  if (r.mode === 'recommendation_list') {
+    const indices = ctx.selectedBrandIndices ?? [];
+    return {
+      clues: indices.flatMap((i) => (r.clues[i] ? [r.clues[i]!] : [])),
+      locality,
+      queries: indices.flatMap((i) => {
+        const c = r.clues[i];
+        return c
+          ? [
+              [c.nativeName || c.name, locality?.name, locality?.countryCode]
+                .filter(Boolean)
+                .join(', ')
+                .slice(0, 800),
+            ]
+          : [];
+      }),
+      unscopedQueryPlanned: false,
+    };
+  }
   const primary = clues[0];
   if (!primary)
     return {

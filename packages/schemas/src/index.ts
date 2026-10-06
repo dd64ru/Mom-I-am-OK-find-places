@@ -2,6 +2,8 @@ import { z } from 'zod';
 export const IdSchema = z.string().regex(/^[A-Za-z0-9_-]{1,128}$/);
 const Timestamp = z.string().datetime();
 export const MAX_CANDIDATES = 8;
+export const MAX_RECOMMENDATIONS = 8;
+export const MAX_SEARCH_BRANDS = 5;
 const RelationshipSchema = z.enum([
   'likely_exact',
   'plausible_exact',
@@ -138,6 +140,8 @@ export const WorkspaceSchema = z
 // Vision never returns authoritative coordinates. This schema is shared by both AI adapters.
 export const RecognitionSchema = z
   .object({
+    mode: z.enum(['single_venue', 'recommendation_list']).optional(),
+    recommendationsTruncated: z.boolean().optional(),
     visibleText: z.array(z.string()).max(100),
     clues: z
       .array(
@@ -147,6 +151,9 @@ export const RecognitionSchema = z
             nativeName: z.string().optional(),
             aliases: z.array(z.string()).max(20),
             category: z.string(),
+            recommendationEvidence: z
+              .enum(['numbered_list', 'caption', 'editorial'])
+              .optional(),
             possibleChain: z.string().min(1).max(100).optional(),
             signage: z
               .string()
@@ -161,7 +168,23 @@ export const RecognitionSchema = z
       )
       .max(10),
   })
-  .strict();
+  .strict()
+  .refine(
+    (r) =>
+      r.mode !== 'recommendation_list' ||
+      (r.clues.length >= 1 &&
+        r.clues.length <= MAX_RECOMMENDATIONS &&
+        r.clues.every((c) => !!c.recommendationEvidence && !c.signage) &&
+        new Set(
+          r.clues.map((c) =>
+            c.name
+              .normalize('NFKC')
+              .toLowerCase()
+              .replace(/[^\p{L}\p{N}]/gu, ''),
+          ),
+        ).size === r.clues.length),
+    'invalid_recommendation_list',
+  );
 export const CandidateSchema = z
   .object({
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),
@@ -273,6 +296,17 @@ export const GeographicContextSchema = z
   .object({
     cityOverride: z.string().min(1).max(200).optional(),
     workspaceAreaHint: z.string().min(1).max(200).optional(),
+    selectedBrandIndices: z
+      .array(
+        z
+          .number()
+          .int()
+          .min(0)
+          .max(MAX_RECOMMENDATIONS - 1),
+      )
+      .max(MAX_SEARCH_BRANDS)
+      .optional(),
+    relatedRequested: z.boolean().optional(),
   })
   .strict();
 export const ResolutionReasonSchema = z.enum([
@@ -349,6 +383,7 @@ export const DiscoverySchema = z
     visionProvider: z.string(),
     status: z.enum([
       'needs_confirmation',
+      'awaiting_brands',
       'needs_selection',
       'awaiting_city',
       'unresolved',
@@ -357,6 +392,11 @@ export const DiscoverySchema = z
       'failed',
     ]),
     failureReason: ProviderFailureReasonSchema.optional(),
+    relatedRequested: z.boolean().optional(),
+    selectedBrandIndices: z
+      .array(z.number().int().nonnegative())
+      .max(MAX_SEARCH_BRANDS)
+      .optional(),
     cityOverride: z.string().min(1).max(200).optional(),
     resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
@@ -389,6 +429,20 @@ export const DiscoverySchema = z
           (c) => c.providerIdentity?.provider === 'google-places',
         )),
     'invalid_selection_state',
+  )
+  .refine(
+    (d) =>
+      (!d.selectedBrandIndices ||
+        (d.recognition.mode === 'recommendation_list' &&
+          new Set(d.selectedBrandIndices).size ===
+            d.selectedBrandIndices.length &&
+          d.selectedBrandIndices.every(
+            (i) => i < d.recognition.clues.length,
+          ))) &&
+      (d.status !== 'awaiting_brands' ||
+        (d.recognition.mode === 'recommendation_list' &&
+          d.candidates.length === 0)),
+    'invalid_brand_selection',
   )
   .refine(
     (d) =>
