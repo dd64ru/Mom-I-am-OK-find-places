@@ -12,6 +12,8 @@ import {
   PlaceSchema,
   ProjectedPlaceSchema,
   mapMetadataFor,
+  recognitionLocality,
+  RECOGNITION_LOCALITY_MIN_CONFIDENCE,
 } from '@places/schemas';
 import { backfillPlaceMapMetadata } from '../scripts/backfill-place-map-metadata.mjs';
 import { projectionEtag } from '../apps/functions/dist/feed.js';
@@ -135,6 +137,113 @@ test('legacy Google Place without mapMetadata parses; mapMetadata is strict, bou
     }).success,
     false,
   );
+});
+
+test('a Recognition city is persisted only when deterministic and unambiguous', () => {
+  const recognition = (clues, mode) => ({
+    visibleText: [],
+    clues,
+    ...(mode ? { mode } : {}),
+  });
+  assert.equal(RECOGNITION_LOCALITY_MIN_CONFIDENCE, 0.85);
+  // Confident single clue: its own areaHint, as written, source recognition.
+  assert.deepEqual(
+    mapMetadataFor(
+      { recognition: recognition([clue('gaga', { areaHint: '  Shanghai ' })]) },
+      {},
+    ).city,
+    { value: 'Shanghai', source: 'recognition' },
+  );
+  // Below the locality threshold selectLocality trusts: no city.
+  assert.equal(
+    recognitionLocality(
+      recognition([
+        clue('Happy Harbour', {
+          areaHint: "Shenzhen, Bao'an",
+          confidence: 0.65,
+        }),
+      ]),
+    ),
+    undefined,
+  );
+  // A list of alternatives is not one locality.
+  for (const hint of [
+    'Shanghai or Hangzhou',
+    'Shanghai / Suzhou',
+    'Шанхай или Ханчжоу',
+    '上海或杭州',
+    'A; B',
+  ]) {
+    assert.equal(
+      recognitionLocality(recognition([clue('x', { areaHint: hint })])),
+      undefined,
+      hint,
+    );
+  }
+  // Single venue: other confident readings of the same venue must agree (case/space-insensitive).
+  const agreeing = recognition([
+    clue('a', { areaHint: 'Shanghai' }),
+    clue('b', { areaHint: ' shanghai ' }),
+    clue('c'),
+  ]);
+  assert.equal(recognitionLocality(agreeing, 1), 'shanghai');
+  const conflicting = recognition([
+    clue('a', { areaHint: 'Shanghai' }),
+    clue('b', { areaHint: 'Hangzhou' }),
+  ]);
+  assert.equal(recognitionLocality(conflicting, 0), undefined);
+  assert.equal(
+    mapMetadataFor({ recognition: conflicting }, { recognitionClueIndex: 0 })
+      .city,
+    undefined,
+  );
+  // A low-confidence dissent does not make it ambiguous.
+  const weakDissent = recognition([
+    clue('a', { areaHint: 'Shanghai' }),
+    clue('b', { areaHint: 'Hangzhou', confidence: 0.5 }),
+  ]);
+  assert.equal(recognitionLocality(weakDissent, 0), 'Shanghai');
+  // Recommendation list: different venues, each confident clue's own hint is its own city.
+  const list = recognition(
+    [
+      clue('a', {
+        areaHint: 'Shanghai',
+        recommendationEvidence: 'numbered_list',
+      }),
+      clue('b', {
+        areaHint: 'Hangzhou',
+        recommendationEvidence: 'numbered_list',
+      }),
+    ],
+    'recommendation_list',
+  );
+  assert.equal(recognitionLocality(list, 0), 'Shanghai');
+  assert.equal(recognitionLocality(list, 1), 'Hangzhou');
+  // Unbound among several clues: not deterministic.
+  assert.equal(recognitionLocality(list), undefined);
+  // The explicit user city wins over a Recognition city when both exist.
+  assert.deepEqual(
+    mapMetadataFor(
+      {
+        recognition: recognition([clue('gaga', { areaHint: 'Shanghai' })]),
+        cityOverride: 'Hangzhou',
+      },
+      {},
+    ).city,
+    { value: 'Hangzhou', source: 'user' },
+  );
+  // A Google candidate address city is never read, even if a caller passed one.
+  const metadata = mapMetadataFor(
+    { recognition: recognition([clue('gaga', { confidence: 0.9 })]) },
+    {
+      recognitionClueIndex: 0,
+      address: { city: 'Google City' },
+      city: 'Google City',
+      formattedAddress: '1 Google Road, Google City',
+    },
+  );
+  assert.equal(metadata.city, undefined);
+  assert.ok(!JSON.stringify(metadata).includes('Google'));
 });
 
 test('mapMetadataFor derives city only from the user override or the bound clue, category only from Recognition', () => {

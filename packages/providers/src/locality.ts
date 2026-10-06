@@ -1,8 +1,9 @@
-import type {
-  Recognition,
-  Verification,
-  GeographicContext,
-  PoiResolution,
+import {
+  RECOGNITION_LOCALITY_MIN_CONFIDENCE,
+  type Recognition,
+  type Verification,
+  type GeographicContext,
+  type PoiResolution,
 } from '@places/schemas';
 export const normalizedName = (value: string) =>
   value.normalize('NFKC').toLowerCase().trim().replace(/\s+/gu, ' ');
@@ -78,7 +79,9 @@ export function selectLocality(
     if (localities.size > 1 || localities.has(''))
       return { status: 'city_unknown', reason: 'ambiguous_locality' };
   }
-  const vision = recognition.clues.filter((c) => c.confidence >= 0.85);
+  const vision = recognition.clues.filter(
+    (c) => c.confidence >= RECOGNITION_LOCALITY_MIN_CONFIDENCE,
+  );
   const clue =
     verified[0] ??
     (vision.length === 1 || allowMultiple ? vision[0] : undefined);

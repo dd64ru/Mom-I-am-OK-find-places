@@ -593,11 +593,53 @@ const metadataValue = (text: string | undefined, max: number) => {
   const value = text === undefined ? '' : singleLine(text);
   return value && value.length <= max ? value : undefined;
 };
+// The confidence at and above which a Recognition clue's areaHint is trusted as a locality
+// (selectLocality's `vision` locality uses the same threshold).
+export const RECOGNITION_LOCALITY_MIN_CONFIDENCE = 0.85;
+// An areaHint naming alternatives ("Shanghai or Hangzhou", "Shanghai / Suzhou") is not one locality.
+const ALTERNATIVE_LOCALITIES = /[;|/\\]|\s(?:or|или)\s|或/iu;
+const sameLocality = (a: string, b: string) =>
+  a.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim() ===
+  b.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim();
+
+// A deterministic, unambiguous Recognition-derived locality for the bound clue, or undefined:
+//  - the clue is bound deterministically (recognitionClue: explicit index or the only clue);
+//  - its confidence reaches RECOGNITION_LOCALITY_MIN_CONFIDENCE;
+//  - its areaHint is one single-line locality, not a list of alternatives;
+//  - in a single-venue Recognition (clues are alternative readings of ONE venue) every other
+//    confident clue that carries an areaHint names the same locality; a recommendation list's
+//    clues are different venues, so each confident clue's own hint stands for its own venue.
+// The value is the Recognition's own text, kept as written (never reshaped from an address).
+export function recognitionLocality(
+  recognition: Recognition,
+  index?: number,
+): string | undefined {
+  const clue = recognitionClue(recognition, index);
+  if (!clue || clue.confidence < RECOGNITION_LOCALITY_MIN_CONFIDENCE) return;
+  const hint = metadataValue(clue.areaHint, MAX_MAP_CITY);
+  if (!hint || ALTERNATIVE_LOCALITIES.test(hint)) return;
+  if (recognition.mode !== 'recommendation_list') {
+    const conflicting = recognition.clues.some((other) => {
+      if (
+        other === clue ||
+        other.confidence < RECOGNITION_LOCALITY_MIN_CONFIDENCE
+      )
+        return false;
+      const otherHint = metadataValue(other.areaHint, MAX_MAP_CITY);
+      return otherHint !== undefined && !sameLocality(otherHint, hint);
+    });
+    if (conflicting) return;
+  }
+  return hint;
+}
+
 // Map metadata for one confirmed candidate, from application-owned inputs only. The candidate
 // is the durable stored form (a Google stored candidate has no provider display fields), so
-// Google address/city/types are structurally unreachable here.
-//   city:     Discovery.cityOverride (user) first; otherwise the bound clue's own areaHint
-//             (recognition), and only for the photographed venue itself, never a related branch.
+// Google address/city/types are structurally unreachable here; this function never reads a
+// candidate address, a Verification candidate city or any provider response.
+//   city:     Discovery.cityOverride (user) first, when both exist; otherwise the bound clue's
+//             deterministic, unambiguous Recognition locality (recognitionLocality,
+//             `recognition`), and only for the photographed venue itself, never a related branch.
 //   category: the bound clue's own category (recognition); a related branch of the same
 //             deterministic clue may inherit it, because it describes the same brand.
 export function mapMetadataFor(
@@ -615,7 +657,10 @@ export function mapMetadataFor(
   const userCity = metadataValue(discovery.cityOverride, MAX_MAP_CITY);
   const recognitionCity = related
     ? undefined
-    : metadataValue(clue?.areaHint, MAX_MAP_CITY);
+    : recognitionLocality(
+        discovery.recognition,
+        candidate.recognitionClueIndex,
+      );
   const category = metadataValue(clue?.category, MAX_MAP_CATEGORY);
   const parsed = MapMetadataSchema.safeParse({
     ...(userCity
