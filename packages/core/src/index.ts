@@ -171,11 +171,12 @@ export class DiscoveryService {
             if (
               parsed.success &&
               parsed.data &&
-              parsed.data.confidence >= 0.9 &&
               parsed.data.input === context.cityOverride
             ) {
-              intent = parsed.data;
-              outcome = 'ok';
+              if (parsed.data.confidence >= 0.9) {
+                intent = parsed.data;
+                outcome = 'ok';
+              }
             } else outcome = 'invalid';
           }
         } catch {
@@ -206,26 +207,71 @@ export class DiscoveryService {
       ) {
         resolution = first;
       } else {
-        let verified = VerificationSchema.parse(
-          await this.verification.search.verify(discovery.recognition, context),
-        );
-        if (!verified.localityIntent && intent)
-          verified = { ...verified, localityIntent: intent };
-        const enriched = adapt(
-          await poi.resolve(discovery.recognition, verified, context),
-        );
-        resolution =
-          first?.status === 'alternatives' &&
-          enriched.status === 'unresolved' &&
-          ['no_match', 'insufficient_evidence', 'no_place_evidence'].includes(
-            enriched.reason,
-          )
+        const reviewable =
+          first?.status === 'alternatives' || first?.status === 'city_unknown'
             ? first
-            : first?.status === 'city_unknown' &&
-                enriched.status === 'unresolved' &&
-                ['no_match', 'insufficient_evidence'].includes(enriched.reason)
-              ? first
-              : enriched;
+            : undefined;
+        const degraded = (
+          reason: 'verification_failed' | 'verification_unavailable',
+        ) => {
+          try {
+            console.info(
+              JSON.stringify({
+                event: 'optional_web_enrichment',
+                outcome: 'degraded',
+                reason,
+                result: reviewable!.status,
+              }),
+            );
+          } catch {
+            /* best effort */
+          }
+        };
+        let raw: Verification | undefined;
+        let failed = false;
+        // Only the optional web call is recoverable. Schema adaptation and Google
+        // failures below keep their existing fail-closed/retry behavior.
+        try {
+          raw = await this.verification.search.verify(
+            discovery.recognition,
+            context,
+          );
+        } catch (error) {
+          if (!reviewable) throw error;
+          failed = true;
+          degraded('verification_failed');
+        }
+        if (failed) resolution = reviewable!;
+        else {
+          const parsed = VerificationSchema.parse(raw);
+          if (reviewable && parsed.status === 'unavailable') {
+            degraded('verification_unavailable');
+            resolution = reviewable;
+          } else {
+            let verified = parsed;
+            if (!verified.localityIntent && intent)
+              verified = { ...verified, localityIntent: intent };
+            const enriched = adapt(
+              await poi.resolve(discovery.recognition, verified, context),
+            );
+            resolution =
+              first?.status === 'alternatives' &&
+              enriched.status === 'unresolved' &&
+              [
+                'no_match',
+                'insufficient_evidence',
+                'no_place_evidence',
+              ].includes(enriched.reason)
+                ? first
+                : first?.status === 'city_unknown' &&
+                    enriched.status === 'unresolved' &&
+                    ['no_match', 'insufficient_evidence'].includes(
+                      enriched.reason,
+                    )
+                  ? first
+                  : enriched;
+          }
+        }
       }
     } catch (error) {
       return this.recordFailure(discovery, error);

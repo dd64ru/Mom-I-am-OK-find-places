@@ -13,12 +13,26 @@ import { ingressId } from './ingress.js';
 import type { TelegramTransport } from './telegram-api.js';
 const LIFETIME = 24 * 60 * 60 * 1000,
   CITY_LIFETIME = 10 * 60 * 1000;
+export const MAX_SHORTLIST_CONTINUATIONS = 3;
+export const MAX_SHORTLIST_MESSAGES = MAX_SHORTLIST_CONTINUATIONS + 1;
+const CREDITS_PER_CANDIDATE = 3;
+interface TextEntity {
+  type: 'text_link';
+  offset: number;
+  length: number;
+  url: string;
+}
+interface ShortlistText {
+  text: string;
+  entities: TextEntity[];
+}
 interface Interaction {
   discoveryId: string;
   revision: number;
   expiresAt: number;
   phase: 'active' | 'processing' | 'done' | 'prompt';
   messageId?: number;
+  continuationMessageIds?: number[];
   userId?: number;
   replyId?: number;
   city?: string;
@@ -37,7 +51,10 @@ export class TelegramInteractions {
     private readonly chat: number,
     private readonly now = Date.now,
   ) {}
-  private token(discovery: Discovery, kind = 'proposal') {
+  private token(
+    discovery: Pick<Discovery, 'id' | 'revision'>,
+    kind = 'proposal',
+  ) {
     return createHash('sha256')
       .update(`${kind}:${this.workspace}:${discovery.id}:${discovery.revision}`)
       .digest('hex')
@@ -59,6 +76,55 @@ export class TelegramInteractions {
         message_id: messageId,
         reply_markup: { inline_keyboard: [] },
       });
+  }
+  private async cleanupContinuations(state: Interaction) {
+    // Tokens carry the original IDs through checkbox revisions. Legacy markers
+    // can be read by bounded index; neither path needs provider content.
+    const ids = new Set<number>();
+    try {
+      if (state.continuationMessageIds) {
+        for (const id of state.continuationMessageIds.slice(
+          0,
+          MAX_SHORTLIST_CONTINUATIONS,
+        ))
+          ids.add(id);
+      } else {
+        for (let page = 0; page < MAX_SHORTLIST_CONTINUATIONS; page++) {
+          const path = this.path(
+            this.token(
+              { id: state.discoveryId, revision: state.revision },
+              `multi-text-${page}`,
+            ),
+          );
+          const id = await this.docs.change(path, (raw) => ({
+            result: raw?.messageId,
+          }));
+          if (typeof id === 'number') ids.add(id);
+        }
+      }
+    } catch {
+      /* Cleanup metadata is best effort, too. */
+    }
+    for (const messageId of ids) {
+      try {
+        await this.api.call('deleteMessage', {
+          chat_id: this.chat,
+          message_id: messageId,
+        });
+      } catch {
+        try {
+          await this.api.call('editMessageText', {
+            chat_id: this.chat,
+            message_id: messageId,
+            text: 'Этот список больше не активен. Используй текущую карточку места.',
+            entities: [],
+            reply_markup: { inline_keyboard: [] },
+          });
+        } catch {
+          /* An unavailable/expired Telegram message must not poison confirmation. */
+        }
+      }
+    }
   }
   async propose(
     discovery: DiscoveryView,
@@ -193,14 +259,19 @@ export class TelegramInteractions {
     statusId: string,
     editMessageId?: number,
     controlsOnly = false,
+    continuationMessageIds: number[] = [],
   ) {
+    continuationMessageIds = continuationMessageIds.slice(
+      0,
+      MAX_SHORTLIST_CONTINUATIONS,
+    );
     const rootToken = this.token(discovery, 'multi');
     const existing = await this.docs.change(this.path(rootToken), (raw) => ({
       result: raw?.messageId,
     }));
     if (existing && !editMessageId) return;
     const selected = new Set(discovery.selectedCandidateIndices ?? []);
-    const cards: string[] = [],
+    const cards: ShortlistText[] = [],
       overview: string[] = [],
       keyboard: { text: string; callback_data: string }[][] = [];
     const tokens = [rootToken];
@@ -230,9 +301,31 @@ export class TelegramInteractions {
         overview.push(
           `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
         );
-        cards.push(
-          `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${(candidate.address.city ? compact(candidate.address.city, 40) : undefined) ?? 'не указан'}\n${compact(candidate.address.formatted, 80)}\n${link}\nИсточник: Google Maps${(candidate.attributions ?? []).map((a) => '\n' + renderAttribution(a, true)).join('')}`,
-        );
+        const card: ShortlistText = {
+          text: `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
+          entities: [],
+        };
+        appendLink(card, 'Google Maps', link);
+        const credits = candidate.attributions ?? [];
+        for (const credit of credits.slice(0, CREDITS_PER_CANDIDATE)) {
+          card.text += '\n';
+          appendLink(
+            card,
+            compact(
+              credit.provider.replace(/[\u0000-\u001f\u007f]/gu, ' '),
+              160,
+            ),
+            safeAttributionUri(credit.providerUri),
+          );
+        }
+        if (
+          credits.length > CREDITS_PER_CANDIDATE ||
+          credits.some((c) => c.provider.length > 160)
+        ) {
+          card.text += `\nАтрибуция сокращена (${credits.length} источников); подробнее: `;
+          appendLink(card, 'Google Maps', link);
+        }
+        cards.push(card);
       }
       keyboard.push([
         {
@@ -268,24 +361,29 @@ export class TelegramInteractions {
     } else {
       // Long credits use numbered continuation messages belonging to this menu.
       // Only the final message has controls; no provider text is persisted.
-      const pages = telegramPages(`${intro}\n\n${cards.join('\n\n')}`);
+      const pages = shortlistPages(intro, cards);
       const continuations = pages.length > 1 ? pages : [];
       for (let page = 0; page < continuations.length; page++) {
         const path = this.path(this.token(discovery, `multi-text-${page}`));
         const sentAlready = await this.docs.change(path, (raw) => ({
           result: raw?.messageId,
         }));
-        if (sentAlready) continue;
+        if (typeof sentAlready === 'number') {
+          continuationMessageIds.push(sentAlready);
+          continue;
+        }
         const sent = await this.api.call('sendMessage', {
           chat_id: this.chat,
           reply_parameters: { message_id: replyTo },
-          text: continuations[page],
+          text: continuations[page]!.text,
+          entities: continuations[page]!.entities,
           link_preview_options: { is_disabled: true },
         });
         await this.docs.change(path, (raw) => ({
           value: raw ?? { messageId: sent.message_id },
           result: undefined,
         }));
+        continuationMessageIds.push(Number(sent.message_id));
       }
       const sent = await this.api.call(
         editMessageId ? 'editMessageText' : 'sendMessage',
@@ -297,7 +395,8 @@ export class TelegramInteractions {
           text:
             pages.length > 1
               ? `${intro}\n\n${overview.join('\n')}\n\nАдреса, Maps-ссылки и источники — в сообщениях выше.`
-              : pages[0],
+              : pages[0]!.text,
+          entities: pages.length > 1 ? [] : pages[0]!.entities,
           link_preview_options: { is_disabled: true },
           reply_markup: { inline_keyboard: keyboard },
         },
@@ -312,6 +411,7 @@ export class TelegramInteractions {
           expiresAt: this.now() + LIFETIME,
           phase: 'active',
           messageId,
+          ...(continuationMessageIds.length ? { continuationMessageIds } : {}),
           ...(i ? { selectionIndex: i - 1 } : {}),
         },
         result: undefined,
@@ -591,6 +691,7 @@ export class TelegramInteractions {
             discovery.id,
             state.messageId,
             true,
+            state.continuationMessageIds,
           );
         }
       } else if (callback.action === 'city') {
@@ -604,6 +705,7 @@ export class TelegramInteractions {
           await this.done(callback.token, owner);
           return;
         }
+        await this.cleanupContinuations(state);
         await this.close(state.messageId);
         await this.prompt(discovery, callback.userId, callback.messageId);
       } else {
@@ -624,6 +726,7 @@ export class TelegramInteractions {
               reusedCount: 'reusedCount' in result ? result.reusedCount : 0,
             }),
           );
+          await this.cleanupContinuations(state);
           await this.close(state.messageId);
           await this.api.call('sendMessage', {
             chat_id: this.chat,
@@ -775,36 +878,67 @@ export function renderAttribution(
 
 // UTF-16 budgets are conservative for Telegram, including non-BMP text.
 function compact(value: string, budget: number) {
+  value = value
+    .replace(/[\u0000-\u001f\u007f]/gu, ' ')
+    .replace(
+      /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g,
+      '\uFFFD',
+    );
   if (value.length <= budget) return value;
   let end = budget - 1;
   if (/[\uD800-\uDBFF]/u.test(value[end - 1] ?? '')) end--;
   return value.slice(0, end) + '…';
 }
-function telegramPages(text: string): string[] {
-  const budget = 3800; // Reserve space for the continuation label.
-  const pages: string[] = [];
-  let page = '';
-  for (let line of text.split('\n')) {
-    while (line.length > budget) {
-      if (page) {
-        pages.push(page);
-        page = '';
-      }
-      let end = budget;
-      if (/[\uD800-\uDBFF]/u.test(line[end - 1] ?? '')) end--;
-      pages.push(line.slice(0, end));
-      line = line.slice(end);
-    }
-    if (page.length + line.length + 1 > budget) {
-      pages.push(page);
-      page = '';
-    }
-    page += (page ? '\n' : '') + line;
+function safeAttributionUri(value?: string): string | undefined {
+  if (!value || value.length >= 1500) return;
+  try {
+    const url = new URL(value ?? '');
+    if (
+      ['http:', 'https:'].includes(url.protocol) &&
+      !url.username &&
+      !url.password &&
+      url.href.length < 1500
+    )
+      return url.href;
+  } catch {
+    /* Provider URI validity and safe display are separate. */
   }
-  if (page) pages.push(page);
-  return pages.length === 1
-    ? pages
-    : pages.map(
-        (p, i) => `Варианты и источники (${i + 1}/${pages.length})\n${p}`,
-      );
+}
+function appendLink(target: ShortlistText, label: string, url?: string) {
+  if (url)
+    target.entities.push({
+      type: 'text_link',
+      offset: target.text.length,
+      length: label.length,
+      url,
+    });
+  target.text += label;
+}
+function combineText(prefix: string, cards: ShortlistText[]): ShortlistText {
+  const result: ShortlistText = { text: prefix, entities: [] };
+  for (const card of cards) {
+    result.text += '\n\n';
+    const offset = result.text.length;
+    result.entities.push(
+      ...card.entities.map((e) => ({ ...e, offset: e.offset + offset })),
+    );
+    result.text += card.text;
+  }
+  return result;
+}
+function shortlistPages(
+  intro: string,
+  cards: ShortlistText[],
+): ShortlistText[] {
+  const combined = combineText(intro, cards);
+  if (combined.text.length <= 3800) return [combined];
+  // Each card has fixed field/credit budgets (< 1000 UTF-16 units). Three
+  // cards per page and the eight-candidate domain bound mean at most 3 pages.
+  const pages: ShortlistText[] = [];
+  for (let page = 0; page < MAX_SHORTLIST_CONTINUATIONS; page++) {
+    const group = cards.slice(page * 3, page * 3 + 3);
+    if (!group.length) break;
+    pages.push(combineText(`Варианты и источники (${page + 1})`, group));
+  }
+  return pages;
 }

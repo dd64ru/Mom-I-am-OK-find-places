@@ -402,3 +402,28 @@ test('Discovery invariants reject failed confirmations, duplicate/mismatched IDs
       false,
     );
 });
+
+test('production low-confidence locality contract returns undefined, matching unavailable service diagnostics', async () => {
+  const original = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => {
+      const output = JSON.stringify({
+        canonicalName: 'Vesper',
+        aliases: [],
+        confidence: 0.3,
+      });
+      return new Response(
+        `data: ${JSON.stringify({ type: 'response.output_text.delta', delta: output })}\n\ndata: {"type":"response.completed"}\n\n`,
+      );
+    };
+    const search = new OpenAiSearch(
+      { accessToken: async () => 'fixture-token' },
+      'fixture-model',
+      'low',
+      async () => {},
+    );
+    assert.equal(await search.normalizeLocality('Веспер'), undefined);
+  } finally {
+    globalThis.fetch = original;
+  }
+});

@@ -26,7 +26,11 @@ import {
   projectUpdate,
   handleWebhook,
 } from '../apps/functions/dist/webhook.js';
-import { TelegramInteractions } from '../apps/functions/dist/interactions.js';
+import {
+  TelegramInteractions,
+  MAX_SHORTLIST_MESSAGES,
+  MAX_SHORTLIST_CONTINUATIONS,
+} from '../apps/functions/dist/interactions.js';
 import { TelegramApi } from '../apps/functions/dist/telegram-api.js';
 import { Ingress, ingressId } from '../apps/functions/dist/ingress.js';
 import { ProcessingStatus } from '../apps/functions/dist/processing-status.js';
@@ -3041,7 +3045,9 @@ async function shortlistWorkflow(count = 3, transform = (row) => row) {
     requests = [];
   let refreshes = 0,
     failRefresh = false,
-    failMarkup = false;
+    failMarkup = false,
+    cleanupFailure = false;
+  const cleanupAttempts = [];
   const poi = new GooglePlacesPoi(
     async () => googleToken,
     googleProject,
@@ -3061,6 +3067,14 @@ async function shortlistWorkflow(count = 3, transform = (row) => row) {
     telegramFailure: (method) => {
       if (failMarkup && method === 'editMessageReplyMarkup')
         throw new Error('telegram_request_failed');
+      if (['deleteMessage', 'editMessageText'].includes(method)) {
+        cleanupAttempts.push(method);
+        if (
+          cleanupFailure === true ||
+          (cleanupFailure === 'delete' && method === 'deleteMessage')
+        )
+          throw new Error('PRIVATE_CLEANUP_FAILURE');
+      }
     },
     recognition: {
       visibleText: ['PRIVATE_USER_TEXT'],
@@ -3084,6 +3098,10 @@ async function shortlistWorkflow(count = 3, transform = (row) => row) {
     events,
     requests,
     refreshes: () => refreshes,
+    cleanupAttempts,
+    setCleanupFailure: (value) => {
+      cleanupFailure = value;
+    },
     setMarkupFailure: (value) => {
       failMarkup = value;
     },
@@ -3108,7 +3126,7 @@ test('one coherent multi-select retains all candidates and atomically confirms s
   for (const row of f.rows) {
     assert.ok(card.text.includes(row.displayName.text));
     assert.ok(card.text.includes(row.formattedAddress));
-    assert.ok(card.text.includes(row.id));
+    assert.ok(card.entities.some((e) => e.url.includes(row.id)));
   }
   assert.equal(
     f.sent.filter((m) => m.body.reply_markup?.inline_keyboard).length,
@@ -3382,7 +3400,7 @@ for (const [kind, normalizeLocality, expected] of [
       aliases: [],
       confidence: 0.4,
     }),
-    'invalid',
+    'unavailable',
   ],
   [
     'invalid binding',
@@ -3525,7 +3543,7 @@ test('maximum shortlist with long non-BMP names/addresses/credits has bounded co
   const texts = f.sent
     .filter((m) => m.method === 'sendMessage')
     .map((m) => m.body.text);
-  assert.ok(texts.length > 1);
+  assert.equal(texts.length, MAX_SHORTLIST_MESSAGES);
   for (const text of texts) {
     assert.ok(text.length <= 4000, text.length);
     assert.equal(text.isWellFormed(), true);
@@ -3536,9 +3554,10 @@ test('maximum shortlist with long non-BMP names/addresses/credits has bounded co
     const maps = f.d.candidates
       .find((c) => c.providerIdentity.id === row.id)
       .references.find((r) => r.provider === 'google-places').url;
-    assert.ok(texts.some((text) => text.includes(maps)));
+    const entities = f.sent.flatMap((m) => m.body.entities ?? []);
+    assert.ok(entities.some((e) => e.url === maps));
     for (const credit of row.attributions)
-      assert.ok(combined.includes(credit.providerUri));
+      assert.ok(entities.some((e) => e.url === credit.providerUri));
   }
   const buttons = f.sent.at(-1).body.reply_markup.inline_keyboard.flat();
   assert.equal(buttons.filter((b) => b.callback_data.endsWith(':s')).length, 8);
@@ -3586,3 +3605,298 @@ test('confirmed and cancelled Discoveries ignore stale selection state and callb
     );
   }
 });
+
+function pathologicalRow(row) {
+  return {
+    ...row,
+    displayName: { text: row.displayName.text + '🧭'.repeat(10000) },
+    formattedAddress: 'Huge address 🗺️'.repeat(10000),
+    attributions: Array.from({ length: 80 }, (_, i) => ({
+      provider: `Provider ${i} ` + '🧭'.repeat(1000),
+      providerUri: `https://example.org/credits/${i}`,
+    })),
+  };
+}
+test('pathological schema-valid display has exactly three continuations plus one control message and all eight selectable Maps identities', async () => {
+  const f = await shortlistWorkflow(8, pathologicalRow);
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', f.d.id),
+    11,
+    1,
+  );
+  const messages = f.sent.filter((m) => m.method === 'sendMessage');
+  assert.equal(MAX_SHORTLIST_MESSAGES, 4);
+  assert.equal(messages.length, MAX_SHORTLIST_MESSAGES);
+  for (const message of messages) {
+    assert.ok(message.body.text.length < 4000);
+    assert.equal(message.body.text.isWellFormed(), true);
+    for (const entity of message.body.entities ?? []) {
+      assert.equal(entity.type, 'text_link');
+      assert.ok(entity.offset >= 0 && entity.length > 0);
+      assert.ok(entity.offset + entity.length <= message.body.text.length);
+      assert.equal(
+        message.body.text
+          .slice(entity.offset, entity.offset + entity.length)
+          .isWellFormed(),
+        true,
+      );
+    }
+  }
+  const links = messages
+    .flatMap((m) => m.body.entities ?? [])
+    .map((e) => e.url);
+  for (const candidate of f.d.candidates)
+    assert.ok(
+      links.includes(
+        candidate.references.find((r) => r.provider === 'google-places').url,
+      ),
+    );
+  assert.equal(
+    messages
+      .at(-1)
+      .body.reply_markup.inline_keyboard.flat()
+      .filter((b) => b.callback_data.endsWith(':s')).length,
+    8,
+  );
+  assert.ok(
+    messages
+      .slice(0, -1)
+      .every(
+        (m) =>
+          /Источник: Google Maps/u.test(m.body.text) &&
+          /Атрибуция сокращена/u.test(m.body.text),
+      ),
+  );
+  const sentBefore = messages.length;
+  await f.interactions.propose(
+    await f.repository.getDiscovery('fixture', f.d.id),
+    11,
+    1,
+  );
+  assert.equal(
+    f.sent.filter((m) => m.method === 'sendMessage').length,
+    sentBefore,
+  );
+  for (const action of ['select', 'all', 'clear', 'all', 'confirm']) {
+    const before = f.refreshes();
+    await f.interactions.callback(multiButton(f, action));
+    assert.equal(f.refreshes(), before);
+  }
+  assert.equal(f.refreshes(), 8);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).confirmedPlaceIds
+      .length,
+    8,
+  );
+  assert.doesNotMatch(
+    JSON.stringify([...f.db.values.values(), ...f.docs.values.values()]),
+    /Huge address|Provider 0|🧭|attributions/u,
+  );
+});
+
+for (const action of ['city', 'cancel', 'confirm'])
+  test(`${action} cleans the original bounded continuation IDs after selection revision changes`, async () => {
+    const f = await shortlistWorkflow(8, pathologicalRow);
+    await f.interactions.propose(f.d, 11, 1);
+    const ids = f.sent
+      .filter((m) => m.method === 'sendMessage')
+      .slice(0, MAX_SHORTLIST_CONTINUATIONS)
+      .map((m) => f.sent.indexOf(m) + 101);
+    await f.interactions.callback(multiButton(f, 'all'));
+    await f.interactions.callback(multiButton(f, action));
+    assert.deepEqual(
+      f.sent
+        .filter((m) => m.method === 'deleteMessage')
+        .map((m) => m.body.message_id),
+      ids,
+    );
+    assert.equal(
+      f.sent.filter((m) => m.method === 'deleteMessage').length,
+      MAX_SHORTLIST_CONTINUATIONS,
+    );
+    const terminal = await f.repository.getDiscovery('fixture', f.d.id);
+    assert.equal(
+      terminal.status,
+      { city: 'awaiting_city', cancel: 'cancelled', confirm: 'confirmed' }[
+        action
+      ],
+    );
+    assert.equal(f.refreshes(), 0);
+  });
+
+for (const failure of ['delete', true])
+  test(`continuation cleanup ${failure === true ? 'total failure' : 'delete failure'} never rolls back confirmation or causes poison retry`, async () => {
+    const f = await shortlistWorkflow(8, pathologicalRow);
+    await f.interactions.propose(f.d, 11, 1);
+    await f.interactions.callback(multiButton(f, 'all'));
+    const confirm = multiButton(f, 'confirm');
+    f.setCleanupFailure(failure);
+    await f.interactions.callback(confirm);
+    assert.equal(
+      (await f.repository.getDiscovery('fixture', f.d.id)).confirmedPlaceIds
+        .length,
+      8,
+    );
+    assert.equal(
+      [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
+      8,
+    );
+    assert.deepEqual(
+      f.cleanupAttempts,
+      Array.from({ length: MAX_SHORTLIST_CONTINUATIONS }, () => [
+        'deleteMessage',
+        'editMessageText',
+      ]).flat(),
+    );
+    if (failure === 'delete') {
+      const edits = f.sent.filter((m) => m.method === 'editMessageText');
+      assert.equal(edits.length, MAX_SHORTLIST_CONTINUATIONS);
+      assert.ok(edits.every((m) => /больше не активен/u.test(m.body.text)));
+    }
+    const calls = f.cleanupAttempts.length;
+    await f.interactions.callback(confirm);
+    assert.equal(f.cleanupAttempts.length, calls);
+    assert.equal(f.refreshes(), 0);
+  });
+
+async function enrichmentFixture(firstKind, verify, enriched) {
+  const f = await shortlistWorkflow();
+  const first =
+    firstKind === 'alternatives'
+      ? { status: 'alternatives', candidates: f.d.liveAlternatives.slice(0, 2) }
+      : firstKind === 'city_unknown'
+        ? { status: 'city_unknown', reason: 'missing_locality' }
+        : { status: 'unresolved', reason: 'no_match' };
+  let resolved = 0;
+  const service = new DiscoveryService(
+    f.repository,
+    {
+      name: 'fixture',
+      recognize: async () => ({
+        provider: 'fixture',
+        recognition: f.d.recognition,
+      }),
+    },
+    {
+      search: { verify },
+      poi: {
+        firstPass: async () => first,
+        resolve: async () => {
+          resolved++;
+          return enriched
+            ? await enriched(f.d.liveAlternatives)
+            : assert.fail('optional web failure must not query Google again');
+        },
+      },
+    },
+  );
+  return {
+    ...f,
+    first,
+    service,
+    resolved: () => resolved,
+    ingestEnrichment: () =>
+      service.ingest({
+        id: 'enrichment-review',
+        workspaceId: 'fixture',
+        images: [{ mimeType: 'image/png', bytes: new Uint8Array([1]) }],
+        source: { provider: 'fixture', observedAt: time },
+      }),
+  };
+}
+for (const firstKind of ['alternatives', 'city_unknown'])
+  for (const web of ['throws', 'unavailable'])
+    test(`${firstKind} survives optional web ${web} with content-free degraded diagnostic`, async () => {
+      const f = await enrichmentFixture(firstKind, async () => {
+        if (web === 'throws')
+          throw new Error('PRIVATE_VENUE_CITY_QUERY_PROVIDER_OUTPUT');
+        return { status: 'unavailable', candidates: [], references: [] };
+      });
+      const logs = [],
+        old = console.info;
+      console.info = (value) => logs.push(value);
+      let d;
+      try {
+        d = await f.ingestEnrichment();
+      } finally {
+        console.info = old;
+      }
+      assert.equal(
+        d.status,
+        firstKind === 'alternatives' ? 'needs_selection' : 'awaiting_city',
+      );
+      if (firstKind === 'alternatives')
+        assert.deepEqual(d.liveAlternatives, f.first.candidates);
+      else assert.equal(d.resolutionReason, f.first.reason);
+      assert.equal(f.resolved(), 0);
+      assert.deepEqual(logs.map(JSON.parse), [
+        {
+          event: 'optional_web_enrichment',
+          outcome: 'degraded',
+          reason:
+            web === 'throws'
+              ? 'verification_failed'
+              : 'verification_unavailable',
+          result: firstKind,
+        },
+      ]);
+    });
+
+test('successful web enrichment still uses enriched Google decision instead of first alternatives', async () => {
+  const f = await enrichmentFixture(
+    'alternatives',
+    async () => noEvidence,
+    async (candidates) => ({ status: 'resolved', candidate: candidates[1] }),
+  );
+  const d = await f.ingestEnrichment();
+  assert.equal(f.resolved(), 1);
+  assert.equal(d.status, 'needs_confirmation');
+  assert.equal(
+    d.liveCandidate.providerIdentity.id,
+    f.first.candidates[1].providerIdentity.id,
+  );
+});
+
+test('without reviewable first result a required verification failure retains retry semantics', async () => {
+  const f = await enrichmentFixture('unresolved', async () => {
+    throw new Error('required_verification_failed');
+  });
+  await assert.rejects(f.ingestEnrichment(), {
+    message: 'required_verification_failed',
+  });
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', 'enrichment-review')).candidates
+      .length,
+    0,
+  );
+});
+
+for (const failure of ['google', 'adaptation', 'web-schema'])
+  test(`optional-enrichment recovery does not hide ${failure} hard failures`, async () => {
+    const f = await enrichmentFixture(
+      'alternatives',
+      async () =>
+        failure === 'web-schema' ? { status: 'invalid' } : noEvidence,
+      async () => {
+        if (failure === 'google')
+          throw new GooglePlacesFailure('google_places_adc_unavailable');
+        return { status: 'resolved', candidate: { invalid: true } };
+      },
+    );
+    if (failure === 'web-schema') await assert.rejects(f.ingestEnrichment());
+    else if (failure === 'google')
+      await assert.rejects(f.ingestEnrichment(), {
+        message: 'google_places_adc_unavailable',
+      });
+    else {
+      const d = await f.ingestEnrichment();
+      assert.equal(d.status, 'failed');
+      assert.equal(
+        d.failureReason,
+        failure === 'google'
+          ? 'google_places_adc_unavailable'
+          : 'poi_adaptation_failed',
+      );
+      assert.equal(d.candidates.length, 0);
+    }
+  });
