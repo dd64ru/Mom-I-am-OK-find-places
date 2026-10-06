@@ -273,9 +273,9 @@ export class TelegramInteractions {
       ];
     const offered =
       !discovery.relatedRequested &&
-      discovery.candidates.some(
-        (c) => c.providerIdentity?.provider === 'google-places',
-      );
+      discovery.status === 'needs_confirmation' &&
+      discovery.candidates.length === 1 &&
+      discovery.candidates[0]?.providerIdentity?.provider === 'google-places';
     try {
       console.info(
         JSON.stringify({
@@ -747,9 +747,10 @@ export class TelegramInteractions {
         (callback.action !== 'related' ||
           (discovery.recognition.mode !== 'recommendation_list' &&
             !discovery.relatedRequested &&
-            discovery.candidates.some(
-              (c) => c.providerIdentity?.provider === 'google-places',
-            ))) &&
+            discovery.status === 'needs_confirmation' &&
+            discovery.candidates.length === 1 &&
+            discovery.candidates[0]?.providerIdentity?.provider ===
+              'google-places')) &&
         (callback.action !== 'confirm' ||
           discovery.status === 'needs_confirmation' ||
           (discovery.status === 'needs_selection' &&

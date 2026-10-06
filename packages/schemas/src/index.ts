@@ -185,6 +185,16 @@ export const RecognitionSchema = z
         ).size === r.clues.length),
     'invalid_recommendation_list',
   );
+// Durable Recognition retains the historical ten-clue decoder. Fresh model
+// output must have unambiguous mode semantics before it enters persistence/search.
+export const FreshRecognitionSchema = RecognitionSchema.refine(
+  (r) =>
+    r.mode === 'recommendation_list' ||
+    (r.clues.length <= 3 &&
+      r.clues.every((c) => c.recommendationEvidence === undefined) &&
+      r.recommendationsTruncated === undefined),
+  'invalid_fresh_recognition_mode',
+);
 export const CandidateSchema = z
   .object({
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),

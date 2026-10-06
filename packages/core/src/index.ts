@@ -1,5 +1,6 @@
 import {
   DiscoverySchema,
+  FreshRecognitionSchema,
   MAX_SEARCH_BRANDS,
   ProviderFailureReasonSchema,
   storedCandidate,
@@ -119,10 +120,9 @@ export class DiscoveryService {
     if (!workspace) throw new Error('workspace_missing');
     if (!input.images.length || input.images.length > 10)
       throw new Error('invalid_image_count');
-    const { recognition, provider } = await this.vision.recognize(
-      input.images,
-      workspace.areaHint,
-    );
+    const { recognition: rawRecognition, provider } =
+      await this.vision.recognize(input.images, workspace.areaHint);
+    const recognition = FreshRecognitionSchema.parse(rawRecognition);
     // Persist vision before network verification so retries/city correction never repeat it.
     const discovery = await this.repository.createDiscovery(
       DiscoverySchema.parse({
@@ -504,10 +504,9 @@ export class DiscoveryService {
     if (
       discovery.recognition.mode === 'recommendation_list' ||
       discovery.relatedRequested ||
-      !discovery.candidates.some(
-        (c) => c.providerIdentity?.provider === 'google-places',
-      ) ||
-      !['needs_confirmation', 'needs_selection'].includes(discovery.status)
+      discovery.candidates.length !== 1 ||
+      discovery.candidates[0]?.providerIdentity?.provider !== 'google-places' ||
+      discovery.status !== 'needs_confirmation'
     )
       return;
     this.diagnostic({

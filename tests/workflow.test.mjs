@@ -4445,3 +4445,106 @@ test('recommendation and optional-chain lifecycle telemetry is fixed, content-fr
   ])
     assert.equal(text.includes(privateValue), false);
 });
+
+test('ambiguous Google shortlist cannot offer or invoke user-initiated related search without an explicit seed', async () => {
+  const f = await shortlistWorkflow(3);
+  await f.interactions.propose(f.d, 11, 1);
+  const controls = f.sent.findLast((m) => m.body.reply_markup?.inline_keyboard);
+  assert.equal(
+    controls.body.reply_markup.inline_keyboard
+      .flat()
+      .some((b) => b.callback_data.endsWith(':r')),
+    false,
+  );
+  const before = f.requests.length;
+  const forged = { ...multiButton(f, 'all'), action: 'related' };
+  assert.equal(await f.interactions.canCallback(forged), false);
+  await f.interactions.callback(forged);
+  assert.equal(await f.service.requestRelated(f.d), undefined);
+  assert.equal(f.requests.length, before);
+  assert.equal(
+    (await f.repository.getDiscovery('fixture', f.d.id)).revision,
+    f.d.revision,
+  );
+  const old = multiButton(f, 'all');
+  await f.interactions.callback(old);
+  assert.equal(await f.interactions.canCallback(old), false);
+});
+test('recommendation-list shortlist cannot offer or invoke related search', async () => {
+  const f = await recommendationsWorkflow();
+  const d = await searchRecommendations(f);
+  const controls = f.sent.findLast((m) =>
+    m.body.reply_markup?.inline_keyboard
+      ?.flat()
+      .some((b) => b.callback_data.endsWith(':b')),
+  );
+  assert.equal(
+    controls.body.reply_markup.inline_keyboard
+      .flat()
+      .some((b) => b.callback_data.endsWith(':r')),
+    false,
+  );
+  const forged = { ...recommendationButton(f, 'brands'), action: 'related' };
+  assert.equal(await f.interactions.canCallback(forged), false);
+  const before = f.queries.length;
+  assert.equal(await f.service.requestRelated(d), undefined);
+  await f.interactions.callback(forged);
+  assert.equal(f.queries.length, before);
+});
+test('fresh Vision validation rejects list downgrade before persistence; old four-clue Discovery remains readable', async () => {
+  const legacy = {
+    visibleText: [],
+    clues: [
+      'Cedar Gallery',
+      'Maple Gallery',
+      'Willow Gallery',
+      'Birch Gallery',
+    ].map((name) => ({ name, aliases: [], category: 'museum', confidence: 1 })),
+  };
+  const f = await setup({ recognition: legacy });
+  await assert.rejects(
+    f.ingest('fresh-four'),
+    /invalid_fresh_recognition_mode/,
+  );
+  assert.equal(
+    await f.repository.getDiscovery('fixture', 'fresh-four'),
+    undefined,
+  );
+  assert.equal(f.calls.poi, 0);
+  assert.equal(f.calls.search, 0);
+  f.db.values.set('workspaces/fixture/discoveries/legacy-four', {
+    id: 'legacy-four',
+    workspaceId: 'fixture',
+    recognition: legacy,
+    candidates: [],
+    source: { provider: 'fixture', observedAt: time },
+    visionProvider: 'fixture',
+    status: 'unresolved',
+    revision: 0,
+    createdAt: time,
+  });
+  assert.deepEqual(
+    (await f.repository.getDiscovery('fixture', 'legacy-four')).recognition,
+    legacy,
+  );
+});
+test('single Google confirmation proposal offers related lookup, fenced after city change; one-item selection is not a seed', async () => {
+  const f = await shortlistWorkflow(1);
+  assert.equal(f.d.status, 'needs_confirmation');
+  await f.interactions.propose(f.d, 11, 1);
+  const related = recommendationButton(f, 'related');
+  assert.equal(await f.interactions.canCallback(related), true);
+  const before = f.requests.length;
+  assert.equal(
+    await f.service.requestRelated({
+      ...f.d,
+      status: 'needs_selection',
+      selectedCandidateIndices: [],
+    }),
+    undefined,
+  );
+  await f.interactions.callback(recommendationButton(f, 'city'));
+  assert.equal(await f.interactions.canCallback(related), false);
+  await f.interactions.callback(related);
+  assert.equal(f.requests.length, before);
+});
