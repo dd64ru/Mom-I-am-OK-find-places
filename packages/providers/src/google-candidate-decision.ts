@@ -109,6 +109,7 @@ export type GoogleCandidateEvent = Omit<
   'event' | 'runnerUpRankPermille' | 'decision'
 > & {
   event: 'google_places_candidate';
+  localityEvidence: 'structured' | 'address_context' | 'absent';
   candidateSlot: number;
   providerRank: number;
   seenInMultipleQueries: boolean;

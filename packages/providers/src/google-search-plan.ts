@@ -87,8 +87,14 @@ export function googleSearchPlan(
       };
   }
   const primary = clues[0];
-  if (!primary) return { clues, locality, queries: [] as string[] };
-  const variants: { clue: Clue; text: string }[] = [
+  if (!primary)
+    return {
+      clues,
+      locality,
+      queries: [] as string[],
+      unscopedQueryPlanned: false,
+    };
+  const variants: { clue: Clue; text: string; unscoped?: boolean }[] = [
     ...r.clues
       .filter((c) => c.signage)
       .sort((a, b) => b.confidence - a.confidence)
@@ -106,24 +112,40 @@ export function googleSearchPlan(
         .map((text) => ({ clue: c, text })),
     ),
   ];
-  const queries = [
-    ...new Set(
-      variants.map(({ clue, text }) =>
-        [
-          text.slice(0, 300),
-          locality?.name ??
-            ('canonicalName' in clue
-              ? clue.city
-              : clue.areaHint?.slice(0, 200)) ??
-            ctx.workspaceAreaHint,
-          'addressClue' in clue ? clue.addressClue : undefined,
-          locality?.countryCode,
-        ]
-          .filter(Boolean)
-          .join(', ')
-          .slice(0, 800),
-      ),
-    ),
-  ].slice(0, 2);
-  return { clues, locality, queries };
+  const first = variants[0];
+  if (
+    first &&
+    !ctx.cityOverride &&
+    !locality?.name &&
+    (('areaHint' in first.clue && first.clue.areaHint) || ctx.workspaceAreaHint)
+  ) {
+    // Reserve an existing slot for the full primary identity without weak area
+    // hints. A travel photo can be outside the workspace/model area guess.
+    variants.splice(1, 0, { ...first, unscoped: true });
+  }
+  const planned = new Map<string, boolean>();
+  for (const { clue, text, unscoped } of variants) {
+    const area = unscoped
+      ? undefined
+      : (locality?.name ??
+        ('canonicalName' in clue ? clue.city : clue.areaHint?.slice(0, 200)) ??
+        ctx.workspaceAreaHint);
+    const query = [
+      text.slice(0, 300),
+      area,
+      'addressClue' in clue ? clue.addressClue : undefined,
+      locality?.countryCode,
+    ]
+      .filter(Boolean)
+      .join(', ')
+      .slice(0, 800);
+    if (!planned.has(query)) planned.set(query, !area);
+  }
+  const selected = [...planned.entries()].slice(0, 2);
+  return {
+    clues,
+    locality,
+    queries: selected.map(([query]) => query),
+    unscopedQueryPlanned: selected.some(([, unscoped]) => unscoped),
+  };
 }

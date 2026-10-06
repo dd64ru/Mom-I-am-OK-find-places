@@ -40,6 +40,7 @@ export const AddressSchema = z
       .regex(/^[A-Z]{2}$/)
       .optional(),
     city: z.string().optional(),
+    providerContext: z.string().optional(),
     district: z.string().optional(),
   })
   .strict();

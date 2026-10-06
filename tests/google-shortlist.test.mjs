@@ -134,6 +134,7 @@ test('attempt deduplicates across queries and both phases, with stable content-f
     'nameEvidence',
     'nameRankPermille',
     'localityState',
+    'localityEvidence',
     'countryState',
     'addressState',
     'categoryState',

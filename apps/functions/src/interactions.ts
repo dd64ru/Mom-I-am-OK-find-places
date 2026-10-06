@@ -242,7 +242,7 @@ export class TelegramInteractions {
           : await this.api.call('sendMessage', {
               ...common,
               text: (candidate
-                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${google ? 'Город по данным Google: ' : ''}${candidate.address.city ?? 'не указан'}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
+                ? `${confidenceText ? confidenceText + '\n' : ''}${candidate.canonicalName.slice(0, 300)}\n${google ? 'Город по данным Google: ' : ''}${candidate.address.city ?? 'не указан'}${google && candidate.address.providerContext ? '\nРегион по данным Google (не подтверждённый город): ' + compact(candidate.address.providerContext, 100) : ''}\n${google ? candidate.address.formatted.slice(0, 1500) : candidate.coordinates.latitude + ', ' + candidate.coordinates.longitude}\n${attribution}${google ? '\n' + (candidate.references.find((r) => r.provider === 'google-places')?.url ?? '') : ''}`
                 : resolutionMessage(discovery)
               ).slice(0, 4000),
             });
@@ -302,7 +302,7 @@ export class TelegramInteractions {
           `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}`,
         );
         const card: ShortlistText = {
-          text: `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
+          text: `${index + 1}. ${compact(candidate.canonicalName, 80)} — ${relation}\nГород по данным Google: ${candidate.address.city ? compact(candidate.address.city, 40) : 'не указан'}${candidate.address.providerContext ? '\nРегион Google (город не подтверждён): ' + compact(candidate.address.providerContext, 80) : ''}\n${compact(candidate.address.formatted, 80)}\nИсточник: `,
           entities: [],
         };
         appendLink(card, 'Google Maps', link);

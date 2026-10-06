@@ -104,13 +104,16 @@ function geographicEvidence(row: GooglePlaceDto, locality?: Locality) {
     countryCodes.some((c) => c !== locality?.countryCode);
   const countryMatch =
     !!locality?.countryCode && countryCodes.includes(locality?.countryCode);
+  // Separator/diacritic variants within typed components; no fuzzy city matching.
+  const localityKey = (value: string) =>
+    normalizedLocality(value)
+      .normalize('NFKD')
+      .replace(/\p{M}/gu, '')
+      .replace(/[^\p{L}\p{N}]/gu, '');
   const namesMatch = (c: GooglePlaceDto['addressComponents'][number]) =>
     [c.longText, c.shortText].some(
       (s) =>
-        s &&
-        locality?.aliases.some(
-          (a) => normalizedLocality(a) === normalizedLocality(s),
-        ),
+        s && locality?.aliases.some((a) => localityKey(a) === localityKey(s)),
     );
   const relevant = row.addressComponents.filter((c) =>
     c.types.some((t) =>
@@ -165,18 +168,36 @@ function geographicEvidence(row: GooglePlaceDto, locality?: Locality) {
     !!locality?.aliases.some((alias) =>
       localityInAddress(alias, row.formattedAddress ?? ''),
     );
-  const cityMatch = relevant.some(namesMatch) || formattedMatch;
+  const matchedComponent = relevant.find(namesMatch);
+  const cityMatch = !!matchedComponent;
+  const displayCity =
+    cities[0]?.longText ??
+    cities[0]?.shortText ??
+    matchedComponent?.longText ??
+    matchedComponent?.shortText;
+  const administrativeContext = relevant
+    .filter((c) =>
+      c.types.some((t) => t.startsWith('administrative_area_level_')),
+    )
+    .map((c) => c.longText ?? c.shortText)
+    .filter(Boolean)
+    .join(', ');
   return {
     countryConflict,
     countryMatch,
     cityConflict,
     cityMatch,
+    localityEvidence:
+      cityMatch || cities.length
+        ? ('structured' as const)
+        : formattedMatch
+          ? ('address_context' as const)
+          : ('absent' as const),
     address: {
-      ...(cities[0]?.longText
-        ? { city: cities[0].longText }
-        : cityMatch && locality
-          ? { city: locality.name }
-          : {}),
+      ...(displayCity ? { city: displayCity } : {}),
+      ...(!displayCity && administrativeContext
+        ? { providerContext: administrativeContext }
+        : {}),
       ...(countryCodes.length === 1 ? { countryCode: countryCodes[0] } : {}),
     },
   };
@@ -277,6 +298,22 @@ export type GoogleSearchPlanEvent = {
   confidenceLow: number;
   localityKnown: boolean;
   queriesPlanned: number;
+  signagePresent: boolean;
+  possibleChainPresent: boolean;
+  unscopedQueryPlanned: boolean;
+};
+export type GoogleRelatedEvent = {
+  event: 'google_related_expansion';
+  reason:
+    | 'no_chain_evidence'
+    | 'no_eligible_seed'
+    | 'provider_city_unavailable'
+    | 'locality_unknown'
+    | 'conflicting_locality'
+    | 'expanded';
+  scope: 'explicit_normalized' | 'explicit_matched' | 'provider' | 'none';
+  signagePresent: boolean;
+  possibleChainPresent: boolean;
 };
 function supportedChainName(brand: string, returned: string) {
   if (identityStrength(venueNameEvidence(brand, brand).nameEvidence) < 2)
@@ -288,6 +325,14 @@ function supportedChainName(brand: string, returned: string) {
     (actual.length >= wanted.length &&
       actual.length - wanted.length <= 3 &&
       wanted.every((word, i) => actual[i] === word))
+  );
+}
+function supportedStructuredChain(clue: Recognition['clues'][number]): boolean {
+  return (
+    !!clue.possibleChain &&
+    normalizedVenueName(clue.possibleChain) !==
+      normalizedVenueName(clue.category) &&
+    supportedChainName(clue.possibleChain, clue.possibleChain)
   );
 }
 const relatedCandidate = (candidate: Candidate) =>
@@ -306,6 +351,7 @@ type GoogleAttempt = {
   truncated: boolean;
   relatedExpanded: boolean;
   relatedQuery?: string;
+  hardGeographyConflict?: boolean;
   candidates: Map<
     string,
     { candidate: Candidate; evidence: CandidateEvidence }
@@ -329,6 +375,7 @@ export class GooglePlacesPoi implements PoiProvider {
         | GoogleFilterEvent
         | GoogleParseEvent
         | GoogleSearchPlanEvent
+        | GoogleRelatedEvent
         | GoogleDecisionEvent
         | GoogleCandidateEvent,
     ) => void = () => {},
@@ -577,6 +624,7 @@ export class GooglePlacesPoi implements PoiProvider {
       clues: boundedClues,
       locality,
       queries: plannedQueries,
+      unscopedQueryPlanned,
     } = googleSearchPlan(
       input.data.recognition,
       input.data.verification,
@@ -602,6 +650,10 @@ export class GooglePlacesPoi implements PoiProvider {
           .filter((c) => c.confidence < 0.5).length,
         localityKnown: !!locality?.aliases.length,
         queriesPlanned: queries.length,
+        signagePresent: recognition.clues.some((c) => !!c.signage),
+        possibleChainPresent: recognition.clues.some((c) => !!c.possibleChain),
+        unscopedQueryPlanned:
+          phase !== 'google_related_pass' && unscopedQueryPlanned,
       });
     } catch {
       /* best effort */
@@ -726,7 +778,20 @@ export class GooglePlacesPoi implements PoiProvider {
         const category =
           recognizedCategory(row.types) ?? matchingClue.category ?? 'place';
         const geography = geographicEvidence(row, locality);
-        const addressState = winning.addressState;
+        const exactChainAddressConflict =
+          phase !== 'google_related_pass' &&
+          input.data.recognition.clues.some(supportedStructuredChain) &&
+          input.data.verification.status === 'verified' &&
+          input.data.verification.references.length > 0 &&
+          comparisons.some(
+            (c) =>
+              'canonicalName' in c.evidence &&
+              identityStrength(c.nameEvidence) === 3 &&
+              c.addressState === 'conflict',
+          );
+        const addressState = exactChainAddressConflict
+          ? 'conflict'
+          : winning.addressState;
         const evidence: CandidateEvidence = {
           nameEvidence: winning.nameEvidence,
           nameRank: winning.nameRank,
@@ -760,8 +825,8 @@ export class GooglePlacesPoi implements PoiProvider {
         };
         const chain = input.data.recognition.clues.find(
           (c) =>
-            c.possibleChain &&
-            supportedChainName(c.possibleChain, row.displayName.text) &&
+            supportedStructuredChain(c) &&
+            supportedChainName(c.possibleChain!, row.displayName.text) &&
             ['compatible', 'related'].includes(
               categorySupport(c.category, row.types),
             ),
@@ -826,6 +891,7 @@ export class GooglePlacesPoi implements PoiProvider {
             nameEvidence: evidence.nameEvidence,
             nameRankPermille: Math.round(evidence.nameRank * 1000),
             localityState: evidence.localityState,
+            localityEvidence: geography.localityEvidence,
             countryState: evidence.countryState,
             addressState: evidence.addressState,
             categoryState: evidence.categoryState,
@@ -865,6 +931,7 @@ export class GooglePlacesPoi implements PoiProvider {
         if (!geography.countryConflict && !geography.cityConflict)
           geographyMatched = true;
         if (rowDecision === 'rejected_hard_conflict') {
+          attempt.hardGeographyConflict = true;
           candidates.delete(row.id);
           excluded.push(evidence);
           continue;
@@ -1063,54 +1130,112 @@ export class GooglePlacesPoi implements PoiProvider {
     attempt: GoogleAttempt,
   ): Promise<PoiResolution | undefined> {
     if (attempt.relatedExpanded) return;
-    const eligibleSeeds = [...attempt.candidates.values()].filter(
-      (p) => !context.cityOverride || p.evidence.localityState === 'match',
-    );
-    const clue = r.clues.find(
-      (c) =>
-        c.possibleChain &&
-        eligibleSeeds.some(
-          (p) =>
-            p.candidate.address.city &&
-            supportedChainName(c.possibleChain!, p.candidate.canonicalName),
-        ),
-    );
-    if (!clue?.possibleChain) return;
-    const city = eligibleSeeds.find(
-      (p) =>
-        p.candidate.address.city &&
-        supportedChainName(clue.possibleChain!, p.candidate.canonicalName),
-    )?.candidate.address.city;
-    if (
-      !city ||
-      new Set(
-        [...attempt.candidates.values()]
-          .map((p) => p.candidate.address.city)
-          .filter(Boolean),
-      ).size !== 1
-    )
+    const report = (
+      reason: GoogleRelatedEvent['reason'],
+      scope: GoogleRelatedEvent['scope'] = 'none',
+    ) => {
+      try {
+        this.diagnostic({
+          event: 'google_related_expansion',
+          reason,
+          scope,
+          signagePresent: r.clues.some((c) => !!c.signage),
+          possibleChainPresent: r.clues.some((c) => !!c.possibleChain),
+        });
+      } catch {
+        /* best effort */
+      }
+    };
+    const chains = r.clues.filter(supportedStructuredChain);
+    if (!chains.length) {
+      report('no_chain_evidence');
       return;
+    }
+    const entries = [...attempt.candidates.values()];
+    const pairs = chains.flatMap((clue) =>
+      entries
+        .filter(
+          (p) =>
+            supportedChainName(
+              clue.possibleChain!,
+              p.candidate.canonicalName,
+            ) &&
+            ['compatible', 'related'].includes(
+              categorySupport(clue.category, [p.candidate.category]),
+            ),
+        )
+        .map((seed) => ({ clue, seed })),
+    );
+    const intent =
+      context.cityOverride &&
+      v.localityIntent?.input === context.cityOverride &&
+      v.localityIntent.confidence >= 0.9
+        ? v.localityIntent
+        : undefined;
+    const pair = context.cityOverride
+      ? ((!intent
+          ? pairs.find((p) => p.seed.evidence.localityState === 'match')
+          : undefined) ?? pairs[0])
+      : (pairs.find((p) => !!p.seed.candidate.address.city) ?? pairs[0]);
+    if (!pair) {
+      report(
+        attempt.hardGeographyConflict
+          ? 'conflicting_locality'
+          : 'no_eligible_seed',
+      );
+      return;
+    }
+    const { clue, seed } = pair;
+    let city: string;
+    let normalized = v;
+    let relatedContext = context;
+    let scope: GoogleRelatedEvent['scope'];
+    if (context.cityOverride) {
+      if (intent) {
+        // This is a search scope, not verified provider geography. Never replace
+        // the explicit user locality with an uncorroborated provider city.
+        city = intent.canonicalName;
+        scope = 'explicit_normalized';
+      } else if (seed.evidence.localityState === 'match') {
+        city = context.cityOverride;
+        scope = 'explicit_matched';
+      } else {
+        report('locality_unknown');
+        return;
+      }
+    } else {
+      const cities = [
+        ...new Set(
+          entries.map((p) => p.candidate.address.city).filter(Boolean),
+        ),
+      ];
+      if (!seed.candidate.address.city || cities.length !== 1) {
+        report('provider_city_unavailable');
+        return;
+      }
+      city = cities[0]!;
+      scope = 'provider';
+      relatedContext = { ...context, cityOverride: city };
+      normalized = {
+        ...v,
+        localityIntent: {
+          input: city,
+          canonicalName: city,
+          aliases: [],
+          confidence: 1,
+          ...(seed.candidate.address.countryCode
+            ? { countryCode: seed.candidate.address.countryCode }
+            : {}),
+        },
+      };
+    }
     attempt.relatedExpanded = true;
     attempt.relatedQuery = `${clue.possibleChain} locations, ${city}`;
-    const seed = eligibleSeeds.find(
-      (p) => p.candidate.address.city === city,
-    )!.candidate;
-    const normalized: Verification = {
-      ...v,
-      localityIntent: {
-        input: city,
-        canonicalName: city,
-        aliases: [],
-        confidence: 1,
-        ...(seed.address.countryCode
-          ? { countryCode: seed.address.countryCode }
-          : {}),
-      },
-    };
+    report('expanded', scope);
     return this.resolve(
       r,
       normalized,
-      { ...context, cityOverride: city },
+      relatedContext,
       'google_related_pass',
       attempt,
     );

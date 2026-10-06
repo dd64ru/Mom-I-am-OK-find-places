@@ -118,7 +118,7 @@ test('Shenzhen matches a typed city or admin layer while Guangdong remains neutr
     assert.equal(result.status, 'resolved');
   }
 });
-test('formattedAddress safely corroborates city only when reliably typed city is unavailable', async () => {
+test('formattedAddress is display-only context when reliably typed city is unavailable', async () => {
   const events = [];
   const p = provider([{ ...partial, addressComponents: [country] }], events);
   assert.equal(
@@ -127,7 +127,7 @@ test('formattedAddress safely corroborates city only when reliably typed city is
   );
   assert.equal(
     events.find((e) => e.event === 'google_places_decision').decision,
-    'accepted_partial_with_locality',
+    'accepted_partial_uncorroborated',
   );
   for (const [alias, address, matches] of [
     ['Shanghai', '18 Street, Shanghai, China', true],
@@ -352,7 +352,7 @@ for (const [
     'accepted_strong_identity',
   ],
   [
-    'formattedAddress corroborates Guangzhou when typed city is unavailable',
+    'formattedAddress provides context but no verified city when typed city is unavailable',
     'Guangzhou',
     [
       country,
@@ -386,6 +386,7 @@ for (const [
           ![
             'unfamiliar English admin1 remains unknown for explicit Guangzhou',
             'country alone leaves explicit Guangzhou unknown',
+            'formattedAddress provides context but no verified city when typed city is unavailable',
             'unknown cross-script administrative locality is neutral',
           ].includes(scenario)
           ? 'match'
