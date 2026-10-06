@@ -1,0 +1,45 @@
+name: Deploy places feed
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: places-production-deploy
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    environment: production
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - run: bash scripts/check-secrets.sh
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22.23.3'
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: JAVA_HOME="$JAVA_HOME_21_X64" PATH="$JAVA_HOME_21_X64/bin:$PATH" npm run test:rules
+      - run: npm run deploy:package -- --output .deploy/functions --target feed
+      - name: Write feed-only non-secret settings
+        env:
+          WORKSPACE_ID: ${{ vars.WORKSPACE_ID }}
+        run: node scripts/write-function-env.mjs --target feed
+      - name: Smoke standalone production package
+        run: |
+          npm ci --prefix .deploy/functions --omit=dev --ignore-scripts --no-audit --no-fund
+          node scripts/smoke-function-package.mjs .deploy/functions feed
+      - uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
+        with:
+          project_id: mom-im-ok-places
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+          create_credentials_file: true
+      - run: npx --no-install firebase deploy --project mom-im-ok-places --only functions:places:placesFeed --non-interactive

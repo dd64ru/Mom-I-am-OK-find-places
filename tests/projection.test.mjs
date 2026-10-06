@@ -669,7 +669,7 @@ test('partial feed succeeds with aggregate provider failure; invalid format, una
 });
 test('separate feed defaults disabled and exposes no write ports; webhook-only deployment and IAM are unchanged', async () => {
   const index = await readFile(
-    new URL('../apps/functions/src/index.ts', import.meta.url),
+    new URL('../apps/functions/src/feed-entry.ts', import.meta.url),
     'utf8',
   );
   const runtime = await readFile(
@@ -756,4 +756,195 @@ test('OSM exports retain fixed licensing credit without transferring Google attr
       serializeProjection(format, [places[0]]).includes('OpenStreetMap'),
       false,
     );
+});
+
+const bearerRequest = (f) => ({
+  method: 'GET',
+  query: { format: 'geojson' },
+  authorization: `Bearer ${f.token}`,
+});
+function assertSnapshot(response, total, projected, complete) {
+  assert.equal(response.headers['X-Places-Feed-Version'], '1');
+  assert.equal(response.headers['X-Places-Total'], String(total));
+  assert.equal(response.headers['X-Places-Projected'], String(projected));
+  assert.equal(
+    response.headers['X-Places-Snapshot-Complete'],
+    String(complete),
+  );
+}
+test('v1 authenticated snapshot and conditional 304 expose complete content-free aggregates', async () => {
+  const f = feedFixture();
+  f.deps.allowUrlToken = false;
+  const first = await handleFeed(bearerRequest(f), f.deps);
+  assert.equal(first.status, 200);
+  assertSnapshot(first, 2, 2, true);
+  const second = await handleFeed(
+    { ...bearerRequest(f), ifNoneMatch: first.headers.ETag },
+    f.deps,
+  );
+  assert.equal(second.status, 304);
+  assertSnapshot(second, 2, 2, true);
+  assert.equal(second.body, '');
+  const aggregate = JSON.stringify({
+    headers: first.headers,
+    events: f.events,
+  });
+  for (const value of [
+    f.token,
+    labeled.label,
+    google.id,
+    reference.externalId,
+    reference.url,
+    'PROHIBITED_',
+    '113.89',
+    '22.55',
+  ])
+    assert.equal(aggregate.includes(value), false);
+});
+for (const reason of [
+  'providerFailures',
+  'missingLabels',
+  'invalidPlaces',
+  'budgetSkipped',
+]) {
+  test(`v1 marks ${reason} as incomplete on 200 and 304 while preserving siblings`, async () => {
+    const f = feedFixture();
+    if (reason === 'providerFailures')
+      f.deps.projection = new ProjectionService({
+        refresh: async () => {
+          throw new Error('PRIVATE_PROVIDER_BODY');
+        },
+      });
+    if (reason === 'missingLabels') f.inputs[1] = clone(google);
+    if (reason === 'invalidPlaces') f.inputs[1] = { ...labeled, tags: 123 };
+    if (reason === 'budgetSkipped') {
+      let clock = 0;
+      f.deps.projection = new ProjectionService(
+        {
+          refresh: async () => {
+            assert.fail('expired budget must not refresh');
+          },
+        },
+        { now: () => (clock += 100), budgetMs: 1 },
+      );
+    }
+    const first = await handleFeed(bearerRequest(f), f.deps);
+    assert.equal(first.status, 200);
+    assertSnapshot(first, 2, 1, false);
+    assert.equal(JSON.parse(first.body).features[0].id, osm.id);
+    assert.equal(f.events[0][reason], 1);
+    const second = await handleFeed(
+      { ...bearerRequest(f), ifNoneMatch: first.headers.ETag },
+      f.deps,
+    );
+    assert.equal(second.status, 304);
+    assertSnapshot(second, 2, 1, false);
+  });
+}
+test('truncation and over-limit snapshots remain hard failures; empty complete snapshots are valid', async () => {
+  const f = feedFixture();
+  for (const source of [
+    { places: [osm], truncated: true },
+    { places: Array(101).fill(osm), truncated: false },
+  ]) {
+    f.deps.readPlaces = async () => source;
+    const result = await handleFeed(bearerRequest(f), f.deps);
+    assert.equal(result.status, 503);
+    assert.equal(result.body, 'feed_limit_exceeded');
+    assert.equal(result.headers['X-Places-Snapshot-Complete'], undefined);
+  }
+  f.deps.readPlaces = async () => ({ places: [], truncated: false });
+  assertSnapshot(await handleFeed(bearerRequest(f), f.deps), 0, 0, true);
+});
+test('valid equal-size incorrect tokens fail; canonical base64url and constant-time hash comparison remain required', async () => {
+  const f = feedFixture();
+  const digest = await f.deps.tokenDigest();
+  assert.equal(
+    validFeedToken(randomBytes(32).toString('base64url'), digest),
+    false,
+  );
+  assert.equal(validFeedToken(f.token + '=', digest), false);
+  assert.equal(validFeedToken(f.token, digest.toUpperCase()), false);
+  const source = await readFile(
+    new URL('../apps/functions/src/feed.ts', import.meta.url),
+    'utf8',
+  );
+  assert.match(
+    source,
+    /timingSafeEqual\(actual, Buffer.from\(digest, 'hex'\)\)/,
+  );
+});
+test('multi-confirmation backfill binds each independent clue by provider identity and refuses related/duplicate/unassociated identities', () => {
+  const secondIdentity = {
+    provider: 'google-places',
+    id: 'second-provider-id',
+  };
+  const relatedIdentity = {
+    provider: 'google-places',
+    id: 'related-provider-id',
+  };
+  const identities = [google.providerIdentity, secondIdentity, relatedIdentity];
+  const places = identities.map((providerIdentity, i) => ({
+    ...google,
+    id: `saved-${i}`,
+    providerIdentity,
+    source: { ...reference, externalId: providerIdentity.id },
+  }));
+  const d = {
+    ...discovery,
+    confirmedPlaceId: places[0].id,
+    confirmedPlaceIds: places.map((p) => p.id),
+    recognition: {
+      visibleText: [],
+      clues: [
+        discovery.recognition.clues[0],
+        { ...discovery.recognition.clues[0], name: 'Independent Gallery' },
+      ],
+    },
+    candidates: identities.map((providerIdentity, i) => ({
+      ...discovery.candidates[0],
+      providerIdentity,
+      recognitionClueIndex: i === 1 ? 1 : 0,
+      relationship: i === 2 ? 'related_chain_location' : 'likely_exact',
+      references: [{ ...reference, externalId: providerIdentity.id }],
+    })),
+  };
+  const plan = planPlaceLabels(places, [d]);
+  assert.deepEqual(
+    plan.updates.map((p) => [p.placeId, p.label]),
+    [
+      [places[0].id, 'Happy Harbour'],
+      [places[1].id, 'Independent Gallery'],
+    ],
+  );
+  assert.equal(plan.counts.unresolved, 1);
+  const duplicate = {
+    ...d,
+    candidates: [
+      ...d.candidates,
+      { ...d.candidates[0], recognitionClueIndex: 1 },
+    ],
+  };
+  assert.equal(planPlaceLabels([places[0]], [duplicate]).counts.unresolved, 1);
+  assert.equal(
+    planPlaceLabels([{ ...places[0], id: 'unassociated' }], [d]).counts
+      .unresolved,
+    1,
+  );
+});
+
+test('unknown provider strings and malformed raw documents never enter the v1 provider enum', async () => {
+  const f = feedFixture();
+  f.inputs.push(
+    {
+      ...osm,
+      id: 'unknown-provider',
+      source: { ...osm.source, provider: 'PRIVATE_PROVIDER_TEXT' },
+    },
+    null,
+  );
+  const result = await handleFeed(bearerRequest(f), f.deps);
+  assertSnapshot(result, 4, 2, false);
+  assert.equal(f.events[0].invalidPlaces, 2);
+  assert.equal(JSON.stringify(result).includes('PRIVATE_PROVIDER_TEXT'), false);
 });

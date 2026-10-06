@@ -3,7 +3,6 @@ import {
   ProjectedPlaceSchema,
   type ProjectedPlace,
   PlaceSchema,
-  type Place,
   type PlaceDisplay,
 } from '@places/schemas';
 export { ProjectedPlaceSchema, type ProjectedPlace } from '@places/schemas';
@@ -52,7 +51,7 @@ export class ProjectionService {
     } = {},
   ) {}
   async project(
-    input: readonly Place[],
+    input: readonly unknown[],
   ): Promise<{ places: ProjectedPlace[]; counts: ProjectionCounts }> {
     if (input.length > MAX_PROJECTION_PLACES)
       throw new Error('projection_limit_exceeded');
@@ -66,9 +65,16 @@ export class ProjectionService {
       budgetSkipped: 0,
     };
     const output: ProjectedPlace[] = [];
-    const ordered = [...input].sort((a, b) =>
-      a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
-    );
+    const ordered = input
+      .flatMap((raw) => {
+        const parsed = PlaceSchema.safeParse(raw);
+        if (!parsed.success) {
+          counts.invalidPlaces++;
+          return [];
+        }
+        return [parsed.data];
+      })
+      .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
     const now = this.options.now ?? Date.now;
     const deadline =
       now() + Math.max(1, Math.min(30_000, this.options.budgetMs ?? 30_000));
@@ -84,15 +90,16 @@ export class ProjectionService {
     await Promise.all(
       Array.from({ length: concurrency }, async () => {
         while (cursor < ordered.length) {
-          const raw = ordered[cursor++]!;
-          const parsed = PlaceSchema.safeParse(raw);
-          if (!parsed.success) {
+          const place = ordered[cursor++]!;
+          if (place.status !== 'confirmed') continue;
+          const google = 'providerIdentity' in place;
+          if (
+            !google &&
+            !['nominatim', 'osm'].includes(place.source.provider)
+          ) {
             counts.invalidPlaces++;
             continue;
           }
-          const place = parsed.data;
-          if (place.status !== 'confirmed') continue;
-          const google = 'providerIdentity' in place;
           const label =
             place.label ?? (!google ? place.canonicalName : undefined);
           if (!label) {

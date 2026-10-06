@@ -1,5 +1,5 @@
 import { Firestore, FieldPath } from '@google-cloud/firestore';
-import { IdSchema, PlaceSchema } from '@places/schemas';
+import { IdSchema } from '@places/schemas';
 import { ProjectionService } from '@places/core';
 import {
   GooglePlacesPoi,
@@ -28,9 +28,11 @@ export function createFeedRuntime(env: NodeJS.ProcessEnv): FeedDependencies {
         .limit(limit + 1)
         .get();
       const places = snapshot.docs.slice(0, limit).map((doc) => {
-        const place = PlaceSchema.parse(doc.data());
+        const place = doc.data();
         if (place.workspaceId !== workspace || place.id !== doc.id)
           throw new Error('feed_scope_invalid');
+        // Shape validation belongs to projection: invalid siblings make a partial snapshot.
+        // Scope mismatch remains a hard failure, never a cross-workspace projection.
         return place;
       });
       return { places, truncated: snapshot.size > limit };

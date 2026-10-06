@@ -39,16 +39,16 @@ export function planPlaceLabels(
           d.confirmedPlaceIds?.includes(place.id)),
     );
     const derived = associated.map((d) => {
-      const candidate =
+      const matches =
         d.confirmedPlaceIds && 'providerIdentity' in place
-          ? d.candidates.find(
+          ? d.candidates.filter(
               (c) =>
                 c.providerIdentity?.provider === 'google-places' &&
                 c.providerIdentity.id === place.providerIdentity.id,
             )
-          : d.candidates.length === 1
-            ? d.candidates[0]
-            : undefined;
+          : d.candidates;
+      // Multiple entries for one identity cannot safely bind a photographed clue.
+      const candidate = matches.length === 1 ? matches[0] : undefined;
       const compatible =
         candidate &&
         !candidate.relationship?.startsWith('related_') &&

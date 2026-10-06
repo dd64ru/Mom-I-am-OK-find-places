@@ -414,7 +414,7 @@ test('global image slot bounds concurrent memory and releases on failure', async
   await imageSlot(docs, async (assertOwned) => assertOwned());
 });
 test('production is explicitly scale-to-zero in europe-west3 with conservative bounds', async () => {
-  const source = await readFile('apps/functions/src/index.ts', 'utf8');
+  const source = await readFile('apps/functions/src/webhook-entry.ts', 'utf8');
   assert.match(source, /region:\s*'europe-west3'/);
   assert.match(source, /minInstances:\s*0/);
   assert.match(source, /maxInstances:\s*2/);

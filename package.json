@@ -32,7 +32,8 @@
     "presiwc:import": "npm run build",
     "workspace:init": "node scripts/workspace-init.mjs",
     "preworkspace:init": "npm run build",
-    "test:rules": "METADATA_SERVER_DETECTION=none firebase emulators:exec --only firestore --project demo-places-tests \"node --test scripts/rules-tests.mjs\""
+    "test:rules": "METADATA_SERVER_DETECTION=none firebase emulators:exec --only firestore --project demo-places-tests \"node --test scripts/rules-tests.mjs\"",
+    "feed:smoke": "node scripts/feed-smoke.mjs"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

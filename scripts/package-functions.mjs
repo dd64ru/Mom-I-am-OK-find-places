@@ -2,7 +2,13 @@ import { cp, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { resolve, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
-export async function packageFunctions(root, output, commit) {
+export async function packageFunctions(
+  root,
+  output,
+  commit,
+  target = 'webhook',
+) {
+  if (!['webhook', 'feed'].includes(target)) throw new Error('invalid_target');
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('invalid_commit');
   await mkdir(output, { recursive: true });
   if ((await readdir(output)).length)
@@ -11,6 +17,8 @@ export async function packageFunctions(root, output, commit) {
     await readFile(join(root, 'apps/functions/package.json'), 'utf8'),
   );
   pkg.name = 'places-production';
+  // Firebase discovers only this function and its parameters, even in a shared codebase.
+  pkg.main = `dist/${target}-entry.js`;
   pkg.dependencies = { ...pkg.dependencies };
   for (const name of ['core', 'schemas', 'providers', 'worker']) {
     const workspace = name === 'worker' ? 'apps/worker' : `packages/${name}`;
@@ -49,7 +57,7 @@ export async function packageFunctions(root, output, commit) {
   );
   await writeFile(
     join(output, 'RELEASE.json'),
-    JSON.stringify({ commit }) + '\n',
+    JSON.stringify({ commit, target }) + '\n',
   );
   // Preserve the tested dependency graph while rewriting workspace links for Cloud Build.
   const sourceLock = JSON.parse(
@@ -125,8 +133,17 @@ if (
   )
     throw new Error('functions_packaging_requires_clean_checkout');
   const args = process.argv.slice(2);
-  if (args.length !== 2 || args[0] !== '--output')
+  if (
+    ![2, 4].includes(args.length) ||
+    args[0] !== '--output' ||
+    (args.length === 4 && args[2] !== '--target')
+  )
     throw new Error('output_required');
-  await packageFunctions(process.cwd(), resolve(args[1]), commit);
+  await packageFunctions(
+    process.cwd(),
+    resolve(args[1]),
+    commit,
+    args[3] ?? 'webhook',
+  );
   console.info(`functions_packaged:${commit}`);
 }

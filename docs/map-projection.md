@@ -1,6 +1,6 @@
 # Read-only map projection and export
 
-Canonical Firestore Places → `ProjectionService` → GeoJSON / GPX / KML. This layer has no map application integration, Google Saved Places mutation, mobile companion or Mom-I-am-OK coupling. `placesFeed` is separate from `placesWebhook`; the existing webhook handler, webhook URL and webhook-only deploy workflow are unchanged. The new feed is disabled by default and has not been deployed.
+Canonical Firestore Places → `ProjectionService` → GeoJSON / GPX / KML. This is the sole read-only Places Finder data source for the future Mom-I-am-OK backend and Map/Organic Maps clients; client implementation stays outside this repository. `placesFeed` is separate from `placesWebhook`; the existing webhook handler, webhook URL and webhook-only deploy workflow are unchanged. The new feed is disabled by default and has not been deployed.
 
 ## Application-owned labels
 
@@ -17,7 +17,7 @@ npm run build
 node scripts/backfill-place-labels.mjs --project <project-id> --workspace <workspace-id> --plan
 ```
 
-Omitting `--plan` also plans; writes require explicit `--apply`. The utility uses owner ADC, scans only confirmed Places and Discoveries inside that workspace, and performs no Google requests. It derives labels only from confirmed Discoveries associated by `confirmedPlaceId`. Missing recognition, ambiguous unbound clues or conflicting independently derived labels remain unresolved. Existing labels are preserved. Output contains aggregate counts only, never labels, IDs, paths or provider/user content.
+Omitting `--plan` also plans; writes require explicit `--apply`. The utility uses owner ADC, scans only confirmed Places and Discoveries inside that workspace, and performs no Google requests. It derives labels only from confirmed Discoveries associated by current `confirmedPlaceIds` or legacy `confirmedPlaceId`. Multi-confirmation binds each Google identity to one unique candidate and its original recognition clue, regardless of candidate/Place-ID ordering. Related branches/chain locations, duplicate identity entries and unassociated Places never inherit a photographed-venue label. Missing recognition, ambiguous unbound clues or conflicting independently derived labels remain unresolved. Existing labels are preserved. Output contains aggregate counts only, never labels, IDs, paths or provider/user content.
 
 An explicitly authorized future apply re-reads each Place and its contributing Discoveries in a transaction, checks the planned Place fingerprint and association/label again, and updates only label, labelSource and updatedAt. Concurrent changes are skipped, user labels are never overwritten, repeated runs are idempotent. Scans exceeding 1,000 Places / 5,000 confirmed Discoveries fail closed before writes; more than 20 contributing Discoveries for one update require separate review and are skipped. This task does not run production plan/apply or mutate Firestore.
 
@@ -33,20 +33,63 @@ GeoJSON is RFC 7946 FeatureCollection/Point output with `[longitude, latitude]`,
 
 Google coordinate hydration remains provider-derived transient content; exports must not be treated as independently owned Google coordinates or an unrestricted reusable Google dataset. A fresh Place ID lookup does not remove [Google Places policies](https://developers.google.com/maps/documentation/places/web-service/policies) or destination restrictions. This task implements the requested restricted coordinate projection; it does not certify arbitrary external retention/redistribution. OSM consumers retain their existing OSM/ODbL obligations and source identity.
 
-## Private HTTPS feed
+## Stable feed API v1
 
-Future owner-reviewed deployment can expose `placesFeed?format=geojson|gpx|kml`; default format is GeoJSON. GET only; POST/PUT/DELETE/HEAD return 405. Formats use application/geo+json, application/gpx+xml and application/vnd.google-earth.kml+xml with UTF-8. Content-derived SHA-256 ETags support authenticated If-None-Match / 304 (including weak/list validators). Every request hydrates current data before comparison. Cache-Control is private, no-cache, max-age=0, must-revalidate; Referrer-Policy is no-referrer. Errors are fixed safe strings.
+The primary application request is `GET /placesFeed?format=geojson` with `Authorization: Bearer <service token>`. The default format is GeoJSON. GPX and KML remain manual/export alternatives from the same projection (`format=gpx|kml`); there is no second map dataset.
 
-The function uses europe-west3, minInstances 0, maxInstances 1, concurrency 2, the existing places-runtime identity and read-only Firestore/provider ports. Admin SDK credentials already have runtime permissions; no new writer port, canonical mutation, IAM change or service-account key is added. Workspace comes from server WORKSPACE_ID only, never a request parameter.
+Successful 200/304 responses include `X-Places-Feed-Version: 1`. A GeoJSON 200 has `Content-Type: application/geo+json; charset=utf-8` and an RFC 7946 `FeatureCollection`. Each feature has:
 
-Authentication uses a cryptographically random 32-byte (256-bit) base64url bearer token. Only its lowercase SHA-256 digest belongs in a future Secret Manager secret named PLACES_FEED_TOKEN_SHA256; no plaintext token is stored in Firestore or server configuration. Constant-time comparison checks fixed-size hashes. The latest secret version is read per request so rotation immediately invalidates the old token without waiting for a cold start. No production token/secret or IAM grant is created here. Future owner setup must narrowly allow the runtime identity to read that specific secret, without widening CI IAM.
+| Field                 | v1 contract                                                                                         |
+| --------------------- | --------------------------------------------------------------------------------------------------- |
+| `type`                | `Feature`                                                                                           |
+| `id`                  | Stable internal canonical Place ID, unique within the snapshot; never the Google Place ID           |
+| `geometry`            | `Point`, WGS84 `coordinates: [longitude, latitude]`; longitude -180..180, latitude -90..90          |
+| `properties.label`    | Application-owned recognition/user label; OSM may use independently licensed canonicalName          |
+| `properties.tags`     | Array of application tags                                                                           |
+| `properties.provider` | Enum: `google-places`, `nominatim`, `osm`                                                           |
+| Optional properties   | Independently licensed OSM `category`, `sourceLink`, fixed `attribution`; absent on Google features |
 
-Authorization: Bearer <token> supports private download tools without placing credentials in URLs. Feed enablement requires PLACES_FEED_ENABLED=true; URL-based consumers separately require PLACES_FEED_URL_TOKENS_ENABLED=true. Both default false. The webhook-only production env generator explicitly writes both flags as false for non-interactive full-codebase analysis, regardless of any ambient GitHub/environment flag values. Future feed enablement requires a separate owner-reviewed deployment configuration rather than overriding this generator. An owner must review those settings, secret access and a separate feed deployment; the existing queued webhook-only deployment remains unchanged.
+No Google displayName, formatted address, types/category, attribution payload, query or raw Place ID is exposed. No Telegram data, credentials or additional recognition source text is exposed. Unknown persisted providers and malformed Places are excluded as invalid rather than exported as arbitrary enum values. There is no CRS extension. Features sort by internal ID. ID/label semantics, coordinate order, provider enum and required property types are stable in v1. Additive optional independently sourced fields or new aggregate headers may be introduced without changing version; consumers must ignore unknown fields/headers. Changes to required fields, existing semantics or provider enum require a new version and an explicit consumer migration. Exact ETag values/body bytes are not compatibility promises; source changes may change both.
 
-An optional URL is `?format=geojson&token=<opaque-token>`. Its token is a bearer secret disclosed to any third-party service consuming the URL and potentially browser history, referrers or platform/proxy request logs. Application diagnostics never log request URLs, headers or tokens; platform access logs are outside this code. Before enabling URL mode, the owner must ensure the hosting/proxy logging path omits or redacts query credentials. Use Authorization-based downloads until that is reviewed. Referrer-Policy helps but does not eliminate disclosure to the consuming service. Rotation means creating a new independent random token/digest and retiring old URLs.
+GET is the only feed method (including HEAD rejection): other methods return 405 with `Allow: GET`. Missing/malformed/incorrect authentication returns 401; unsupported formats/unknown request parameters return 400. Unavailable secret/Firestore or scope mismatch returns fixed 503 `feed_unavailable`. More than 100 confirmed Places or truncation returns hard 503 `feed_limit_exceeded`; this is never a successful capped snapshot. Errors never include provider bodies or user data. No create/update/delete endpoint or canonical write port exists.
 
-## Consumers and diagnostics
+### Snapshot completeness and caching
 
-Likely consumers include Organic Maps (manual GeoJSON/GPX/KML import where supported by its version), OsmAnd (manual GPX/KML import), uMap/compatible web maps (possible remote GeoJSON URL via their supported fetch/proxy mechanism) and future custom/PWA clients (direct GeoJSON consumption). Import support, CORS/proxy behavior, provider terms and remote URL credential disclosure must be assessed for the chosen client. No client-specific adapter is implemented.
+Authenticated 200 **and 304** include these decimal aggregate headers:
 
-`projection_request` contains fixed format, placesTotal, placesProjected, googleHydrated, providerFailures, missingLabels, invalidPlaces, budgetSkipped and truncated. No labels, coordinates, Place IDs, source URLs, feed tokens, headers, raw provider/errors or user content are logged. Provider refresh errors are isolated; application diagnostics remain aggregate-only. Tests exercise the standalone feed, all formats, independent labels/backfill, refresh isolation/timeouts/concurrency, ETags/authentication and absence of canonical writes with credential-free mocks.
+| Header                       | Meaning                                                                |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `X-Places-Total`             | Number of confirmed source Places read for this snapshot (maximum 100) |
+| `X-Places-Projected`         | Number of represented features                                         |
+| `X-Places-Snapshot-Complete` | Literal `true` or `false`                                              |
+
+Complete means total equals projected and providerFailures, missingLabels, invalidPlaces and budgetSkipped are all zero, with no truncation. An empty confirmed dataset is complete. A single refresh failure, missing label, invalid Place or budget skip makes the snapshot incomplete, even though successful siblings are returned. Headers/logs contain aggregates only, never names, IDs or coordinates. Scope mismatches remain hard failures. Error responses have no usable snapshot metadata.
+
+Content-derived SHA-256 ETags support authenticated `If-None-Match` / 304 (weak/list validators supported). Each request reads and hydrates current data before comparison; ETag identifies the body, while completeness describes the current projection attempt. A 304 can therefore carry updated completeness metadata with the same body. `Cache-Control: private, no-cache, max-age=0, must-revalidate`; `Referrer-Policy: no-referrer` and `X-Content-Type-Options: nosniff` are set. No permissive browser CORS is added.
+
+Consumer rules:
+
+- Complete 200: safe to replace the cached snapshot, subject to the existing provider retention/licensing policy.
+- Incomplete 200: may display live partial data; **MUST NOT automatically replace a previously complete offline snapshot**. Do not interpret omitted points as deletions.
+- 304: cached body remains current; inspect returned completeness metadata. Do not promote a cached partial body to complete merely because it received a 304.
+- 401, 503 or network failure: retain the cached snapshot.
+
+Completeness is a synchronization safeguard, not a license for indefinite Google coordinate retention. Hydrated Google coordinates remain transient provider content and are never written back to Firestore. Consumer caching must respect the existing Google Places destination/retention restrictions independently of API version/completeness.
+
+## Service-to-service authentication and deployment
+
+`placesFeed` uses europe-west3, minInstances 0, maxInstances 1, concurrency 2, and `places-runtime@mom-im-ok-places.iam.gserviceaccount.com`. Server `WORKSPACE_ID` scopes every read; clients cannot choose a workspace. Authentication retains a cryptographically random 32-byte (256-bit) canonical base64url token and constant-time SHA-256 comparison. Only the lowercase SHA-256 digest is stored in Secret Manager `PLACES_FEED_TOKEN_SHA256`; the runtime reads the latest version on every request. The plaintext belongs only on the future Mom-I-am-OK backend. Browser JavaScript and Android APKs must never hold the service credential; that backend authenticates application users separately and proxies authorized snapshots.
+
+Production URL-token mode remains `PLACES_FEED_URL_TOKENS_ENABLED=false`. Neither workflow creates/rotates credentials, grants IAM or enables APIs. The dedicated manually triggered **Deploy places feed** workflow runs only on main in the production GitHub Environment, using the same pinned Node/actions/WIF conventions and deployment concurrency lock as the webhook workflow. It runs secret scan, complete checks including rules, builds and smoke-imports a standalone production package, then deploys only `functions:places:placesFeed`. It never deploys webhook, Firestore rules/indexes or hosting.
+
+Packaging selects a function-specific entrypoint: webhook (the default) uses `dist/webhook-entry.js`; feed uses `--target feed` and `dist/feed-entry.js`. Firebase analyzes only the selected export and its parameter declarations. The same codebase `places` is retained, with explicit function-only selectors; pinned Firebase CLI 15.32.1 planner regressions verify the sibling function is neither updated nor deleted. Each function receives its own revision's environment. Shared `WORKSPACE_ID` comes from the same production variable, and the non-secret env generator is the single source of profile defaults. Webhook writes dormant feed flags false/false and does not import/own the feed parameters. Feed writes only WORKSPACE_ID and feed flags true/false; bot parameters are not discovered. A later webhook deploy cannot disable a deployed feed, and a feed deploy cannot reconfigure the webhook. Never replace these selectors with an unscoped codebase deploy.
+
+Expected function name: `placesFeed`. Expected URL shape: `https://europe-west3-mom-im-ok-places.cloudfunctions.net/placesFeed` (use the actual URL reported after owner deployment). Setup/rotation, post-deploy smoke and backfill plan are in the [production feed runbook](../infra/places-feed.md). Feed remains dormant until the owner sets up the digest/access and deliberately runs that workflow.
+
+## Future Organic Maps consumer
+
+Telegram Places Finder → canonical Firestore Places → private placesFeed → future Mom-I-am-OK backend → web/Android client → local cached snapshot → Organic Maps Android API.
+
+The future native bridge receives stable internal `Feature.id`, application label, latitude (`coordinates[1]`) and longitude (`coordinates[0]`) and converts these into Organic Maps API points. It must not depend on Google Place IDs or display payloads. Organic Maps owns current GPS position, offline base maps, walking routing and map UI. This repository adds no Organic Maps dependency, Android location permission, user location storage or routing logic. GPX/KML exports remain fallbacks rather than a parallel application-integration source.
+
+`projection_request` contains only fixed format, placesTotal, placesProjected, googleHydrated, providerFailures, missingLabels, invalidPlaces, budgetSkipped and truncated. No request URLs, Authorization headers, labels, coordinates, Place IDs, source URLs, tokens, raw errors/provider bodies or user content are logged. All automated coverage uses local fixtures/emulators, including owner smoke-client transport mocks; the normal suite makes no live feed request.

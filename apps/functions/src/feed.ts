@@ -8,7 +8,6 @@ import {
   type ProjectionFormat,
   type ProjectionCounts,
 } from '@places/core';
-import { type Place } from '@places/schemas';
 export type FeedRequest = {
   method: string;
   query: Record<string, unknown>;
@@ -29,7 +28,7 @@ export type FeedEvent = ProjectionCounts & {
 export type FeedDependencies = {
   allowUrlToken?: boolean;
   tokenDigest(): Promise<string>;
-  readPlaces(limit: number): Promise<{ places: Place[]; truncated: boolean }>;
+  readPlaces(limit: number): Promise<{ places: unknown[]; truncated: boolean }>;
   projection: ProjectionService;
   diagnostic?: (event: FeedEvent) => void;
 };
@@ -138,6 +137,17 @@ export async function handleFeed(
         ...headers,
         'Content-Type': PROJECTION_CONTENT_TYPES[selected] + '; charset=utf-8',
         ETag: etag,
+        'X-Places-Feed-Version': '1',
+        'X-Places-Total': String(counts.placesTotal),
+        'X-Places-Projected': String(counts.placesProjected),
+        'X-Places-Snapshot-Complete': String(
+          counts.placesTotal === counts.placesProjected &&
+            counts.providerFailures === 0 &&
+            counts.missingLabels === 0 &&
+            counts.invalidPlaces === 0 &&
+            counts.budgetSkipped === 0 &&
+            !source.truncated,
+        ),
       },
       body: matchesEtag(request.ifNoneMatch, etag) ? '' : body,
     };
