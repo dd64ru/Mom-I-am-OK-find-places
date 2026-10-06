@@ -194,7 +194,11 @@ export const RecognitionSchema = z
               .max(150)
               .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s))
               .optional(),
+            // Broader search locality (district, city, region) used to plan provider searches.
             areaHint: z.string().optional(),
+            // The venue's city or municipality only; omitted unless the model is confident.
+            // Optional so Recognition documents written before it existed still parse.
+            cityHint: z.string().optional(),
             confidence: Confidence,
           })
           .strict(),
@@ -593,30 +597,32 @@ const metadataValue = (text: string | undefined, max: number) => {
   const value = text === undefined ? '' : singleLine(text);
   return value && value.length <= max ? value : undefined;
 };
-// The confidence at and above which a Recognition clue's areaHint is trusted as a locality
-// (selectLocality's `vision` locality uses the same threshold).
+// The confidence at and above which a Recognition clue's locality hint is trusted
+// (selectLocality's `vision` locality uses the same threshold for areaHint; recognitionCity
+// uses it for cityHint).
 export const RECOGNITION_LOCALITY_MIN_CONFIDENCE = 0.85;
-// An areaHint naming alternatives ("Shanghai or Hangzhou", "Shanghai / Suzhou") is not one locality.
+// A hint naming alternatives ("Shanghai or Hangzhou", "Shanghai / Suzhou") is not one city.
 const ALTERNATIVE_LOCALITIES = /[;|/\\]|\s(?:or|или)\s|或/iu;
 const sameLocality = (a: string, b: string) =>
   a.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim() ===
   b.normalize('NFKC').toLowerCase().replace(/\s+/gu, ' ').trim();
 
-// A deterministic, unambiguous Recognition-derived locality for the bound clue, or undefined:
+// A deterministic, unambiguous Recognition city for the bound clue, or undefined. It reads the
+// dedicated cityHint (a city or municipality) only, never the broader search areaHint:
 //  - the clue is bound deterministically (recognitionClue: explicit index or the only clue);
 //  - its confidence reaches RECOGNITION_LOCALITY_MIN_CONFIDENCE;
-//  - its areaHint is one single-line locality, not a list of alternatives;
+//  - its cityHint is one single-line city, not a list of alternatives;
 //  - in a single-venue Recognition (clues are alternative readings of ONE venue) every other
-//    confident clue that carries an areaHint names the same locality; a recommendation list's
+//    confident clue that carries a cityHint names the same city; a recommendation list's
 //    clues are different venues, so each confident clue's own hint stands for its own venue.
 // The value is the Recognition's own text, kept as written (never reshaped from an address).
-export function recognitionLocality(
+export function recognitionCity(
   recognition: Recognition,
   index?: number,
 ): string | undefined {
   const clue = recognitionClue(recognition, index);
   if (!clue || clue.confidence < RECOGNITION_LOCALITY_MIN_CONFIDENCE) return;
-  const hint = metadataValue(clue.areaHint, MAX_MAP_CITY);
+  const hint = metadataValue(clue.cityHint, MAX_MAP_CITY);
   if (!hint || ALTERNATIVE_LOCALITIES.test(hint)) return;
   if (recognition.mode !== 'recommendation_list') {
     const conflicting = recognition.clues.some((other) => {
@@ -625,7 +631,7 @@ export function recognitionLocality(
         other.confidence < RECOGNITION_LOCALITY_MIN_CONFIDENCE
       )
         return false;
-      const otherHint = metadataValue(other.areaHint, MAX_MAP_CITY);
+      const otherHint = metadataValue(other.cityHint, MAX_MAP_CITY);
       return otherHint !== undefined && !sameLocality(otherHint, hint);
     });
     if (conflicting) return;
@@ -638,8 +644,9 @@ export function recognitionLocality(
 // Google address/city/types are structurally unreachable here; this function never reads a
 // candidate address, a Verification candidate city or any provider response.
 //   city:     Discovery.cityOverride (user) first, when both exist; otherwise the bound clue's
-//             deterministic, unambiguous Recognition locality (recognitionLocality,
+//             deterministic, unambiguous Recognition cityHint (recognitionCity,
 //             `recognition`), and only for the photographed venue itself, never a related branch.
+//             The broader search areaHint is never a city.
 //   category: the bound clue's own category (recognition); a related branch of the same
 //             deterministic clue may inherit it, because it describes the same brand.
 export function mapMetadataFor(
@@ -655,22 +662,37 @@ export function mapMetadataFor(
     candidate.recognitionClueIndex,
   );
   const userCity = metadataValue(discovery.cityOverride, MAX_MAP_CITY);
-  const recognitionCity = related
+  const boundCity = related
     ? undefined
-    : recognitionLocality(
-        discovery.recognition,
-        candidate.recognitionClueIndex,
-      );
+    : recognitionCity(discovery.recognition, candidate.recognitionClueIndex);
   const category = metadataValue(clue?.category, MAX_MAP_CATEGORY);
   const parsed = MapMetadataSchema.safeParse({
     ...(userCity
       ? { city: { value: userCity, source: 'user' } }
-      : recognitionCity
-        ? { city: { value: recognitionCity, source: 'recognition' } }
+      : boundCity
+        ? { city: { value: boundCity, source: 'recognition' } }
         : {}),
     ...(category
       ? { category: { value: category, source: 'recognition' } }
       : {}),
   });
   return parsed.success ? parsed.data : undefined;
+}
+
+// Enrichment of an already stored Place: the derived application-owned metadata fills ONLY the
+// fields the Place does not have yet. An existing city or category is never overwritten,
+// whatever its source. Returns the merged metadata, or undefined when nothing is missing.
+export function fillMissingMapMetadata(
+  existing: MapMetadata | undefined,
+  derived: MapMetadata | undefined,
+): MapMetadata | undefined {
+  if (!derived) return;
+  const city = existing?.city ? undefined : derived.city;
+  const category = existing?.category ? undefined : derived.category;
+  if (!city && !category) return;
+  return MapMetadataSchema.parse({
+    ...(existing ?? {}),
+    ...(city ? { city } : {}),
+    ...(category ? { category } : {}),
+  });
 }

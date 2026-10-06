@@ -141,7 +141,7 @@ export function planPlaceMapMetadata(
     planned: 0,
     cityPlanned: 0,
     categoryPlanned: 0,
-    // Nothing independent to derive from (for example no user city and no clue areaHint).
+    // Nothing independent to derive from (for example no user city and no bound clue cityHint; a historical areaHint is never promoted).
     cityUnavailable: 0,
     categoryUnavailable: 0,
     // Conflicting or ambiguous independent derivations: skipped, never guessed.

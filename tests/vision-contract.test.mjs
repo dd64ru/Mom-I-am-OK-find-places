@@ -199,3 +199,50 @@ test('durable legacy recognition decoder remains compatible without permitting f
     recommendations,
   );
 });
+test('vision contract defines cityHint as a confident city or municipality, separate from areaHint', () => {
+  const contract = visionInstructions.slice(
+    visionInstructions.indexOf('Return only a JSON object'),
+  );
+  assert.match(contract, /"areaHint"\?: string, "cityHint"\?: string/);
+  assert.match(contract, /areaHint keeps its broader search-locality meaning/);
+  assert.match(
+    contract,
+    /cityHint is narrower and optional: the CITY OR MUNICIPALITY/,
+  );
+  assert.match(
+    contract,
+    /Never put a district, borough, neighbourhood, province, state, country or landmark in cityHint/,
+  );
+  assert.match(
+    contract,
+    /Omit cityHint whenever the city cannot be determined confidently/,
+  );
+});
+for (const provider of ['openai', 'gemini'])
+  test(`${provider} recognition parser keeps an optional cityHint beside areaHint`, async () => {
+    const payload = {
+      mode: 'single_venue',
+      visibleText: [],
+      clues: [
+        {
+          ...clue('Cedar Gallery'),
+          areaHint: 'Pudong, Shanghai',
+          cityHint: 'Shanghai',
+        },
+      ],
+    };
+    await withVision(provider, payload, async (vision) => {
+      const result = await vision.recognize(images);
+      assert.equal(result.recognition.clues[0].cityHint, 'Shanghai');
+      assert.equal(result.recognition.clues[0].areaHint, 'Pudong, Shanghai');
+    });
+  });
+test('legacy recognition without cityHint still parses', () => {
+  const legacy = {
+    mode: 'single_venue',
+    visibleText: [],
+    clues: [{ ...clue('Cedar Gallery'), areaHint: 'Shanghai' }],
+  };
+  assert.deepEqual(RecognitionSchema.parse(legacy), legacy);
+  assert.equal(RecognitionSchema.parse(legacy).clues[0].cityHint, undefined);
+});

@@ -12,7 +12,7 @@ import {
   PlaceSchema,
   ProjectedPlaceSchema,
   mapMetadataFor,
-  recognitionLocality,
+  recognitionCity,
   RECOGNITION_LOCALITY_MIN_CONFIDENCE,
 } from '@places/schemas';
 import { backfillPlaceMapMetadata } from '../scripts/backfill-place-map-metadata.mjs';
@@ -146,20 +146,20 @@ test('a Recognition city is persisted only when deterministic and unambiguous', 
     ...(mode ? { mode } : {}),
   });
   assert.equal(RECOGNITION_LOCALITY_MIN_CONFIDENCE, 0.85);
-  // Confident single clue: its own areaHint, as written, source recognition.
+  // Confident single clue: its own cityHint, as written, source recognition.
   assert.deepEqual(
     mapMetadataFor(
-      { recognition: recognition([clue('gaga', { areaHint: '  Shanghai ' })]) },
+      { recognition: recognition([clue('gaga', { cityHint: '  Shanghai ' })]) },
       {},
     ).city,
     { value: 'Shanghai', source: 'recognition' },
   );
   // Below the locality threshold selectLocality trusts: no city.
   assert.equal(
-    recognitionLocality(
+    recognitionCity(
       recognition([
         clue('Happy Harbour', {
-          areaHint: "Shenzhen, Bao'an",
+          cityHint: "Shenzhen, Bao'an",
           confidence: 0.65,
         }),
       ]),
@@ -175,23 +175,23 @@ test('a Recognition city is persisted only when deterministic and unambiguous', 
     'A; B',
   ]) {
     assert.equal(
-      recognitionLocality(recognition([clue('x', { areaHint: hint })])),
+      recognitionCity(recognition([clue('x', { cityHint: hint })])),
       undefined,
       hint,
     );
   }
   // Single venue: other confident readings of the same venue must agree (case/space-insensitive).
   const agreeing = recognition([
-    clue('a', { areaHint: 'Shanghai' }),
-    clue('b', { areaHint: ' shanghai ' }),
+    clue('a', { cityHint: 'Shanghai' }),
+    clue('b', { cityHint: ' shanghai ' }),
     clue('c'),
   ]);
-  assert.equal(recognitionLocality(agreeing, 1), 'shanghai');
+  assert.equal(recognitionCity(agreeing, 1), 'shanghai');
   const conflicting = recognition([
-    clue('a', { areaHint: 'Shanghai' }),
-    clue('b', { areaHint: 'Hangzhou' }),
+    clue('a', { cityHint: 'Shanghai' }),
+    clue('b', { cityHint: 'Hangzhou' }),
   ]);
-  assert.equal(recognitionLocality(conflicting, 0), undefined);
+  assert.equal(recognitionCity(conflicting, 0), undefined);
   assert.equal(
     mapMetadataFor({ recognition: conflicting }, { recognitionClueIndex: 0 })
       .city,
@@ -199,33 +199,33 @@ test('a Recognition city is persisted only when deterministic and unambiguous', 
   );
   // A low-confidence dissent does not make it ambiguous.
   const weakDissent = recognition([
-    clue('a', { areaHint: 'Shanghai' }),
-    clue('b', { areaHint: 'Hangzhou', confidence: 0.5 }),
+    clue('a', { cityHint: 'Shanghai' }),
+    clue('b', { cityHint: 'Hangzhou', confidence: 0.5 }),
   ]);
-  assert.equal(recognitionLocality(weakDissent, 0), 'Shanghai');
+  assert.equal(recognitionCity(weakDissent, 0), 'Shanghai');
   // Recommendation list: different venues, each confident clue's own hint is its own city.
   const list = recognition(
     [
       clue('a', {
-        areaHint: 'Shanghai',
+        cityHint: 'Shanghai',
         recommendationEvidence: 'numbered_list',
       }),
       clue('b', {
-        areaHint: 'Hangzhou',
+        cityHint: 'Hangzhou',
         recommendationEvidence: 'numbered_list',
       }),
     ],
     'recommendation_list',
   );
-  assert.equal(recognitionLocality(list, 0), 'Shanghai');
-  assert.equal(recognitionLocality(list, 1), 'Hangzhou');
+  assert.equal(recognitionCity(list, 0), 'Shanghai');
+  assert.equal(recognitionCity(list, 1), 'Hangzhou');
   // Unbound among several clues: not deterministic.
-  assert.equal(recognitionLocality(list), undefined);
+  assert.equal(recognitionCity(list), undefined);
   // The explicit user city wins over a Recognition city when both exist.
   assert.deepEqual(
     mapMetadataFor(
       {
-        recognition: recognition([clue('gaga', { areaHint: 'Shanghai' })]),
+        recognition: recognition([clue('gaga', { cityHint: 'Shanghai' })]),
         cityOverride: 'Hangzhou',
       },
       {},
@@ -260,20 +260,20 @@ test('mapMetadataFor derives city only from the user override or the bound clue,
   );
   const hinted = {
     visibleText: [],
-    clues: [clue('gaga', { areaHint: 'Shanghai', category: 'cafe' })],
+    clues: [clue('gaga', { cityHint: 'Shanghai', category: 'cafe' })],
   };
   assert.deepEqual(mapMetadataFor({ recognition: hinted }, {}), {
     city: { value: 'Shanghai', source: 'recognition' },
     category: { value: 'cafe', source: 'recognition' },
   });
-  // The user override beats the clue's own areaHint.
+  // The user override beats the clue's own cityHint.
   assert.equal(
     mapMetadataFor({ recognition: hinted, cityOverride: 'Hangzhou' }, {}).city
       .source,
     'user',
   );
   // A related branch keeps the user city and the brand category, never the photographed
-  // venue's own areaHint.
+  // venue's own cityHint.
   assert.deepEqual(
     mapMetadataFor({ recognition: hinted }, { relationship: 'related_branch' }),
     { category: { value: 'cafe', source: 'recognition' } },
@@ -282,7 +282,7 @@ test('mapMetadataFor derives city only from the user override or the bound clue,
   const multi = {
     visibleText: [],
     clues: [
-      clue('a', { areaHint: 'Shanghai' }),
+      clue('a', { cityHint: 'Shanghai' }),
       clue('b', { category: 'bar' }),
     ],
   };
@@ -301,7 +301,7 @@ test('mapMetadataFor derives city only from the user override or the bound clue,
       {
         recognition: {
           visibleText: [],
-          clues: [clue('x', { category: ' ', areaHint: 'y'.repeat(300) })],
+          clues: [clue('x', { category: ' ', cityHint: 'y'.repeat(300) })],
         },
       },
       {},
@@ -351,11 +351,11 @@ test('metadata backfill skips conflicts, prefers the user source and lets relate
   assert.deepEqual(conflict.updates[0].add, {
     category: { value: 'restaurant', source: 'recognition' },
   });
-  // A user city outranks a different clue areaHint from another confirmation.
+  // A user city outranks a different clue cityHint from another confirmation.
   const hinted = discovery('h', {
     recognition: {
       visibleText: [],
-      clues: [clue('gaga', { areaHint: 'Pudong' })],
+      clues: [clue('gaga', { cityHint: 'Pudong' })],
     },
   });
   assert.deepEqual(
@@ -366,7 +366,7 @@ test('metadata backfill skips conflicts, prefers the user source and lets relate
   const multi = discovery('m', {
     recognition: {
       visibleText: [],
-      clues: [clue('gaga', { areaHint: 'Jing an', category: 'noodles' })],
+      clues: [clue('gaga', { cityHint: 'Jing an', category: 'noodles' })],
     },
     candidates: [
       {
@@ -612,4 +612,35 @@ test('additive metadata changes the content ETag only when a feature property ch
   assert.ok(
     MapMetadataSchema.parse({ category: { value: 'x', source: 'user' } }),
   );
+});
+
+test('the broader search areaHint never becomes a map city, in confirmation or backfill', () => {
+  const areaOnly = {
+    visibleText: [],
+    clues: [clue('gaga', { areaHint: 'Shanghai', confidence: 0.99 })],
+  };
+  assert.equal(recognitionCity(areaOnly, 0), undefined);
+  assert.deepEqual(mapMetadataFor({ recognition: areaOnly }, {}), {
+    category: { value: 'restaurant', source: 'recognition' },
+  });
+  // A cityHint is read independently of a (different, broader) areaHint.
+  const both = {
+    visibleText: [],
+    clues: [clue('gaga', { areaHint: 'Pudong', cityHint: 'Shanghai' })],
+  };
+  assert.deepEqual(mapMetadataFor({ recognition: both }, {}).city, {
+    value: 'Shanghai',
+    source: 'recognition',
+  });
+  // Historical discoveries carrying only an areaHint are never promoted by the backfill.
+  const historical = discovery('legacy', { recognition: areaOnly });
+  const plan = planPlaceMapMetadata([google], [historical]);
+  assert.deepEqual(plan.updates, [
+    {
+      placeId: google.id,
+      add: { category: { value: 'restaurant', source: 'recognition' } },
+      discoveryIds: ['legacy'],
+    },
+  ]);
+  assert.equal(plan.counts.cityUnavailable, 1);
 });

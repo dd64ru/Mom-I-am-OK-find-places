@@ -2,12 +2,14 @@ import { createHash } from 'node:crypto';
 import { Firestore } from '@google-cloud/firestore';
 import {
   IdSchema,
+  fillMissingMapMetadata,
   mapMetadataFor,
   recognitionLabel,
   WorkspaceSchema,
   PlaceSchema,
   ChainSchema,
   DiscoverySchema,
+  type MapMetadata,
   type Place,
   type Chain,
   type Discovery,
@@ -156,6 +158,10 @@ export class FirestoreRepository implements PlacesRepository {
           ref: ReturnType<FirestoreRepository['doc']>;
           place: Place;
         }[] = [];
+        const enrichments: {
+          ref: ReturnType<FirestoreRepository['doc']>;
+          mapMetadata: MapMetadata;
+        }[] = [];
         for (const [index, [placeId, candidate]] of entries.entries()) {
           const placeRef = this.doc(workspaceId, 'places', placeId),
             existing = snapshots[index]!;
@@ -189,8 +195,28 @@ export class FirestoreRepository implements PlacesRepository {
           );
           if (!source || candidate.resolution !== 'deterministic_poi')
             throw new Error('deterministic_candidate_required');
-          const place = existing.exists
+          const stored = existing.exists
             ? PlaceSchema.parse(existing.data())
+            : undefined;
+          // A reused Google Place gains the same application-owned map metadata, but only
+          // for fields it does not have yet: an existing city/category is never overwritten,
+          // whatever its source, and nothing else on the Place changes because it was reused.
+          const missing =
+            stored &&
+            'providerIdentity' in stored &&
+            stored.providerIdentity.provider === 'google-places'
+              ? fillMissingMapMetadata(stored.mapMetadata, mapMetadata)
+              : undefined;
+          if (stored && missing)
+            enrichments.push({ ref: placeRef, mapMetadata: missing });
+          const place = stored
+            ? missing
+              ? PlaceSchema.parse({
+                  ...stored,
+                  mapMetadata: missing,
+                  updatedAt: time,
+                })
+              : stored
             : PlaceSchema.parse({
                 ...fields,
                 ...(candidate.relationship?.startsWith('related_')
@@ -213,6 +239,8 @@ export class FirestoreRepository implements PlacesRepository {
           else writes.push({ ref: placeRef, place });
         }
         for (const { ref, place } of writes) tx.create(ref, clean(place));
+        for (const { ref, mapMetadata } of enrichments)
+          tx.update(ref, clean({ mapMetadata, updatedAt: time }));
       }
       const next = DiscoverySchema.parse({
         ...discovery,

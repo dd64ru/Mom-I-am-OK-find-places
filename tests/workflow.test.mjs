@@ -85,6 +85,11 @@ class MemoryDb {
           written = true;
           changes.push([ref.path, v]);
         },
+        update: (ref, v) => {
+          assert.equal(this.values.has(ref.path), true, 'update needs a doc');
+          written = true;
+          changes.push([ref.path, { ...this.values.get(ref.path), ...v }]);
+        },
       });
       for (const [path, value] of changes)
         this.values.set(path, structuredClone(value));
@@ -2926,6 +2931,103 @@ test('confirmation persists application-owned map metadata: user city and Recogn
     city: { value: 'My Shanghai', source: 'user' },
     category: { value: 'My cafe', source: 'user' },
   });
+});
+
+test('a reused Google Place gains only its missing map metadata fields, atomically, and nothing else changes', async () => {
+  const r = alimentariRecognition(0.99);
+  r.clues[0].category = 'unknown-venue';
+  const branch = {
+    ...alimentariRow,
+    displayName: { text: 'Alimentari Grande Riverside (Donghu Road Branch)' },
+    types: ['establishment', 'point_of_interest'],
+    formattedAddress: '18 Donghu Road, Shanghai, China',
+    addressComponents: [
+      { longText: 'Shanghai', types: ['administrative_area_level_1'] },
+      { longText: 'China', shortText: 'CN', types: ['country'] },
+    ],
+  };
+  const f = await setup({
+    recognition: r,
+    verify: () => assert.fail('first pass suffices'),
+    poi: alimentariProvider([branch]),
+  });
+  const pending = {
+    id: 'reuse-fill-1',
+    workspaceId: 'fixture',
+    recognition: r,
+    source: { provider: 'telegram', observedAt: time },
+    candidates: [],
+    visionProvider: 'fixture',
+    status: 'awaiting_city',
+    revision: 1,
+    createdAt: time,
+  };
+  const confirmIn = async (id, city) =>
+    f.service.finish(
+      await f.service.correctCity(
+        await f.repository.createDiscovery({ ...pending, id }),
+        city,
+      ),
+      'confirm',
+    );
+  const first = await confirmIn('reuse-fill-1', 'Shanghai');
+  // A Place stored before map metadata existed: no mapMetadata at all.
+  const { mapMetadata: _, ...legacy } = first.place;
+  const legacyPlace = {
+    ...legacy,
+    label: 'My own label',
+    labelSource: 'user',
+    tags: ['kept'],
+  };
+  await f.repository.savePlace(legacyPlace);
+  const second = await confirmIn('reuse-fill-2', 'Shanghai');
+  assert.equal(second.reusedCount, 1);
+  const filled = await f.repository.getPlace('fixture', first.place.id);
+  assert.deepEqual(filled.mapMetadata, {
+    city: { value: 'Shanghai', source: 'user' },
+    category: { value: 'unknown-venue', source: 'recognition' },
+  });
+  assert.deepEqual(second.place, filled);
+  // Only mapMetadata (and updatedAt) changed; label, identity, references, tags, status stay.
+  const { mapMetadata: _m, updatedAt: _u, ...rest } = filled;
+  const { updatedAt: _lu, ...legacyRest } = legacyPlace;
+  assert.deepEqual(rest, legacyRest);
+  for (const prohibited of [
+    'Donghu',
+    'Riverside',
+    'formatted',
+    'establishment',
+  ])
+    assert.equal(
+      JSON.stringify(filled).includes(prohibited),
+      false,
+      prohibited,
+    );
+
+  // Existing city (any source, even a weaker one) is never overwritten; only the missing
+  // category is filled.
+  await f.repository.savePlace({
+    ...filled,
+    mapMetadata: {
+      city: { value: 'Old recognised city', source: 'recognition' },
+    },
+  });
+  await confirmIn('reuse-fill-3', 'Hangzhou');
+  assert.deepEqual(
+    (await f.repository.getPlace('fixture', first.place.id)).mapMetadata,
+    {
+      city: { value: 'Old recognised city', source: 'recognition' },
+      category: { value: 'unknown-venue', source: 'recognition' },
+    },
+  );
+
+  // Nothing missing: the reused Place document is not written at all.
+  const before = await f.repository.getPlace('fixture', first.place.id);
+  await confirmIn('reuse-fill-4', 'Beijing');
+  assert.deepEqual(
+    await f.repository.getPlace('fixture', first.place.id),
+    before,
+  );
 });
 
 test('production Alimentari partial with English Shanghai admin component resolves first pass after city intent is available, skipping web and showing Add', async () => {
