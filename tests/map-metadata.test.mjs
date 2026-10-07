@@ -551,7 +551,6 @@ test('Google projection exposes only application-owned city/category and never a
     label: 'gaga',
     tags: [],
     provider: 'google-places',
-    coordinateSystem: 'gcj02',
     category: 'restaurant',
     city: 'Shanghai',
   });
@@ -559,13 +558,11 @@ test('Google projection exposes only application-owned city/category and never a
     label: 'Eli falafel',
     tags: [],
     provider: 'google-places',
-    coordinateSystem: 'gcj02',
   });
   assert.deepEqual(features[osm.id], {
     label: 'Independent OSM name',
     tags: [],
     provider: 'nominatim',
-    coordinateSystem: 'wgs84',
     attribution:
       '© OpenStreetMap contributors; https://www.openstreetmap.org/copyright',
     category: 'park',

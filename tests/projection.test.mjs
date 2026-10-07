@@ -14,7 +14,6 @@ import {
 import {
   PlaceSchema,
   DiscoverySchema,
-  ProjectedPlaceSchema,
   recognitionLabel,
 } from '@places/schemas';
 import {
@@ -363,28 +362,6 @@ test('projection uses durable OSM and transient refreshed Google coordinates; mi
   for (const prohibited of ['address', 'attributions', 'types'])
     assert.equal(JSON.stringify(result.places[0]).includes(prohibited), false);
 });
-test('every projected coordinate names its reference system: Google GCJ-02, OSM WGS84; the coordinates are never changed', async () => {
-  const result = await new ProjectionService({
-    refresh: async () => clone(view),
-  }).project([osm, labeled]);
-  const byId = Object.fromEntries(result.places.map((p) => [p.id, p]));
-  assert.equal(byId['google-place'].coordinateSystem, 'gcj02');
-  assert.equal(byId['osm-place'].coordinateSystem, 'wgs84');
-  assert.deepEqual(byId['google-place'].coordinates, view.coordinates);
-  assert.deepEqual(byId['osm-place'].coordinates, osm.coordinates);
-  const features = Object.fromEntries(
-    geojson(result.places).features.map((f) => [f.id, f.properties]),
-  );
-  assert.equal(features['google-place'].coordinateSystem, 'gcj02');
-  assert.equal(features['osm-place'].coordinateSystem, 'wgs84');
-  // The transient model refuses a reference system that contradicts its source.
-  for (const place of [
-    { ...byId['google-place'], coordinateSystem: 'wgs84' },
-    { ...byId['osm-place'], coordinateSystem: 'gcj02' },
-    { ...byId['osm-place'], coordinateSystem: undefined },
-  ])
-    assert.equal(ProjectedPlaceSchema.safeParse(place).success, false);
-});
 test('identity mismatch and malformed hydrated coordinates cannot enter projection', async () => {
   for (const returned of [
     { ...view, providerIdentity: { provider: 'google-places', id: 'wrong' } },
@@ -448,7 +425,6 @@ test('GeoJSON is an RFC 7946 FeatureCollection with stable IDs and longitude,lat
     label: 'Happy Harbour',
     tags: ['personal'],
     provider: 'google-places',
-    coordinateSystem: 'gcj02',
   });
   assert.equal('crs' in result, false);
 });

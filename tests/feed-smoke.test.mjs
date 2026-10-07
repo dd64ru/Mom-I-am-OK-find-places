@@ -229,31 +229,3 @@ test('smoke fails safely on upstream exceptions, rejects credential URLs and nev
     /console\.(?:log|info|error)\((?:token|body|feature|response|url)/,
   );
 });
-test('smoke accepts the additive coordinateSystem only when it matches the provider', () => {
-  const withProps = (properties) => ({
-    ...body(),
-    features: [{ ...feature, properties }],
-  });
-  const osm = { label: 'L', tags: [], provider: 'osm' };
-  assert.equal(
-    validateFeedGeojson(
-      withProps({ ...feature.properties, coordinateSystem: 'gcj02' }),
-    ),
-    1,
-  );
-  assert.equal(
-    validateFeedGeojson(withProps({ ...osm, coordinateSystem: 'wgs84' })),
-    1,
-  );
-  // Absent (an older feed) stays valid.
-  assert.equal(validateFeedGeojson(withProps(osm)), 1);
-  for (const properties of [
-    { ...feature.properties, coordinateSystem: 'wgs84' },
-    { ...osm, coordinateSystem: 'gcj02' },
-    { ...osm, coordinateSystem: 'bd09' },
-  ])
-    assert.throws(
-      () => validateFeedGeojson(withProps(properties)),
-      /^Error: feed_smoke_failed$/,
-    );
-});

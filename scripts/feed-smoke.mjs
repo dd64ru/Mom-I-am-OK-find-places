@@ -71,7 +71,6 @@ export function validateFeedGeojson(body) {
             'label',
             'tags',
             'provider',
-            'coordinateSystem',
             'category',
             'city',
             'address',
@@ -87,13 +86,6 @@ export function validateFeedGeojson(body) {
           key in props &&
           (typeof props[key] !== 'string' || !props[key].trim()),
       )
-    )
-      fail();
-    // coordinateSystem is optional (older feeds) and, when present, matches the provider.
-    if (
-      'coordinateSystem' in props &&
-      props.coordinateSystem !==
-        (props.provider === 'google-places' ? 'gcj02' : 'wgs84')
     )
       fail();
     // Google features may carry only application-owned city/category, never an address.

@@ -321,10 +321,6 @@ export const PlaceDisplaySchema = CandidateSchema.pick({
 });
 export type PlaceDisplay = z.infer<typeof PlaceDisplaySchema>;
 // Transient provider-neutral map projection; never a durable Place or Discovery.
-// Coordinate reference systems a projected coordinate can be in. A consumer that needs WGS84
-// (an external map such as Organic Maps) adapts a `gcj02` coordinate inside mainland China.
-export const CoordinateSystemSchema = z.enum(['wgs84', 'gcj02']);
-export type CoordinateSystem = z.infer<typeof CoordinateSystemSchema>;
 export const ProjectedPlaceSchema = z
   .object({
     id: IdSchema,
@@ -335,10 +331,6 @@ export const ProjectedPlaceSchema = z
     city: z.string().min(1).optional(),
     // Independently licensed (OSM/Nominatim) formatted address only; never Google content.
     address: z.string().min(1).optional(),
-    // The coordinate reference system of `coordinates` (coordinate semantics, not provider
-    // display content). Google-backed coordinates are GCJ-02 in mainland China (and equal to
-    // WGS84 elsewhere, where GCJ-02 applies no offset); OSM/Nominatim coordinates are WGS84.
-    coordinateSystem: CoordinateSystemSchema,
     providerIdentity: z.union([
       GoogleIdentitySchema,
       z
@@ -354,12 +346,6 @@ export const ProjectedPlaceSchema = z
       p.providerIdentity.provider !== 'google-places' ||
       p.address === undefined,
     'google_address_forbidden',
-  )
-  .refine(
-    (p) =>
-      p.coordinateSystem ===
-      (p.providerIdentity.provider === 'google-places' ? 'gcj02' : 'wgs84'),
-    'coordinate_system_mismatch',
   );
 export type ProjectedPlace = z.infer<typeof ProjectedPlaceSchema>;
 export const GeographicContextSchema = z

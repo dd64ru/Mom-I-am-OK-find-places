@@ -123,6 +123,8 @@ export class ProjectionService {
                 view.providerIdentity.id !== place.providerIdentity.id
               )
                 throw new Error('projection_identity_mismatch');
+              // The adapter's own coordinate value, CRS included (the Places API location is
+              // WGS84 per GooglePlacesPoi); never re-labelled from the provider name.
               const coordinates = CoordinatesSchema.parse(view.coordinates);
               // city/category come only from application-owned mapMetadata; a Google
               // feature never carries an address.
@@ -139,8 +141,6 @@ export class ProjectionService {
                     ? { category: place.mapMetadata.category.value }
                     : {}),
                   providerIdentity: place.providerIdentity,
-                  // Google coordinates follow GCJ-02 inside mainland China.
-                  coordinateSystem: 'gcj02',
                 }),
               );
               counts.googleHydrated++;
@@ -167,7 +167,6 @@ export class ProjectionService {
                   id: place.source.externalId ?? place.id,
                 },
                 ...(place.source.url ? { sourceLink: place.source.url } : {}),
-                coordinateSystem: 'wgs84',
               }),
             );
           }
@@ -193,6 +192,21 @@ const osmAttribution = (place: ProjectedPlace) =>
   ['nominatim', 'osm'].includes(place.providerIdentity.provider)
     ? '© OpenStreetMap contributors; https://www.openstreetmap.org/copyright'
     : undefined;
+// Every serialized position is WGS84: RFC 7946 GeoJSON requires it, and GPX 1.1 and KML 2.2
+// define their coordinates as WGS84 too. The CRS travels with the coordinate value itself
+// (CoordinatesSchema `crs`, stated by the acquisition adapter that produced it: the Places
+// API location in GooglePlacesPoi, the stored OSM/Nominatim coordinates), never from the
+// provider name. A coordinate in any other system must be converted to WGS84 by its adapter
+// before it reaches a serializer; this guard refuses it instead of emitting mislabelled numbers.
+export function wgs84Position(coordinates: ProjectedPlace['coordinates']) {
+  if (coordinates.crs !== 'WGS84')
+    throw new Error('projection_non_wgs84_coordinates');
+  return { latitude: coordinates.latitude, longitude: coordinates.longitude };
+}
+const wgs84LongitudeLatitude = (p: ProjectedPlace): [number, number] => {
+  const { latitude, longitude } = wgs84Position(p.coordinates);
+  return [longitude, latitude];
+};
 export function geojson(places: readonly ProjectedPlace[]) {
   return {
     type: 'FeatureCollection' as const,
@@ -201,13 +215,12 @@ export function geojson(places: readonly ProjectedPlace[]) {
       id: p.id,
       geometry: {
         type: 'Point' as const,
-        coordinates: [p.coordinates.longitude, p.coordinates.latitude],
+        coordinates: wgs84LongitudeLatitude(p),
       },
       properties: {
         label: p.label,
         tags: p.tags,
         provider: p.providerIdentity.provider,
-        coordinateSystem: p.coordinateSystem,
         ...(osmAttribution(p) ? { attribution: osmAttribution(p) } : {}),
         ...(p.category !== undefined ? { category: p.category } : {}),
         ...(p.city !== undefined ? { city: p.city } : {}),
@@ -249,7 +262,7 @@ export function gpx(places: readonly ProjectedPlace[]) {
     ordered(places)
       .map(
         (p) =>
-          `<wpt lat="${p.coordinates.latitude}" lon="${p.coordinates.longitude}"><name>${xmlText(p.label)}</name>${osmAttribution(p) ? `<desc>${xmlText(osmAttribution(p)!)}</desc>` : ''}</wpt>`,
+          `<wpt lat="${wgs84LongitudeLatitude(p)[1]}" lon="${wgs84LongitudeLatitude(p)[0]}"><name>${xmlText(p.label)}</name>${osmAttribution(p) ? `<desc>${xmlText(osmAttribution(p)!)}</desc>` : ''}</wpt>`,
       )
       .join('') +
     '</gpx>\n'
@@ -261,7 +274,7 @@ export function kml(places: readonly ProjectedPlace[]) {
     ordered(places)
       .map(
         (p) =>
-          `<Placemark id="place-${p.id}"><name>${xmlText(p.label)}</name>${osmAttribution(p) ? `<description>${xmlText(osmAttribution(p)!)}</description>` : ''}<Point><coordinates>${p.coordinates.longitude},${p.coordinates.latitude}</coordinates></Point></Placemark>`,
+          `<Placemark id="place-${p.id}"><name>${xmlText(p.label)}</name>${osmAttribution(p) ? `<description>${xmlText(osmAttribution(p)!)}</description>` : ''}<Point><coordinates>${wgs84LongitudeLatitude(p).join(',')}</coordinates></Point></Placemark>`,
       )
       .join('') +
     '</Document></kml>\n'
