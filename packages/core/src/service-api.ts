@@ -295,8 +295,6 @@ export class PlacesServiceApi {
     if (['needs_confirmation', 'needs_selection'].includes(discovery.status))
       for (let i = 0; i < discovery.candidates.length; i++) {
         const candidate = discovery.candidates[i]!;
-        const view = await this.service.displayCandidate(discovery, i);
-        if (!view) throw new Error('provider_refresh_unavailable');
         // Transient display may travel in this response, but the consumer persists only indices/status.
         const owned = candidate.relationship?.startsWith('related_')
           ? undefined
@@ -308,14 +306,27 @@ export class PlacesServiceApi {
           owned && NewSavedLabelSchema.safeParse(owned.label).success
             ? owned.label
             : undefined;
+        // A single bound application label and previously resolved Google identity
+        // suffice for verification. No cached Google display content is needed.
+        const stable =
+          !!label &&
+          discovery.candidates.length === 1 &&
+          candidate.providerIdentity?.provider === 'google-places' &&
+          candidate.relationship === 'plausible_exact';
+        const view = stable
+          ? null
+          : await this.service.displayCandidate(discovery, i);
+        if (!stable && !view) throw new Error('provider_refresh_unavailable');
         candidates.push({
           index: i,
           ...(label ? { label } : {}),
           requiresLabel: !label,
-          name: view.canonicalName,
-          googleMapsUrl:
-            view.references.find((r) => r.provider === 'google-places')?.url ??
-            `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${view.coordinates.latitude},${view.coordinates.longitude}`)}`,
+          name: stable ? label! : view!.canonicalName,
+          googleMapsUrl: stable
+            ? `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(label!)}&query_place_id=${encodeURIComponent(candidate.providerIdentity!.id)}`
+            : (view!.references.find((r) => r.provider === 'google-places')
+                ?.url ??
+              `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(`${view!.coordinates.latitude},${view!.coordinates.longitude}`)}`),
           attribution:
             candidate.providerIdentity?.provider === 'google-places'
               ? 'Google Maps'

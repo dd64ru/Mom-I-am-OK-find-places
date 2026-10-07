@@ -109,3 +109,18 @@ locality identities. It has no Firestore client or apply mode. It performs bound
 provider reads only when an owner deliberately invokes it. Nothing was run against
 production. Applying reviewed plans to legacy Places requires a later authorized
 migration with stale fencing; ambiguous results must stay unchanged.
+
+## Low-cost review and exact invoker policy
+
+For one plausible-exact Google candidate with a bound application-owned label,
+review constructs the Maps verification URL from the previously resolved stored
+provider ID and that label without fetching Google display content again.
+Unlabeled, multi-candidate and viewpoint/related hypotheses retain transient
+provider refresh. Confirmation always retains its authoritative provider refresh.
+No provider display content is cached to implement this optimization.
+
+Service deployment reconciliation rejects any Run Invoker member except the
+configured App caller, including conditional bindings, before writing and after
+reading back. An unexpected existing invoker requires owner review; the workflow
+never silently removes it or replaces the whole policy. Unrelated non-Invoker
+roles are preserved.

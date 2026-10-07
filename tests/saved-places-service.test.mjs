@@ -839,3 +839,43 @@ for (const labelSource of ['user', 'recognition'])
     assert.equal((await api.execute(command)).reusedCount, 1);
     assert.equal(updates.length, 1);
   });
+
+test('single bound Google identity re-review uses application label without refresh; confirm still refreshes', async () => {
+  const f = await fixture();
+  const prepared = await f.api.execute({
+    action: 'prepare',
+    requestId: 'cheap-review',
+    identities: [{ placeId: 'known-poi', label: 'Independent landmark' }],
+  });
+  const count = f.refreshes();
+  for (let i = 0; i < 3; i++) {
+    const review = await f.api.execute({
+      action: 'review',
+      discoveryId: prepared.discoveryId,
+    });
+    assert.equal(review.candidates[0].name, 'Independent landmark');
+    assert.ok(
+      review.candidates[0].googleMapsUrl.includes('query_place_id=known-poi'),
+    );
+    assert.equal(f.refreshes(), count);
+  }
+  await f.api.execute({
+    action: 'confirm',
+    discoveryId: prepared.discoveryId,
+    revision: prepared.revision,
+    requestId: 'confirm-cheap',
+    indices: [0],
+  });
+  assert.ok(f.refreshes() > count);
+});
+test('unlabeled candidate retains provider review refresh', async () => {
+  const f = await fixture();
+  const p = await f.api.execute({
+    action: 'prepare',
+    requestId: 'unlabeled-refresh',
+    identities: [{ placeId: 'unknown-label' }],
+  });
+  const before = f.refreshes();
+  await f.api.execute({ action: 'review', discoveryId: p.discoveryId });
+  assert.ok(f.refreshes() > before);
+});

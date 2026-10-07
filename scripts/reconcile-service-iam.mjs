@@ -29,6 +29,15 @@ export function verifyPolicy(policy, caller, requireCaller = true) {
   )
     throw new Error('public_service_iam_forbidden');
   if (
+    bindings.some(
+      (b) =>
+        b.role === 'roles/run.invoker' &&
+        (b.condition ||
+          b.members.some((m) => m !== `serviceAccount:${caller}`)),
+    )
+  )
+    throw new Error('unexpected_service_invoker');
+  if (
     requireCaller &&
     !bindings.some(
       (b) =>

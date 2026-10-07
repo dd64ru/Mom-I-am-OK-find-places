@@ -116,8 +116,11 @@ project/folder/org policies using the organization's IAM review tools: a private
 service policy cannot counter an inherited public binding.
 
 Read the final policy saved above after each deployment: it must include an
-unconditional roles/run.invoker for exactly the configured actual App caller and
-no allUsers/allAuthenticatedUsers anywhere. The workflow checks the discovered
+unconditional roles/run.invoker membership consisting only of the configured
+actual App caller, with no additional/conditional Invoker members and no
+allUsers/allAuthenticatedUsers anywhere. Unexpected existing invokers stop
+reconciliation before any write and require owner review; unrelated roles are
+preserved. The workflow checks the discovered
 underlying resource, enabled IAM enforcement, pre-write public bindings and the
 post-write expected grant. Reconciliation failure or missing/public final policy
 fails the deployment workflow; do not proceed to clients. Compare sibling function

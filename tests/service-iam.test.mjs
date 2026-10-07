@@ -146,3 +146,53 @@ test('numeric project resource must be independently proven as the Places projec
     false,
   );
 });
+
+for (const member of [
+  'serviceAccount:places-runtime@mom-im-ok-places.iam.gserviceaccount.com',
+  'serviceAccount:another@other-project.iam.gserviceaccount.com',
+  'user:person@example.com',
+  'group:group@example.com',
+  'domain:example.com',
+]) {
+  test(`unexpected invoker ${member} rejected before and after reconciliation`, () => {
+    const p = {
+      bindings: [
+        ...policy.bindings,
+        { role: 'roles/run.invoker', members: [member] },
+      ],
+    };
+    assert.throws(() => verifyPolicy(p, caller, false));
+    assert.throws(() => verifyPolicy(p, caller));
+    const f = fake();
+    assert.throws(() =>
+      reconcileServiceIam(caller, (args) =>
+        args[2] === 'get-iam-policy' ? p : f.run(args),
+      ),
+    );
+    assert.equal(
+      f.calls.some((a) => a[2] === 'add-iam-policy-binding'),
+      false,
+    );
+  });
+}
+test('conditional expected invoker rejected, unrelated roles preserved', () => {
+  assert.throws(() =>
+    verifyPolicy(
+      {
+        bindings: [
+          { ...policy.bindings[0], condition: { expression: 'true' } },
+        ],
+      },
+      caller,
+      false,
+    ),
+  );
+  const p = {
+    bindings: [
+      ...policy.bindings,
+      { role: 'roles/run.viewer', members: ['group:auditors@example.com'] },
+    ],
+  };
+  verifyPolicy(p, caller);
+  assert.equal(p.bindings.length, 2);
+});
