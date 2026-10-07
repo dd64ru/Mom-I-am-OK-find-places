@@ -2,37 +2,67 @@
 
 This is an owner-operated runbook, not an executed rollout. Merge the rollout
 preparation branch before using the new manual workflow. Deploy only from a
-reviewed main SHA; the workflow does not grant IAM, run migrations or release
-the App. Do not widen the existing deployment identity. Existing SIWC, Secret
+reviewed main SHA; the workflow reconciles only placesService caller IAM after each deployment,
+and does not run migrations or release the App. Do not grant the deployment identity IAM administrator or project-wide Invoker roles. Existing SIWC, Secret
 Manager and ADC access remain unchanged.
 
 ## First-time rollout order
 
 1. Merge rollout preparation to Places main.
-2. Deploy placesService with service_enabled=false and verify it is dormant/private.
-3. Run Mom-I-am-OK Production Release target=backend at reviewed App SHA
-   111a023ac90ac76e8ca5c699c6306fe62acabdcd to create the caller function.
-4. Verify reviewAiChatSavedPlaces exists and read its actual
-   serviceConfig.serviceAccountEmail.
-5. Grant only that account roles/run.invoker on the underlying placesService
-   Cloud Run service and read back the policy.
-6. Deploy placesService again with service_enabled=true.
-7. Verify unauthenticated access is denied and IAM remains private.
-8. Publish clients using Mom-I-am-OK Production Release target=both (web + Android)
-   at the same reviewed App SHA.
+2. If reviewAiChatSavedPlaces is not already deployed by a compatible backend,
+   run App Production Release target=backend at reviewed App SHA
+   containing these reviewed corrective changes. Do not publish clients yet.
+3. Read the function's actual serviceConfig.serviceAccountEmail and configure
+   PLACES_EXPECTED_APP_CALLER_SA in the protected Places production environment.
+4. Ensure the deployment identity has the narrowly scoped Run service IAM
+   permissions below, then deploy placesService with service_enabled=false.
+   The workflow reconciles/verifies the caller binding after this deploy.
+5. Verify the dormant private service and its caller policy.
+6. Deploy placesService with service_enabled=true. The same automatic IAM
+   reconciliation runs again, because Firebase can erase caller bindings.
+7. Verify unauthenticated access is denied and the policy remains private.
+8. Publish clients using App Production Release target=both at the same reviewed SHA.
 9. Perform the explicit-confirmation production smoke.
 
-If reviewAiChatSavedPlaces already exists from an earlier compatible backend
-release, the backend-only bootstrap may be skipped after verifying that release
-is compatible and reading the function's actual runtime identity. Existence alone
-does not prove compatibility. Never substitute an assumed service account.
+If a compatible backend already provides reviewAiChatSavedPlaces, skip the
+backend bootstrap after verifying compatibility. Always read its actual runtime
+identity; never rely on the expected default account. Complete the backend and
+caller configuration before the first service workflow, including a dormant deploy.
 
 For later complete releases, target=all is appropriate. For this first rollout,
 backend → service IAM/enablement → clients avoids exposing the UI before its
 private dependency is ready. Each production release requires owner authorization;
 these commands document the sequence and do not authorize execution here.
 
-## Deploy dormant
+## Caller configuration and deploy dormant
+
+Before the service dispatch, follow the App production-release skill from a clean
+detached worktree of the reviewed App SHA to bootstrap backend if needed:
+
+```bash
+APP_REVIEWED_SHA='<reviewed-corrective-App-main-SHA>'
+test "$(gh api repos/dd64ru/Mom-I-am-OK/git/ref/heads/main --jq .object.sha)" = "$APP_REVIEWED_SHA"
+node scripts/release/productionRelease.mjs --target backend --expected-sha "$APP_REVIEWED_SHA"
+APP_RUNTIME_SA=$(gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format='value(serviceConfig.serviceAccountEmail)')
+test -n "$APP_RUNTIME_SA"
+gh variable set PLACES_EXPECTED_APP_CALLER_SA --repo dd64ru/Mom-I-am-OK-find-places --env production --body "$APP_RUNTIME_SA"
+```
+
+These are owner steps, not performed by preparation. Review/approve the caller
+configuration and protect changes to it. The workflow refuses absent/malformed
+callers before deployment and refuses any Places-project runtime SA as caller.
+No application source hardcodes today's concrete App runtime account.
+
+Firebase's invoker: private deployment can remove manual caller grants. Every
+service deployment now reconciles roles/run.invoker on ONLY its underlying Run
+service using the existing deployment identity, then reads back and verifies the
+policy. Disabled deployments do this too. Ensure that identity has run.services.get,
+run.services.getIamPolicy and run.services.setIamPolicy scoped only to
+placesservice (or an IAM condition limiting the resource if an initial creation
+requires bootstrap permissions). No IAM administrator role, project-wide Invoker,
+public principal or sibling IAM permission is required for reconciliation. An owner
+must separately review any required permission provisioning; the workflow does
+not provision its own privileges. Missing permissions fail the workflow closed.
 
 Record the reviewed Places main SHA and verify it is still current before each
 dispatch. Replace the value below with the reviewed post-merge SHA; stop if main
@@ -85,48 +115,19 @@ allAuthenticatedUsers invoker grant; stop if either exists. Also inspect inherit
 project/folder/org policies using the organization's IAM review tools: a private
 service policy cannot counter an inherited public binding.
 
-Before reading the caller identity, bootstrap the backend if the function is
-absent. Follow the App repository's production-release skill. From a clean
-detached worktree of reviewed App SHA
-111a023ac90ac76e8ca5c699c6306fe62acabdcd, confirm App main still matches (if it
-moved, obtain review for the new SHA), then run the owner-authorized backend-only
-release and wait for success. Keep placesService disabled throughout bootstrap.
+Read the final policy saved above after each deployment: it must include an
+unconditional roles/run.invoker for exactly the configured actual App caller and
+no allUsers/allAuthenticatedUsers anywhere. The workflow checks the discovered
+underlying resource, enabled IAM enforcement, pre-write public bindings and the
+post-write expected grant. Reconciliation failure or missing/public final policy
+fails the deployment workflow; do not proceed to clients. Compare sibling function
+and IAM snapshots independently; reconciliation addresses only placesservice.
 
-```bash
-node scripts/release/productionRelease.mjs --target backend --expected-sha 111a023ac90ac76e8ca5c699c6306fe62acabdcd
-```
-
-This creates reviewAiChatSavedPlaces without publishing the new client surfaces.
-If an earlier compatible backend already provides it, skip this bootstrap after
-verifying compatibility, but always read the actual runtime identity:
-
-```bash
-gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format=json > reviewAiChatSavedPlaces.runtime.json
-APP_RUNTIME_SA=$(gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format='value(serviceConfig.serviceAccountEmail)')
-test -n "$APP_RUNTIME_SA"
-printf 'Actual caller runtime service account: %s\n' "$APP_RUNTIME_SA"
-```
-
-The expected current App account is
-142094474582-compute@developer.gserviceaccount.com, but use the actual live
-serviceConfig.serviceAccountEmail above, never an assumed identity. If the caller
-still does not exist after bootstrap, stop and investigate the backend release
-before granting IAM. Do not substitute a developer account.
-
-## Grant only the caller, then read back
-
-An owner with service-level IAM administration performs the following after
-reviewing the before policy and actual caller. This is intentionally outside the
-deployment workflow. Keep existing bindings; never replace the whole policy.
-
-```bash
-gcloud run services add-iam-policy-binding "$PLACES_RUN_SERVICE" --region europe-west3 --project mom-im-ok-places --member="serviceAccount:$APP_RUNTIME_SA" --role=roles/run.invoker
-gcloud run services get-iam-policy "$PLACES_RUN_SERVICE" --region europe-west3 --project mom-im-ok-places --format=json > placesService.iam.after.json
-```
-
-Compare before/after: the only intended new permission is roles/run.invoker for
-that exact caller on that exact Run service. No public principals, no project-wide
-Run Invoker, no deployer IAM role expansion. Verify the service is still disabled.
+The owner can inspect the actual caller again and compare it with the protected
+configuration. If the backend runtime identity changes, review and update that
+configuration before deploying the service. Do not substitute a developer or the
+Places runtime account. No separate manual caller-binding repair is needed after
+an ordinary successful deployment.
 
 ## Enable, verify isolation, then publish clients
 
@@ -152,12 +153,13 @@ and neither sibling's code/config/update time changed. Resolve unexpected
 changes before publishing clients. No locality backfill is required.
 
 Only after the service is ready, explicitly authorize Mom-I-am-OK Production
-Release **both** (web + Android) at the same reviewed App SHA 111a023ac90ac76e8ca5c699c6306fe62acabdcd.
+Release **both** (web + Android) at the same reviewed corrective App SHA.
 Follow that repository's production-release skill and use its launcher from a
 clean detached worktree of that exact SHA:
 
 ```bash
-node scripts/release/productionRelease.mjs --target both --expected-sha 111a023ac90ac76e8ca5c699c6306fe62acabdcd
+test "$(gh api repos/dd64ru/Mom-I-am-OK/git/ref/heads/main --jq .object.sha)" = "$APP_REVIEWED_SHA"
+node scripts/release/productionRelease.mjs --target both --expected-sha "$APP_REVIEWED_SHA"
 ```
 
 Confirm App main is still that reviewed SHA; if it moved, obtain review for the
@@ -183,7 +185,9 @@ from any billed acceptance campaign.
 
 Immediately redeploy the reviewed service with service_enabled=false using the
 same manual workflow; wait for success and read back PLACES_SERVICE_ENABLED=false.
-IAM remains private. App release need not be rolled back merely to disable this
+IAM reconciliation still runs after this disabled deployment, because Firebase
+may replace the binding again. Require the private-policy verification to pass.
+App release need not be rolled back merely to disable this
 integration. A failed deployment is not proof of disablement: verify live state.
 
 Locality backfill is optional, requires separate review/authorization, and is not

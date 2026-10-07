@@ -137,7 +137,7 @@ test('service workflow is manual main-only dormant-first with exact selector and
   );
   assert.doesNotMatch(
     source,
-    /placesWebhook|placesFeed|TELEGRAM_|secrets:|add-iam-policy-binding|--force|migrate|--only.*(?:firestore|hosting)/,
+    /placesWebhook|placesFeed|TELEGRAM_|secrets:|--force|migrate|--only.*(?:firestore|hosting)/,
   );
   assert.equal((source.match(/id-token: write/g) ?? []).length, 1);
   assert.ok(

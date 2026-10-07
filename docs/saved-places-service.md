@@ -10,9 +10,10 @@ writes and are not bound to the new function.
 
 `placesService` is Functions v2 in europe-west3, `invoker: private`, disabled by
 `PLACES_SERVICE_ENABLED=false` by default. Cloud Run checks the audience-bound
-Google OIDC token and IAM invoker permission before executing the handler. The
-owner must grant `roles/run.invoker` on this function's underlying service ONLY to
-the Mom-I-am-OK backend runtime service account. Do not grant allUsers or
+Google OIDC token and IAM invoker permission before executing the handler. The manual service deployment workflow restores and verifies `roles/run.invoker`
+on this function's underlying service ONLY for the protected configured actual
+Mom-I-am-OK backend runtime service account after every deployment, including
+disabled deployments. Do not grant allUsers or
 allAuthenticatedUsers. Workspace comes from WORKSPACE_ID, not a payload.
 The browser uses an authenticated Mom-I-am-OK callable, never this endpoint or
 an IAM credential. There is no admin-only restriction in the new application callable.

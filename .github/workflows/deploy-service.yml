@@ -21,6 +21,8 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    env:
+      PLACES_EXPECTED_APP_CALLER_SA: ${{ vars.PLACES_EXPECTED_APP_CALLER_SA }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -30,6 +32,8 @@ jobs:
         with:
           node-version: '22.23.3'
           cache: npm
+      - name: Require configured App caller identity
+        run: node scripts/reconcile-service-iam.mjs --validate-only
       - run: npm ci
       - run: npm run check
       - run: JAVA_HOME="$JAVA_HOME_21_X64" PATH="$JAVA_HOME_21_X64/bin:$PATH" npm run test:rules
@@ -54,3 +58,5 @@ jobs:
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
           create_credentials_file: true
       - run: npx --no-install firebase deploy --project mom-im-ok-places --only functions:places:placesService --non-interactive
+      - name: Reconcile and verify private service IAM after deployment
+        run: node scripts/reconcile-service-iam.mjs
