@@ -23,16 +23,19 @@ export function googleSearchPlan(
   ]
     .slice(0, 3)
     .sort((a, b) => b.confidence - a.confidence);
+  // The user's city is explicit; a recommendation list's inferred Recognition city is
+  // weaker (vision) evidence. areaHint never reaches this branch.
+  const requested = ctx.cityOverride ?? ctx.inferredCity;
   const intent =
-    ctx.cityOverride &&
-    v.localityIntent?.input === ctx.cityOverride &&
+    requested &&
+    v.localityIntent?.input === requested &&
     v.localityIntent.confidence >= 0.9
       ? v.localityIntent
       : undefined;
   let locality: Locality | undefined;
-  if (ctx.cityOverride) {
+  if (requested) {
     const aliases = [
-      ctx.cityOverride,
+      requested,
       ...(intent ? [intent.canonicalName, ...intent.aliases] : []),
     ];
     const aligned = cited.find(
@@ -45,7 +48,7 @@ export function googleSearchPlan(
         ),
     );
     locality = {
-      name: intent?.canonicalName ?? aligned?.city ?? ctx.cityOverride,
+      name: intent?.canonicalName ?? aligned?.city ?? requested,
       aliases: [
         ...new Set([
           ...aliases,
@@ -53,7 +56,7 @@ export function googleSearchPlan(
         ]),
       ],
       countryCode: intent?.countryCode ?? aligned?.countryCode,
-      source: 'explicit',
+      source: ctx.cityOverride ? 'explicit' : 'vision',
     };
   } else if (
     cited.length &&

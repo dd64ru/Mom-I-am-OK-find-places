@@ -139,6 +139,8 @@ export class ProjectionService {
                     ? { category: place.mapMetadata.category.value }
                     : {}),
                   providerIdentity: place.providerIdentity,
+                  // Google coordinates follow GCJ-02 inside mainland China.
+                  coordinateSystem: 'gcj02',
                 }),
               );
               counts.googleHydrated++;
@@ -165,6 +167,7 @@ export class ProjectionService {
                   id: place.source.externalId ?? place.id,
                 },
                 ...(place.source.url ? { sourceLink: place.source.url } : {}),
+                coordinateSystem: 'wgs84',
               }),
             );
           }
@@ -204,6 +207,7 @@ export function geojson(places: readonly ProjectedPlace[]) {
         label: p.label,
         tags: p.tags,
         provider: p.providerIdentity.provider,
+        coordinateSystem: p.coordinateSystem,
         ...(osmAttribution(p) ? { attribution: osmAttribution(p) } : {}),
         ...(p.category !== undefined ? { category: p.category } : {}),
         ...(p.city !== undefined ? { city: p.city } : {}),

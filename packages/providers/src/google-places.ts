@@ -1224,7 +1224,7 @@ export class GooglePlacesPoi implements PoiProvider {
       indices.some((i) => !r.clues[i])
     )
       throw new GooglePlacesFailure('google_places_request_failed');
-    if (!context.cityOverride)
+    if (!context.cityOverride && !context.inferredCity)
       return { status: 'city_unknown', reason: 'missing_locality' };
     const groups: {
       index: number;

@@ -5,6 +5,8 @@ import {
   MAX_RECOMMENDATIONS,
   MAX_SEARCH_BRANDS,
   storedCandidate,
+  recommendationSearchCity,
+  GeographicContextSchema,
 } from '@places/schemas';
 import {
   GooglePlacesPoi,
@@ -509,4 +511,113 @@ test('a reliable contradiction for a repeated ID cannot be rescued by another se
     result.candidates.map((c) => c.providerIdentity.id),
     ['safe'],
   );
+});
+
+// Da Hu Chun (大壶春), 136 Sichuan Middle Road, Huangpu District, Shanghai: an Instagram list
+// that names Shanghai. Synthetic copy of the shape only; no real message or image.
+const daHuChun = (extra = [], hints = { cityHint: 'Shanghai' }) =>
+  RecognitionSchema.parse({
+    mode: 'recommendation_list',
+    visibleText: [],
+    clues: [
+      {
+        name: 'Da Hu Chun',
+        nativeName: '大壶春',
+        aliases: [],
+        category: 'restaurant',
+        confidence: 0.95,
+        recommendationEvidence: 'caption',
+        areaHint: 'Huangpu District',
+        ...hints,
+      },
+      ...extra.map((clue) => ({
+        aliases: [],
+        category: 'restaurant',
+        confidence: 0.95,
+        recommendationEvidence: 'caption',
+        ...clue,
+      })),
+    ],
+  });
+test('recommendation city: the selected clues alone decide, and only one shared cityHint counts', () => {
+  assert.equal(recommendationSearchCity(daHuChun(), [0]), 'Shanghai');
+  const same = daHuChun([{ name: 'Lao Zheng Xing', cityHint: 'shanghai' }]);
+  assert.equal(recommendationSearchCity(same, [0, 1]), 'Shanghai');
+  const other = daHuChun([{ name: 'Siji Minfu', cityHint: 'Beijing' }]);
+  assert.equal(recommendationSearchCity(other, [0, 1]), undefined);
+  assert.equal(recommendationSearchCity(other, [0]), 'Shanghai');
+  assert.equal(recommendationSearchCity(other, [1]), 'Beijing');
+  const unhinted = daHuChun([{ name: 'Jia Jia Tang Bao' }]);
+  assert.equal(recommendationSearchCity(unhinted, [0, 1]), undefined);
+  assert.equal(recommendationSearchCity(unhinted, [1]), undefined);
+  // areaHint is a search hint, never a city.
+  assert.equal(
+    recommendationSearchCity(
+      daHuChun([], { areaHint: 'Huangpu District' }),
+      [0],
+    ),
+    undefined,
+  );
+  // Unselected, empty, out-of-range or non-list input decides nothing.
+  assert.equal(recommendationSearchCity(daHuChun(), []), undefined);
+  assert.equal(recommendationSearchCity(daHuChun(), undefined), undefined);
+  assert.equal(recommendationSearchCity(daHuChun(), [5]), undefined);
+  assert.equal(
+    recommendationSearchCity(
+      RecognitionSchema.parse({
+        visibleText: [],
+        clues: [
+          {
+            name: 'Da Hu Chun',
+            aliases: [],
+            category: 'restaurant',
+            cityHint: 'Shanghai',
+            confidence: 0.95,
+          },
+        ],
+      }),
+      [0],
+    ),
+    undefined,
+  );
+  // A hint listing alternatives or a low-confidence clue is not a city.
+  assert.equal(
+    recommendationSearchCity(
+      daHuChun([], { cityHint: 'Shanghai / Suzhou' }),
+      [0],
+    ),
+    undefined,
+  );
+  const weak = RecognitionSchema.parse({
+    ...daHuChun(),
+    clues: [{ ...daHuChun().clues[0], confidence: 0.6 }],
+  });
+  assert.equal(recommendationSearchCity(weak, [0]), undefined);
+  // Legacy Recognition documents without cityHint stay valid and ask.
+  assert.equal(recommendationSearchCity(list(), [0, 1]), undefined);
+});
+test('recommendation city: the inferred city scopes the search plan as vision evidence; a typed city wins', () => {
+  const r = daHuChun();
+  const inferred = googleSearchPlan(
+    r,
+    empty,
+    GeographicContextSchema.parse({
+      inferredCity: 'Shanghai',
+      selectedBrandIndices: [0],
+    }),
+  );
+  assert.deepEqual(inferred.queries, ['大壶春, Shanghai']);
+  assert.equal(inferred.locality.source, 'vision');
+  const typed = googleSearchPlan(
+    r,
+    empty,
+    GeographicContextSchema.parse({
+      cityOverride: 'Hangzhou',
+      inferredCity: 'Shanghai',
+      selectedBrandIndices: [0],
+    }),
+  );
+  assert.deepEqual(typed.queries, ['大壶春, Hangzhou']);
+  assert.equal(typed.locality.source, 'explicit');
+  assert.ok(!typed.locality.aliases.includes('Shanghai'));
 });

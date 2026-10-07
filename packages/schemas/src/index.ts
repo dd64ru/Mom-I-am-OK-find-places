@@ -321,6 +321,10 @@ export const PlaceDisplaySchema = CandidateSchema.pick({
 });
 export type PlaceDisplay = z.infer<typeof PlaceDisplaySchema>;
 // Transient provider-neutral map projection; never a durable Place or Discovery.
+// Coordinate reference systems a projected coordinate can be in. A consumer that needs WGS84
+// (an external map such as Organic Maps) adapts a `gcj02` coordinate inside mainland China.
+export const CoordinateSystemSchema = z.enum(['wgs84', 'gcj02']);
+export type CoordinateSystem = z.infer<typeof CoordinateSystemSchema>;
 export const ProjectedPlaceSchema = z
   .object({
     id: IdSchema,
@@ -331,6 +335,10 @@ export const ProjectedPlaceSchema = z
     city: z.string().min(1).optional(),
     // Independently licensed (OSM/Nominatim) formatted address only; never Google content.
     address: z.string().min(1).optional(),
+    // The coordinate reference system of `coordinates` (coordinate semantics, not provider
+    // display content). Google-backed coordinates are GCJ-02 in mainland China (and equal to
+    // WGS84 elsewhere, where GCJ-02 applies no offset); OSM/Nominatim coordinates are WGS84.
+    coordinateSystem: CoordinateSystemSchema,
     providerIdentity: z.union([
       GoogleIdentitySchema,
       z
@@ -346,11 +354,21 @@ export const ProjectedPlaceSchema = z
       p.providerIdentity.provider !== 'google-places' ||
       p.address === undefined,
     'google_address_forbidden',
+  )
+  .refine(
+    (p) =>
+      p.coordinateSystem ===
+      (p.providerIdentity.provider === 'google-places' ? 'gcj02' : 'wgs84'),
+    'coordinate_system_mismatch',
   );
 export type ProjectedPlace = z.infer<typeof ProjectedPlaceSchema>;
 export const GeographicContextSchema = z
   .object({
+    // The city the user typed ("Изменить город"). Always wins over inferredCity.
     cityOverride: z.string().min(1).max(200).optional(),
+    // A search city inferred from Recognition (recommendationSearchCity), used only while the
+    // user has not named one. Derived on every resolve, never persisted, never a cityOverride.
+    inferredCity: z.string().min(1).max(200).optional(),
     workspaceAreaHint: z.string().min(1).max(200).optional(),
     selectedBrandIndices: z
       .array(
@@ -637,6 +655,31 @@ export function recognitionCity(
     if (conflicting) return;
   }
   return hint;
+}
+
+// The city a recommendation-list search uses when the user has not named one: the shared
+// deterministic Recognition cityHint (recognitionCity) of EVERY selected recommendation, or
+// undefined, which means the user is asked. Only the selected clues count; an unselected or
+// related recommendation never does. A selected clue without a usable cityHint leaves its
+// venue's city unknown, and two different cities are ambiguous, so both ask. areaHint is never
+// read. The result is an inferred search locality, never written to cityOverride.
+export function recommendationSearchCity(
+  recognition: Recognition,
+  selectedBrandIndices: readonly number[] | undefined,
+): string | undefined {
+  if (
+    recognition.mode !== 'recommendation_list' ||
+    !selectedBrandIndices?.length
+  )
+    return;
+  let city: string | undefined;
+  for (const index of selectedBrandIndices) {
+    if (!recognition.clues[index]) return;
+    const hint = recognitionCity(recognition, index);
+    if (!hint || (city !== undefined && !sameLocality(city, hint))) return;
+    city ??= hint;
+  }
+  return city;
 }
 
 // Map metadata for one confirmed candidate, from application-owned inputs only. The candidate

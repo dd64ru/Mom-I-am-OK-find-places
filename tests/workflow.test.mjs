@@ -4098,7 +4098,8 @@ async function recommendationsWorkflow(count = 4, options = {}) {
     'Maple Gallery',
   ].slice(0, count);
   const queries = [],
-    events = [];
+    events = [],
+    normalized = [];
   let details = 0;
   const rows = names.flatMap((name, index) =>
     [0, 1].map((branch) => ({
@@ -4141,27 +4142,48 @@ async function recommendationsWorkflow(count = 4, options = {}) {
     recognition: {
       mode: 'recommendation_list',
       visibleText: ['PRIVATE_LIST_UI_USERNAME'],
-      clues: names.map((name) => ({
+      clues: names.map((name, index) => ({
         name,
         aliases: [],
         category: 'museum',
         confidence: 0.95,
         recommendationEvidence: 'editorial',
+        ...(options.cityHints?.[index]
+          ? { cityHint: options.cityHints[index] }
+          : {}),
+        ...(options.areaHints?.[index]
+          ? { areaHint: options.areaHints[index] }
+          : {}),
       })),
     },
     poi,
     verified: noEvidence,
-    normalizeLocality: async (city) => ({
-      input: city,
-      canonicalName: 'Vesper',
-      aliases: ['Веспер'],
-      countryCode: 'FR',
-      confidence: 1,
-    }),
+    normalizeLocality: async (city) => {
+      normalized.push(city);
+      // Other cities (cityHint tests) normalize to themselves instead of to Vesper.
+      return options.cityHints && !['Vesper', 'Веспер'].includes(city)
+        ? { input: city, canonicalName: city, aliases: [], confidence: 1 }
+        : {
+            input: city,
+            canonicalName: 'Vesper',
+            aliases: ['Веспер'],
+            countryCode: 'FR',
+            confidence: 1,
+          };
+    },
     telegramFailure: options.telegramFailure,
   });
   const d = await f.ingest('recommendation-list');
-  return { ...f, d, names, rows, queries, events, details: () => details };
+  return {
+    ...f,
+    d,
+    names,
+    rows,
+    queries,
+    events,
+    normalized,
+    details: () => details,
+  };
 }
 function recommendationButton(f, action, index = 0) {
   const code = {
@@ -4316,6 +4338,91 @@ test('four brands are searched in the corrected city and eight individual Places
     [...f.db.values.keys()].filter((p) => p.includes('/places/')).length,
     8,
   );
+});
+// A recommendation list's selected clues may carry a confident Recognition cityHint. When every
+// selected clue names the same city the search runs there at once; anything less certain asks.
+async function searchSelected(f, indices) {
+  let d = f.d;
+  for (const index of indices)
+    d = await f.service.updateBrandSelection(d, 'toggle', index);
+  return f.service.searchBrands(d);
+}
+test('recommendation list: one selected clue with a cityHint searches that city without asking', async () => {
+  const f = await recommendationsWorkflow(4, { cityHints: ['Vesper'] });
+  const d = await searchSelected(f, [0]);
+  assert.notEqual(d.status, 'awaiting_city');
+  assert.equal(d.status, 'needs_selection');
+  assert.deepEqual(f.queries, [`${f.names[0]}, Vesper, FR`]);
+  assert.deepEqual(f.normalized, ['Vesper']);
+  const stored = await f.repository.getDiscovery('fixture', d.id);
+  assert.equal(stored.cityOverride, undefined, 'never stored as a user city');
+  assert.ok(d.candidates.length > 0);
+});
+test('recommendation list: several selected clues sharing one cityHint search it without asking', async () => {
+  const f = await recommendationsWorkflow(4, {
+    cityHints: ['Vesper', ' vesper ', 'VESPER'],
+  });
+  const d = await searchSelected(f, [0, 1, 2]);
+  assert.equal(d.status, 'needs_selection');
+  assert.deepEqual(
+    f.queries,
+    f.names.slice(0, 3).map((n) => `${n}, Vesper, FR`),
+  );
+});
+test('recommendation list: selected clues with different cityHints ask for the city', async () => {
+  const f = await recommendationsWorkflow(4, {
+    cityHints: ['Vesper', 'Lumen'],
+  });
+  const d = await searchSelected(f, [0, 1]);
+  assert.equal(d.status, 'awaiting_city');
+  assert.deepEqual(f.queries, []);
+  assert.deepEqual(f.normalized, []);
+});
+test('recommendation list: no usable cityHint on a selected clue asks for the city', async () => {
+  const none = await recommendationsWorkflow(4);
+  assert.equal((await searchSelected(none, [0])).status, 'awaiting_city');
+  assert.deepEqual(none.queries, []);
+  // One selected clue without a hint leaves that venue's city unknown.
+  const partial = await recommendationsWorkflow(4, { cityHints: ['Vesper'] });
+  assert.equal((await searchSelected(partial, [0, 1])).status, 'awaiting_city');
+  assert.deepEqual(partial.queries, []);
+});
+test('recommendation list: an areaHint alone never becomes the city', async () => {
+  const f = await recommendationsWorkflow(4, {
+    cityHints: [],
+    areaHints: ['Huangpu District'],
+  });
+  const d = await searchSelected(f, [0]);
+  assert.equal(d.status, 'awaiting_city');
+  assert.deepEqual(f.queries, []);
+  assert.deepEqual(f.normalized, []);
+});
+test('recommendation list: the city the user typed overrides every cityHint', async () => {
+  const f = await recommendationsWorkflow(4, {
+    cityHints: ['Lumen', 'Lumen', 'Lumen', 'Lumen'],
+  });
+  let d = await searchSelected(f, [0]);
+  assert.deepEqual(f.queries, [`${f.names[0]}, Lumen`]);
+  d = await f.service.requestCity(d);
+  assert.equal(d.status, 'awaiting_city');
+  d = await f.service.correctCity(d, 'Веспер');
+  assert.equal(d.cityOverride, 'Веспер');
+  assert.deepEqual(f.queries.slice(1), [`${f.names[0]}, Vesper, FR`]);
+  d = await f.service.requestBrands(d);
+  d = await f.service.updateBrandSelection(d, 'clear');
+  d = await f.service.updateBrandSelection(d, 'toggle', 1);
+  d = await f.service.searchBrands(d);
+  assert.deepEqual(f.queries.slice(2), [`${f.names[1]}, Vesper, FR`]);
+  assert.equal(d.cityOverride, 'Веспер');
+  assert.deepEqual(f.normalized, ['Lumen', 'Веспер', 'Веспер']);
+});
+test('recommendation list: an unselected clue with another cityHint does not matter', async () => {
+  const f = await recommendationsWorkflow(4, {
+    cityHints: ['Vesper', 'Lumen', 'Lumen'],
+  });
+  const d = await searchSelected(f, [0]);
+  assert.equal(d.status, 'needs_selection');
+  assert.deepEqual(f.queries, [`${f.names[0]}, Vesper, FR`]);
 });
 test('oversized recommendation list requires explicit subset; remaining brands can be searched separately in the same city', async () => {
   const f = await recommendationsWorkflow(8);

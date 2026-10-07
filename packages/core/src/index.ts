@@ -9,6 +9,7 @@ import {
   PlaceDisplaySchema,
   VerificationSchema,
   PoiResolutionSchema,
+  recommendationSearchCity,
   type Place,
   type Chain,
   type Workspace,
@@ -162,8 +163,15 @@ export class DiscoveryService {
       return discovery;
     const workspace = await this.repository.getWorkspace(discovery.workspaceId);
     if (!workspace) throw new Error('workspace_missing');
+    const inferredCity = discovery.cityOverride
+      ? undefined
+      : recommendationSearchCity(
+          discovery.recognition,
+          discovery.selectedBrandIndices,
+        );
     const context: GeographicContext = {
       cityOverride: discovery.cityOverride,
+      ...(inferredCity ? { inferredCity } : {}),
       workspaceAreaHint: workspace.areaHint,
       ...(discovery.selectedBrandIndices
         ? { selectedBrandIndices: discovery.selectedBrandIndices }
@@ -179,19 +187,20 @@ export class DiscoveryService {
         return parsed.data;
       };
       let intent: Verification['localityIntent'];
-      if (context.cityOverride && this.verification.search.normalizeLocality) {
+      // The user's city wins; otherwise the recommendation list's inferred city.
+      const searchCity = context.cityOverride ?? context.inferredCity;
+      if (searchCity && this.verification.search.normalizeLocality) {
         let outcome: 'ok' | 'unavailable' | 'invalid' = 'unavailable';
         try {
-          const raw = await this.verification.search.normalizeLocality(
-            context.cityOverride,
-          );
+          const raw =
+            await this.verification.search.normalizeLocality(searchCity);
           if (raw !== undefined) {
             const parsed =
               VerificationSchema.shape.localityIntent.safeParse(raw);
             if (
               parsed.success &&
               parsed.data &&
-              parsed.data.input === context.cityOverride
+              parsed.data.input === searchCity
             ) {
               if (parsed.data.confidence >= 0.9) {
                 intent = parsed.data;
@@ -475,15 +484,20 @@ export class DiscoveryService {
       event: 'recommendation_selection',
       selectedCount: discovery.selectedBrandIndices.length,
     });
+    // A typed city first, then a safe cityHint shared by every selected clue; else ask.
+    const city =
+      discovery.cityOverride ??
+      recommendationSearchCity(
+        discovery.recognition,
+        discovery.selectedBrandIndices,
+      );
     const updated = await this.repository.reviseDiscovery(
       discovery.workspaceId,
       discovery.id,
       discovery.revision,
-      {
-        status: discovery.cityOverride ? 'needs_confirmation' : 'awaiting_city',
-      },
+      { status: city ? 'needs_confirmation' : 'awaiting_city' },
     );
-    return updated && updated.cityOverride ? this.resolve(updated) : updated;
+    return updated && city ? this.resolve(updated) : updated;
   }
   async requestBrands(discovery: Discovery) {
     if (discovery.recognition.mode !== 'recommendation_list') return;
