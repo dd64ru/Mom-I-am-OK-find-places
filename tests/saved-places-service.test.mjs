@@ -277,6 +277,18 @@ test('Shenzhen scene survives no_place_evidence, enriches once, returns two unce
         c.relationship === 'viewpoint_hypothesis',
     ),
   );
+  const done = await repo.finishDiscovery(
+    'shared',
+    result.id,
+    result.revision,
+    'confirm',
+    { indices: [0, 1], requestId: 'scene-labels' },
+  );
+  assert.deepEqual(done.places.map((p) => p.label).sort(), [
+    'Shenzhen Bay Park',
+    'Talent Park',
+  ]);
+  assert.ok(done.places.every((p) => p.labelSource === 'recognition'));
 });
 test('empty scene resolution stays unresolved; empty ordinary image still skips web', async () => {
   assert.equal(FreshRecognitionSchema.safeParse(scene).success, true);
@@ -336,8 +348,23 @@ test('deterministic locality identity groups multilingual input; country/region 
   const provider = new GooglePlacesPoi(
     async () => token,
     project,
-    async (_url, options) =>
-      Response.json(options.method === 'GET' ? venue : { places: results }),
+    async (_url, options) => {
+      if (options.method === 'GET') return Response.json(venue);
+      const body = JSON.parse(options.body);
+      return Response.json({
+        places: results.map((r) => ({
+          ...r,
+          displayName: {
+            text:
+              body.languageCode === 'ru'
+                ? 'Шанхай'
+                : body.languageCode === 'zh'
+                  ? '上海'
+                  : r.displayName.text,
+          },
+        })),
+      });
+    },
   );
   const identities = await Promise.all(
     ['Shanghai', 'Шанхай', '上海'].map((city) =>
@@ -448,4 +475,234 @@ test('same-name localities in different countries/regions keep distinct provider
     ),
     undefined,
   );
+});
+
+test('unlabeled provider IDs require human labels; retries fence labels and canonical reuse preserves original label', async () => {
+  const { api, db } = await fixture();
+  const r = await api.execute({
+    action: 'prepare',
+    requestId: 'unlabeled',
+    identities: [{ placeId: 'west' }, { placeId: 'east' }],
+  });
+  assert.ok(
+    r.candidates.every(
+      (c) =>
+        c.requiresLabel &&
+        !c.label &&
+        c.name === 'GOOGLE_DISPLAY_NEVER_DURABLE',
+    ),
+  );
+  const command = {
+    action: 'confirm',
+    discoveryId: r.discoveryId,
+    revision: r.revision,
+    requestId: 'human',
+    indices: [0, 1],
+  };
+  await assert.rejects(api.execute(command), /label_required/);
+  assert.equal(
+    [...db.values.keys()].filter((p) => p.includes('/places/')).length,
+    0,
+  );
+  for (const label of [
+    'Saved place 1',
+    'Viewpoint hypothesis',
+    'Place',
+    'bad\nlabel',
+    'x'.repeat(301),
+    '\u0085bad',
+  ])
+    await assert.rejects(
+      api.execute({
+        ...command,
+        labels: [
+          { index: 0, label },
+          { index: 1, label: 'East park' },
+        ],
+      }),
+    );
+  const labels = [
+    { index: 0, label: 'West waterfront' },
+    { index: 1, label: 'East park viewpoint' },
+  ];
+  assert.equal((await api.execute({ ...command, labels })).newCount, 2);
+  assert.equal((await api.execute({ ...command, labels })).newCount, 2);
+  await assert.rejects(
+    api.execute({
+      ...command,
+      labels: [
+        { index: 0, label: 'Changed west' },
+        { index: 1, label: 'East park viewpoint' },
+      ],
+    }),
+    /idempotency_conflict/,
+  );
+  const reused = await api.execute({
+    action: 'prepare',
+    requestId: 'relabel',
+    identities: [
+      {
+        placeId: 'west',
+        label: 'Independent alternate',
+        category: 'park',
+        city: 'Shenzhen',
+      },
+    ],
+  });
+  assert.equal(
+    (
+      await api.execute({
+        action: 'confirm',
+        requestId: 'reuse-human',
+        discoveryId: reused.discoveryId,
+        revision: reused.revision,
+        indices: [0],
+        labels: [{ index: 0, label: 'New human name' }],
+      })
+    ).reusedCount,
+    1,
+  );
+  const saved = [...db.values.entries()]
+    .filter(([p]) => p.includes('/places/'))
+    .map(([, p]) => p);
+  assert.deepEqual(saved.map((p) => p.label).sort(), [
+    'East park viewpoint',
+    'West waterfront',
+  ]);
+  assert.ok(saved.every((p) => p.labelSource === 'user'));
+  assert.ok(
+    !JSON.stringify([...db.values]).includes('GOOGLE_DISPLAY_NEVER_DURABLE'),
+  );
+});
+test('supplied city and venue locality must independently resolve to the same stable locality', async () => {
+  const venue = {
+    ...row,
+    addressComponents: [
+      { longText: 'Shanghai', types: ['locality'] },
+      { shortText: 'CN', types: ['country'] },
+      { longText: 'Shanghai region', types: ['administrative_area_level_1'] },
+    ],
+  };
+  const locality = (id, name, country = 'CN') => ({
+    ...venue,
+    id,
+    displayName: { text: name },
+    types: ['locality'],
+    addressComponents: [
+      { longText: name, types: ['locality'] },
+      { shortText: country, types: ['country'] },
+      { longText: 'Shanghai region', types: ['administrative_area_level_1'] },
+    ],
+  });
+  for (const kind of [
+    'wrong-city',
+    'wrong-country',
+    'ambiguous',
+    'missing',
+    'ranking-does-not-prove-input',
+    'same-name-other-region',
+  ]) {
+    let posts = 0;
+    const provider = new GooglePlacesPoi(
+      async () => token,
+      project,
+      async (_url, init) => {
+        if (init.method === 'GET')
+          return Response.json(
+            kind === 'missing' ? { ...venue, addressComponents: [] } : venue,
+          );
+        posts++;
+        const input = JSON.parse(init.body).textQuery.split(', ')[0];
+        const places =
+          posts === 2
+            ? [locality('shanghai', 'Shanghai')]
+            : kind === 'wrong-country'
+              ? [locality('shanghai-us', 'Shanghai', 'US')]
+              : kind === 'wrong-city'
+                ? [locality('other-city', 'Wrong city')]
+                : kind === 'same-name-other-region'
+                  ? [locality('other-region', 'Shanghai')]
+                  : kind === 'ambiguous'
+                    ? [
+                        locality('shanghai', 'Shanghai'),
+                        locality('other', 'Shanghai'),
+                      ]
+                    : [locality('shanghai', 'Shanghai')];
+        return Response.json({ places });
+      },
+    );
+    assert.equal(
+      await provider.resolveLocality(
+        { provider: 'google-places', id: row.id },
+        kind === 'wrong-city' || kind === 'ranking-does-not-prove-input'
+          ? 'Wrong city'
+          : 'Shanghai',
+      ),
+      undefined,
+      kind,
+    );
+    assert.ok(posts <= 2);
+  }
+});
+test('a new locality proof cannot be attached to a reused Place with a different existing display city', async () => {
+  const { fillMissingMapMetadata } = await import('@places/schemas');
+  const merged = fillMissingMapMetadata(
+    { city: { value: 'Wrong city', source: 'user' } },
+    {
+      city: { value: 'Shanghai', source: 'recognition' },
+      locality: {
+        key: 'google-locality:' + 'a'.repeat(64),
+        source: 'google-places-locality',
+      },
+      category: { value: 'park', source: 'recognition' },
+    },
+  );
+  assert.equal(merged.city.value, 'Wrong city');
+  assert.equal(merged.locality, undefined);
+});
+
+test('unbound Telegram viewpoint candidates cannot fall back to generic durable labels', async () => {
+  const { api, repo, db } = await fixture();
+  const r = await api.execute({
+    action: 'prepare',
+    requestId: 'viewpoint-unbound',
+    identities: [{ placeId: 'west-view' }, { placeId: 'east-view' }],
+  });
+  const stored = await repo.getDiscovery('shared', r.discoveryId);
+  const d = await repo.createDiscovery(
+    DiscoverySchema.parse({
+      ...stored,
+      id: 'telegram-unbound',
+      source: { provider: 'telegram', observedAt: time },
+      recognition: scene,
+      selectedCandidateIndices: [0, 1],
+    }),
+  );
+  await assert.rejects(
+    repo.finishDiscovery('shared', d.id, d.revision, 'confirm'),
+    /label_required/,
+  );
+  assert.equal(
+    [...db.values.keys()].filter((p) => p.includes('/places/')).length,
+    0,
+  );
+  const result = await repo.finishDiscovery(
+    'shared',
+    d.id,
+    d.revision,
+    'confirm',
+    {
+      indices: [0, 1],
+      requestId: 'name-viewpoints',
+      labels: [
+        { index: 0, label: 'West view over the bay' },
+        { index: 1, label: 'East park promenade' },
+      ],
+    },
+  );
+  assert.deepEqual(result.places.map((p) => p.label).sort(), [
+    'East park promenade',
+    'West view over the bay',
+  ]);
+  assert.ok(result.places.every((p) => p.labelSource === 'user'));
 });

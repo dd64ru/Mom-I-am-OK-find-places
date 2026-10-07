@@ -954,6 +954,14 @@ export class TelegramInteractions {
       await this.done(callback.token, owner);
     } catch (error) {
       await this.release(callback.token, owner);
+      if (error instanceof Error && error.message === 'label_required') {
+        await this.api.call('sendMessage', {
+          chat_id: this.chat,
+          text: 'Для сохранения нужны независимые названия выбранных мест. Места не сохранены. Отправьте фото с названиями мест или отмените выбор.',
+          reply_parameters: { message_id: callback.messageId },
+        });
+        return;
+      }
       throw error;
     }
   }

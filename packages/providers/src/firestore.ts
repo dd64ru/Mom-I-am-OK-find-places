@@ -5,6 +5,8 @@ import {
   fillMissingMapMetadata,
   mapMetadataFor,
   recognitionLabel,
+  NewSavedLabelSchema,
+  SelectedLabelSchema,
   WorkspaceSchema,
   PlaceSchema,
   ChainSchema,
@@ -72,6 +74,7 @@ export class FirestoreRepository implements PlacesRepository {
       const next = DiscoverySchema.parse({
         ...current,
         candidates: patch.candidates ?? current.candidates,
+        recognition: patch.recognition ?? current.recognition,
         selectedBrandIndices:
           patch.selectedBrandIndices ?? current.selectedBrandIndices,
         relatedRequested: patch.relatedRequested ?? current.relatedRequested,
@@ -103,7 +106,11 @@ export class FirestoreRepository implements PlacesRepository {
     id: string,
     revision: number,
     action: 'confirm' | 'cancel',
-    selection?: { indices: number[]; requestId: string },
+    selection?: {
+      indices: number[];
+      requestId: string;
+      labels?: { index: number; label: string }[];
+    },
   ) {
     const ref = this.doc(workspaceId, 'discoveries', id);
     return this.db.runTransaction(async (tx) => {
@@ -138,6 +145,14 @@ export class FirestoreRepository implements PlacesRepository {
           ))
       )
         throw new Error('invalid_selection');
+      const labels = (selection?.labels ?? []).map((l) =>
+        SelectedLabelSchema.parse(l),
+      );
+      if (
+        new Set(labels.map((l) => l.index)).size !== labels.length ||
+        labels.some((l) => !selection?.indices.includes(l.index))
+      )
+        throw new Error('invalid_selection');
       const time = new Date().toISOString();
       const places: Place[] = [];
       let reused = 0;
@@ -158,7 +173,26 @@ export class FirestoreRepository implements PlacesRepository {
           ...new Map(
             indices.map((i) => {
               const candidate = discovery.candidates[i]!;
-              return [canonicalPlaceId(candidate), candidate] as const;
+              const independent = candidate.relationship?.startsWith('related_')
+                ? undefined
+                : recognitionLabel(
+                    discovery.recognition,
+                    candidate.recognitionClueIndex,
+                  );
+              const user = labels.find((l) => l.index === i);
+              const label = user
+                ? { label: user.label, labelSource: 'user' as const }
+                : independent;
+              if (
+                (discovery.source.provider === 'ai-chat' ||
+                  discovery.recognition.mode === 'scene_viewpoint') &&
+                (!label || !NewSavedLabelSchema.safeParse(label.label).success)
+              )
+                throw new Error('label_required');
+              return [
+                canonicalPlaceId(candidate),
+                { candidate, label },
+              ] as const;
             }),
           ).entries(),
         ];
@@ -176,7 +210,10 @@ export class FirestoreRepository implements PlacesRepository {
           ref: ReturnType<FirestoreRepository['doc']>;
           mapMetadata: MapMetadata;
         }[] = [];
-        for (const [index, [placeId, candidate]] of entries.entries()) {
+        for (const [
+          index,
+          [placeId, { candidate, label }],
+        ] of entries.entries()) {
           const placeRef = this.doc(workspaceId, 'places', placeId),
             existing = snapshots[index]!;
           const {
@@ -234,18 +271,7 @@ export class FirestoreRepository implements PlacesRepository {
               : stored
             : PlaceSchema.parse({
                 ...fields,
-                ...(candidate.relationship?.startsWith('related_')
-                  ? {}
-                  : (recognitionLabel(
-                      discovery.recognition,
-                      recognitionClueIndex,
-                    ) ??
-                    (discovery.recognition.mode === 'scene_viewpoint'
-                      ? {
-                          label: 'Viewpoint hypothesis',
-                          labelSource: 'application',
-                        }
-                      : {}))),
+                ...(label ?? {}),
                 id: placeId,
                 workspaceId,
                 source,
@@ -272,6 +298,7 @@ export class FirestoreRepository implements PlacesRepository {
               completionReusedCount: reused,
               completionNewCount: places.length - reused,
               completionRequestId: selection.requestId,
+              completionLabels: labels,
               selectedCandidateIndices: selection.indices,
             }
           : {}),

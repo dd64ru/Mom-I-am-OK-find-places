@@ -58,6 +58,28 @@ export const ApplicationLabelSchema = z
     labelSource: z.enum(['recognition', 'user', 'application']),
   })
   .strict();
+// Used for new confirmations only; historical labels remain readable.
+export const NewSavedLabelSchema = z
+  .string()
+  .max(300)
+  .refine((s) => !/\p{Cc}/u.test(s))
+  .transform((s) => s.trim())
+  .pipe(ApplicationLabelSchema.shape.label)
+  .refine(
+    (s) => !/^(?:saved place(?: \d+)?|viewpoint hypothesis|place)$/iu.test(s),
+    'meaningful_label_required',
+  );
+export const SelectedLabelSchema = z
+  .object({
+    index: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_CANDIDATES - 1),
+    label: NewSavedLabelSchema,
+  })
+  .strict();
+export type SelectedLabel = z.infer<typeof SelectedLabelSchema>;
 export type ApplicationLabel = z.infer<typeof ApplicationLabelSchema>;
 const optionalLabel = {
   label: ApplicationLabelSchema.shape.label.optional(),
@@ -499,6 +521,10 @@ export const DiscoverySchema = z
     resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
     completionRequestId: IdSchema.optional(),
+    completionLabels: z
+      .array(SelectedLabelSchema)
+      .max(MAX_CANDIDATES)
+      .optional(),
     completionNewCount: z.number().int().min(0).max(MAX_CANDIDATES).optional(),
     completionReusedCount: z
       .number()
@@ -776,7 +802,11 @@ export function fillMissingMapMetadata(
   if (!derived) return;
   const city = existing?.city ? undefined : derived.city;
   const category = existing?.category ? undefined : derived.category;
-  const locality = existing?.locality ? undefined : derived.locality;
+  const locality =
+    existing?.locality ||
+    (existing?.city && existing.city.value !== derived.city?.value)
+      ? undefined
+      : derived.locality;
   if (!city && !category && !locality) return;
   return MapMetadataSchema.parse({
     ...(existing ?? {}),

@@ -603,8 +603,8 @@ export class GooglePlacesPoi implements PoiProvider {
     return display.data;
   }
 
-  // Identity is proven from the venue's structured provider geography and one
-  // bounded locality lookup. Names/aliases alone never become a durable key.
+  // Independently resolve application city and structured venue city; only equal
+  // stable provider locality IDs prove their equivalence. No translation guesses.
   async resolveLocality(
     identity: { provider: string; id: string },
     city: string,
@@ -612,7 +612,9 @@ export class GooglePlacesPoi implements PoiProvider {
     if (identity.provider !== 'google-places' || !city || city.length > 200)
       return;
     const loaded = await this.load(
-      'https://places.googleapis.com/v1/places/' + encodeGoogleId(identity.id),
+      'https://places.googleapis.com/v1/places/' +
+        encodeGoogleId(identity.id) +
+        '?languageCode=en',
       {
         method: 'GET',
         fieldMask: 'id,displayName,location,types,addressComponents',
@@ -631,42 +633,69 @@ export class GooglePlacesPoi implements PoiProvider {
     const country = countries[0]!.shortText;
     const region = regions[0]!.longText;
     if (!expectedCity || !country || !region) return;
-    const result = await this.load(GOOGLE_PLACES_ENDPOINT, {
-      method: 'POST',
-      fieldMask: GOOGLE_PLACES_FIELD_MASK,
-      body: JSON.stringify({
-        textQuery: [city, region, country].join(', '),
-        languageCode: 'en',
-        pageSize: 10,
-      }),
-    });
-    const envelope = searchEnvelope(result.raw);
-    if (!envelope || envelope.nextPageToken) return;
-    const rows = this.parseLog('ok', envelope.places, result.credential).filter(
-      (row) => {
-        const inCountry = row.addressComponents.some(
-          (c) => c.types.includes('country') && c.shortText === country,
-        );
-        const inRegion = row.addressComponents.some(
-          (c) =>
-            c.types.includes('administrative_area_level_1') &&
-            c.longText === region,
-        );
-        return (
+    const resolve = async (
+      name: string,
+      languageCode: string,
+      structured = false,
+    ) => {
+      const result = await this.load(GOOGLE_PLACES_ENDPOINT, {
+        method: 'POST',
+        fieldMask: GOOGLE_PLACES_FIELD_MASK,
+        body: JSON.stringify({
+          textQuery: [name, region, country].join(', '),
+          languageCode,
+          pageSize: 10,
+        }),
+      });
+      const envelope = searchEnvelope(result.raw);
+      if (!envelope || envelope.nextPageToken) return [];
+      const parsed = this.parseLog('ok', envelope.places, result.credential);
+      if (parsed.length !== envelope.places.length) return [];
+      const rows = parsed.filter(
+        (row) =>
           row.types.includes('locality') &&
-          inCountry &&
-          inRegion &&
-          normalizedLocality(row.displayName.text) ===
-            normalizedLocality(expectedCity)
-        );
-      },
-    );
-    const ids = [...new Set(rows.map((r) => r.id))];
-    if (ids.length !== 1) {
+          row.addressComponents.some(
+            (c) => c.types.includes('country') && c.shortText === country,
+          ) &&
+          (!structured ||
+            row.addressComponents.some(
+              (c) =>
+                c.types.includes('administrative_area_level_1') &&
+                c.longText === region,
+            )) &&
+          [
+            row.displayName.text,
+            ...row.addressComponents
+              .filter((c) => c.types.includes('locality'))
+              .flatMap((c) => [c.longText, c.shortText]),
+          ].some(
+            (text) =>
+              text && normalizedLocality(text) === normalizedLocality(name),
+          ),
+      );
+      return [...new Set(rows.map((r) => r.id))];
+    };
+    // Language only requests provider evidence; it never translates or creates an alias.
+    // Unsupported spellings safely omit a key when the provider does not echo a match.
+    const language = /\p{Script=Han}/u.test(city)
+      ? 'zh'
+      : /\p{Script=Cyrillic}/u.test(city)
+        ? 'ru'
+        : 'en';
+    const supplied = await resolve(city, language);
+    const structured = await resolve(expectedCity, 'en', true);
+    if (
+      supplied.length !== 1 ||
+      structured.length !== 1 ||
+      supplied[0] !== structured[0]
+    ) {
       try {
         this.diagnostic({
           event: 'locality_identity',
-          outcome: ids.length > 1 ? 'ambiguous' : 'unavailable',
+          outcome:
+            supplied.length > 1 || structured.length > 1
+              ? 'ambiguous'
+              : 'unavailable',
         });
       } catch {
         /* best effort */
@@ -680,7 +709,8 @@ export class GooglePlacesPoi implements PoiProvider {
     }
     return {
       key:
-        'google-locality:' + createHash('sha256').update(ids[0]!).digest('hex'),
+        'google-locality:' +
+        createHash('sha256').update(supplied[0]!).digest('hex'),
       source: 'google-places-locality' as const,
     };
   }

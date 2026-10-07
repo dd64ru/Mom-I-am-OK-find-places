@@ -96,7 +96,11 @@ export interface PlacesRepository {
     id: string,
     revision: number,
     action: 'confirm' | 'cancel',
-    selection?: { indices: number[]; requestId: string },
+    selection?: {
+      indices: number[];
+      requestId: string;
+      labels?: { index: number; label: string }[];
+    },
   ): Promise<Completion>;
   savePlace(place: Place): Promise<void>;
   getPlace(workspaceId: string, id: string): Promise<Place | undefined>;
@@ -187,6 +191,7 @@ export class DiscoveryService {
     };
     const poi = this.verification.poi.beginAttempt?.() ?? this.verification.poi;
     let resolution: PoiResolution;
+    let recognition = discovery.recognition;
     try {
       const adapt = (raw: unknown) => {
         const parsed = PoiResolutionSchema.safeParse(raw);
@@ -306,8 +311,25 @@ export class DiscoveryService {
             let verified = parsed;
             if (!verified.localityIntent && intent)
               verified = { ...verified, localityIntent: intent };
+            if (
+              recognition.mode === 'scene_viewpoint' &&
+              !recognition.clues.length &&
+              verified.status === 'verified' &&
+              verified.references.length > 0 &&
+              verified.candidates.length
+            ) {
+              recognition = {
+                ...recognition,
+                clues: verified.candidates.slice(0, 3).map((c) => ({
+                  name: c.canonicalName,
+                  aliases: c.aliases,
+                  category: c.category,
+                  confidence: c.confidence,
+                })),
+              };
+            }
             const enriched = adapt(
-              await poi.resolve(discovery.recognition, verified, context),
+              await poi.resolve(recognition, verified, context),
             );
             resolution =
               first?.status === 'alternatives' &&
@@ -325,6 +347,7 @@ export class DiscoveryService {
                     )
                   ? first
                   : enriched;
+            if (resolution !== enriched) recognition = discovery.recognition;
           }
         }
       }
@@ -382,6 +405,7 @@ export class DiscoveryService {
       discovery.id,
       discovery.revision,
       {
+        recognition,
         candidates:
           resolution.status === 'resolved'
             ? [storedCandidate(resolution.candidate)]

@@ -8,6 +8,9 @@ import {
   IdSchema,
   MAX_CANDIDATES,
   GooglePlaceIdSchema,
+  NewSavedLabelSchema,
+  SelectedLabelSchema,
+  recognitionLabel,
 } from '@places/schemas';
 import type { Discovery, DiscoveryView } from '@places/schemas';
 import {
@@ -19,7 +22,8 @@ const IdentityInput = z
   .object({
     placeId: GooglePlaceIdSchema.max(512),
     // Server/application-owned or explicitly human-authored label, never provider display text.
-    label: z.string().trim().min(1).max(300),
+    label: NewSavedLabelSchema.optional(),
+    category: z.string().trim().min(1).max(100).optional(),
     city: z.string().trim().min(1).max(200).optional(),
   })
   .strict();
@@ -44,6 +48,7 @@ export const ServiceRequestSchema = z
         discoveryId: IdSchema,
         revision: z.number().int().nonnegative(),
         requestId: IdSchema,
+        labels: z.array(SelectedLabelSchema).max(MAX_CANDIDATES).optional(),
         indices: z
           .array(
             z
@@ -109,14 +114,16 @@ export class PlacesServiceApi {
         const recognition = request.recognition ?? {
           mode: 'recommendation_list' as const,
           visibleText: [],
-          clues: request.identities!.map((i) => ({
-            name: i.label,
-            aliases: [],
-            category: 'place',
-            confidence: 1,
-            recommendationEvidence: 'caption' as const,
-            ...(i.city ? { cityHint: i.city } : {}),
-          })),
+          clues: request
+            .identities!.filter((i) => i.label)
+            .map((i) => ({
+              name: i.label!,
+              aliases: [],
+              category: i.category ?? 'place',
+              confidence: 1,
+              recommendationEvidence: 'caption' as const,
+              ...(i.city ? { cityHint: i.city } : {}),
+            })),
         };
         // Labels need not be unique: stable provider identity remains authoritative.
         const durableRecognition = request.identities
@@ -129,6 +136,7 @@ export class PlacesServiceApi {
             }
           : recognition;
         const candidates = [];
+        let clueIndex = 0;
         for (const [index, identity] of (request.identities ?? []).entries()) {
           if (!this.poi.refresh)
             throw new Error('provider_refresh_unavailable');
@@ -155,7 +163,9 @@ export class PlacesServiceApi {
                 category: 'place',
                 confidence: 1,
                 resolution: 'deterministic_poi',
-                recognitionClueIndex: index,
+                // 9 is explicitly unbound in this at-most-eight-clue seed;
+                // omission would trigger the legacy single-clue fallback.
+                recognitionClueIndex: identity.label ? clueIndex++ : 9,
                 candidateConfidence: 'low',
                 relationship: 'plausible_exact',
                 ...(localityIdentity ? { localityIdentity } : {}),
@@ -207,10 +217,20 @@ export class PlacesServiceApi {
     if (request.action === 'review') return this.review(discovery);
     const terminal = request.action === 'confirm' ? 'confirmed' : 'cancelled';
     const indices = request.action === 'confirm' ? request.indices : [];
+    const labels =
+      request.action === 'confirm'
+        ? [...(request.labels ?? [])].sort((a, b) => a.index - b.index)
+        : [];
+    if (
+      new Set(labels.map((l) => l.index)).size !== labels.length ||
+      labels.some((l) => !indices.includes(l.index))
+    )
+      throw new Error('invalid_selection');
     const sameCompletion = (d: Discovery) =>
       d.completionRequestId === request.requestId &&
       d.status === terminal &&
       d.revision === request.revision + 1 &&
+      JSON.stringify(d.completionLabels ?? []) === JSON.stringify(labels) &&
       JSON.stringify(
         [...(d.selectedCandidateIndices ?? [])].sort((a, b) => a - b),
       ) === JSON.stringify([...indices].sort((a, b) => a - b));
@@ -244,6 +264,7 @@ export class PlacesServiceApi {
       {
         indices: request.action === 'confirm' ? request.indices : [],
         requestId: request.requestId,
+        labels,
       },
     );
     if (!result.changed && !sameCompletion(result.discovery))
@@ -277,8 +298,20 @@ export class PlacesServiceApi {
         const view = await this.service.displayCandidate(discovery, i);
         if (!view) throw new Error('provider_refresh_unavailable');
         // Transient display may travel in this response, but the consumer persists only indices/status.
+        const owned = candidate.relationship?.startsWith('related_')
+          ? undefined
+          : recognitionLabel(
+              discovery.recognition,
+              candidate.recognitionClueIndex,
+            );
+        const label =
+          owned && NewSavedLabelSchema.safeParse(owned.label).success
+            ? owned.label
+            : undefined;
         candidates.push({
           index: i,
+          ...(label ? { label } : {}),
+          requiresLabel: !label,
           name: view.canonicalName,
           googleMapsUrl:
             view.references.find((r) => r.provider === 'google-places')?.url ??

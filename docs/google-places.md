@@ -103,3 +103,5 @@ Regression fixtures use an actual partial-style provider name, unknown category,
 The current exact/chain multi-select model, separate city normalization, bounds and backwards-compatible bulk confirmation are documented in [Chain selection](chain-selection.md).
 
 Saved Places discovery v2: [channel-neutral service, scene hypotheses and locality identity](saved-places-service.md). Telegram and AI Chat reuse the same canonical confirmation boundary; the feed remains read-only.
+
+Locality grouping requires independent provider resolution of the supplied city and the venue structured city to the same stable locality ID. Search ranking alone is insufficient; see [service locality proof](saved-places-service.md#locality-identity).
