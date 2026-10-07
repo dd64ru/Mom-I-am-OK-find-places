@@ -4,7 +4,7 @@ import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 // Import/discovery only: handlers are never invoked and no credentials are used.
 export async function smokeFunctionPackage(directory, target) {
-  assert.ok(['webhook', 'feed'].includes(target));
+  assert.ok(['webhook', 'feed', 'service'].includes(target));
   const pkg = JSON.parse(
     await readFile(resolve(directory, 'package.json'), 'utf8'),
   );
@@ -21,8 +21,23 @@ export async function smokeFunctionPackage(directory, target) {
   );
   assert.deepEqual(
     functions.map(([name]) => name),
-    [target === 'feed' ? 'placesFeed' : 'placesWebhook'],
+    [
+      {
+        feed: 'placesFeed',
+        webhook: 'placesWebhook',
+        service: 'placesService',
+      }[target],
+    ],
   );
+  if (target === 'service') {
+    const endpoint = functions[0][1].__endpoint;
+    assert.deepEqual(endpoint.httpsTrigger.invoker, ['private']);
+    assert.deepEqual(endpoint.region, ['europe-west3']);
+    assert.equal(
+      endpoint.serviceAccountEmail,
+      'places-runtime@mom-im-ok-places.iam.gserviceaccount.com',
+    );
+  }
   const params = globalThis[
     Symbol.for('firebase-functions:params:declaredParams')
   ]
@@ -30,21 +45,29 @@ export async function smokeFunctionPackage(directory, target) {
     .sort();
   assert.deepEqual(
     params,
-    (target === 'feed'
+    (target === 'service'
       ? [
           'WORKSPACE_ID',
-          'PLACES_FEED_ENABLED',
-          'PLACES_FEED_URL_TOKENS_ENABLED',
-        ]
-      : [
-          'WORKSPACE_ID',
-          'TELEGRAM_CHAT_ID',
-          'TELEGRAM_BOT_USERNAME',
           'OPENAI_MODEL',
           'OPENAI_REASONING_EFFORT',
           'OPENAI_HOST_ID',
-          'NOMINATIM_ENDPOINT',
+          'PLACES_SERVICE_ENABLED',
         ]
+      : target === 'feed'
+        ? [
+            'WORKSPACE_ID',
+            'PLACES_FEED_ENABLED',
+            'PLACES_FEED_URL_TOKENS_ENABLED',
+          ]
+        : [
+            'WORKSPACE_ID',
+            'TELEGRAM_CHAT_ID',
+            'TELEGRAM_BOT_USERNAME',
+            'OPENAI_MODEL',
+            'OPENAI_REASONING_EFFORT',
+            'OPENAI_HOST_ID',
+            'NOMINATIM_ENDPOINT',
+          ]
     ).sort(),
   );
   console.info(`production_package_ok:${target}`);

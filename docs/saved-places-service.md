@@ -17,13 +17,11 @@ allAuthenticatedUsers. Workspace comes from WORKSPACE_ID, not a payload.
 The browser uses an authenticated Mom-I-am-OK callable, never this endpoint or
 an IAM credential. There is no admin-only restriction in the new application callable.
 
-Owner deployment preparation (NOT executed in this change): package with
-`npm run deploy:package -- --output <empty-directory> --target service` from a
-clean reviewed checkout; configure WORKSPACE_ID, OPENAI_MODEL,
-OPENAI_REASONING_EFFORT and OPENAI_HOST_ID; review existing Places runtime
-provider/SIWC access, provision the private invoker binding, deploy this target
-separately, then enable PLACES_SERVICE_ENABLED. The webhook/feed deploy workflows
-remain separate. No production IAM, secrets, backfill or deployment was changed.
+Owner rollout preparation and the dormant-first deployment, service-scoped IAM,
+enablement, App release and rollback sequence are documented in
+[the production rollout runbook](places-service-rollout.md). The manual service
+workflow is separate from webhook/feed; no production actions occur merely by
+merging this preparation.
 
 ## POST contract
 

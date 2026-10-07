@@ -1,6 +1,9 @@
 import { writeFile } from 'node:fs/promises';
 import { IdSchema } from '@places/schemas';
-import { nominatimEndpoint } from '@places/providers';
+import {
+  OpenAiReasoningEffortSchema,
+  nominatimEndpoint,
+} from '@places/providers';
 import { loadConfig } from '../apps/worker/dist/index.js';
 const names = [
   'WORKSPACE_ID',
@@ -14,11 +17,38 @@ try {
   const args = process.argv.slice(2);
   const feed =
     args.length === 2 && args[0] === '--target' && args[1] === 'feed';
-  if (args.length && !feed) throw new Error();
+  const service =
+    args.length === 2 && args[0] === '--target' && args[1] === 'service';
+  if (args.length && !feed && !service) throw new Error();
   const values = Object.fromEntries(
     names.map((key) => [key, process.env[key]]),
   );
-  if (feed) {
+  if (service) {
+    const workspace = IdSchema.parse(values.WORKSPACE_ID);
+    const serviceNames = [
+      'OPENAI_MODEL',
+      'OPENAI_REASONING_EFFORT',
+      'OPENAI_HOST_ID',
+    ];
+    OpenAiReasoningEffortSchema.parse(values.OPENAI_REASONING_EFFORT);
+    if (
+      !/^urn:uuid:[a-f0-9-]{36}$/.test(values.OPENAI_HOST_ID ?? '') ||
+      serviceNames.some(
+        (name) => !values[name] || !/^[A-Za-z0-9_:.,-]+$/.test(values[name]),
+      ) ||
+      !['true', 'false'].includes(process.env.PLACES_SERVICE_ENABLED)
+    )
+      throw new Error();
+    const endpoint = nominatimEndpoint(
+      process.env.NOMINATIM_ENDPOINT || 'https://nominatim.openstreetmap.org',
+    );
+    await writeFile(
+      '.deploy/functions/.env.mom-im-ok-places',
+      `WORKSPACE_ID=${workspace}\n` +
+        serviceNames.map((name) => `${name}=${values[name]}`).join('\n') +
+        `\nNOMINATIM_ENDPOINT=${endpoint}\nPLACES_SERVICE_ENABLED=${process.env.PLACES_SERVICE_ENABLED}\n`,
+    );
+  } else if (feed) {
     const workspace = IdSchema.parse(values.WORKSPACE_ID);
     await writeFile(
       '.deploy/functions/.env.mom-im-ok-places',

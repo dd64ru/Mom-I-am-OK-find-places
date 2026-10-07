@@ -13,8 +13,12 @@ const {
 const {
   getEndpointFilters,
 } = require('../node_modules/firebase-tools/lib/deploy/functions/functionsDeployHelper.js');
-for (const target of ['webhook', 'feed']) {
-  const name = target === 'feed' ? 'placesFeed' : 'placesWebhook';
+for (const target of ['webhook', 'feed', 'service']) {
+  const name = {
+    feed: 'placesFeed',
+    webhook: 'placesWebhook',
+    service: 'placesService',
+  }[target];
   test(`${target} entrypoint exposes only its own Firebase function/parameters and production package selects it`, async () => {
     const entry = resolve(`apps/functions/dist/${target}-entry.js`);
     const result = JSON.parse(
@@ -35,21 +39,29 @@ for (const target of ['webhook', 'feed']) {
     assert.deepEqual(result.functions, [name]);
     assert.deepEqual(
       result.params,
-      (target === 'feed'
+      (target === 'service'
         ? [
             'WORKSPACE_ID',
-            'PLACES_FEED_ENABLED',
-            'PLACES_FEED_URL_TOKENS_ENABLED',
-          ]
-        : [
-            'WORKSPACE_ID',
-            'TELEGRAM_CHAT_ID',
-            'TELEGRAM_BOT_USERNAME',
             'OPENAI_MODEL',
             'OPENAI_REASONING_EFFORT',
             'OPENAI_HOST_ID',
-            'NOMINATIM_ENDPOINT',
+            'PLACES_SERVICE_ENABLED',
           ]
+        : target === 'feed'
+          ? [
+              'WORKSPACE_ID',
+              'PLACES_FEED_ENABLED',
+              'PLACES_FEED_URL_TOKENS_ENABLED',
+            ]
+          : [
+              'WORKSPACE_ID',
+              'TELEGRAM_CHAT_ID',
+              'TELEGRAM_BOT_USERNAME',
+              'OPENAI_MODEL',
+              'OPENAI_REASONING_EFFORT',
+              'OPENAI_HOST_ID',
+              'NOMINATIM_ENDPOINT',
+            ]
       ).sort(),
     );
     const directory = await mkdtemp(join(tmpdir(), 'places-target-package-'));
@@ -95,11 +107,14 @@ for (const target of ['webhook', 'feed']) {
       requiredAPIs: {},
       environmentVariables: {},
     });
+    const siblings = ['placesWebhook', 'placesFeed', 'placesService']
+      .filter((id) => id !== name)
+      .map((id) => endpoint(id, { PROFILE: 'untouched' }));
     const plan = await createDeploymentPlan({
       projectId: 'fixture-project',
       codebase: 'places',
       wantBackend: backend([wanted]),
-      haveBackend: backend([haveSelected, sibling]),
+      haveBackend: backend([haveSelected, sibling, ...siblings]),
       filters: getEndpointFilters({ only: `functions:places:${name}` }, [
         { codebase: 'places' },
       ]),
@@ -120,6 +135,32 @@ for (const target of ['webhook', 'feed']) {
     assert.deepEqual(plan.secretAccessPlan, {});
     assert.equal(plan.rolesToAdd, undefined);
     assert.equal(plan.serviceAccountToDelete, undefined);
+    if (target === 'service') {
+      const initial = await createDeploymentPlan({
+        projectId: 'fixture-project',
+        codebase: 'places',
+        wantBackend: backend([wanted]),
+        haveBackend: backend(siblings),
+        filters: getEndpointFilters(
+          { only: 'functions:places:placesService' },
+          [{ codebase: 'places' }],
+        ),
+      });
+      const sets = Object.values(initial.regionalChangesets);
+      assert.deepEqual(
+        sets.flatMap((c) => c.endpointsToCreate.map((e) => e.id)),
+        ['placesService'],
+      );
+      assert.deepEqual(
+        sets.flatMap((c) => c.endpointsToDelete),
+        [],
+      );
+      assert.deepEqual(
+        sets.flatMap((c) => c.endpointsToUpdate),
+        [],
+      );
+    }
+
     assert.equal(sibling.environmentVariables.PLACES_FEED_ENABLED, 'true');
   });
 }
