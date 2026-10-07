@@ -17,15 +17,25 @@ export function googleSearchPlan(
 ) {
   const cited =
     v.status === 'verified' && v.references.length ? v.candidates : [];
+  const scene = r.mode === 'scene_viewpoint';
+  const safeCited = scene
+    ? cited.filter(
+        (c) =>
+          !r.scene?.landmarks.some(
+            (n) =>
+              normalizedLocality(n) === normalizedLocality(c.canonicalName),
+          ),
+      )
+    : cited;
   const clues: Clue[] = [
     ...r.clues.filter((c) => c.signage),
-    ...(cited.length ? cited : r.clues),
+    ...(safeCited.length ? safeCited : r.clues),
   ]
     .slice(0, 3)
     .sort((a, b) => b.confidence - a.confidence);
   // The user's city is explicit; a recommendation list's inferred Recognition city is
   // weaker (vision) evidence. areaHint never reaches this branch.
-  const requested = ctx.cityOverride ?? ctx.inferredCity;
+  const requested = ctx.cityOverride ?? ctx.inferredCity ?? r.scene?.cityHint;
   const intent =
     requested &&
     v.localityIntent?.input === requested &&
@@ -55,7 +65,8 @@ export function googleSearchPlan(
           ...(aligned?.city ? [aligned.city, ...aligned.cityAliases] : []),
         ]),
       ],
-      countryCode: intent?.countryCode ?? aligned?.countryCode,
+      countryCode:
+        r.scene?.countryCode ?? intent?.countryCode ?? aligned?.countryCode,
       source: ctx.cityOverride ? 'explicit' : 'vision',
     };
   } else if (

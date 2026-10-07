@@ -267,6 +267,8 @@ export function createRuntime(env: NodeJS.ProcessEnv) {
                 },
               },
               poi: {
+                resolveLocality: (identity, city) =>
+                  poi.resolveLocality(identity, city),
                 async firstPass(recognition, context, normalization) {
                   budget.throwIfAborted();
                   const result = await scopedPoi.firstPass!(

@@ -196,3 +196,114 @@ test('real local Firestore transactions initialize idempotently and serialize co
     await db.terminate();
   }
 });
+
+test('real service multi-confirmation is atomic, revision-fenced and reuses the Telegram Google identity', async () => {
+  const db = new Firestore({ projectId: project, host, ssl: false });
+  try {
+    const repository = new FirestoreRepository(db);
+    const workspace = await initializeWorkspace(
+      repository,
+      'service-transaction-fixture',
+    );
+    const time = new Date().toISOString();
+    const candidate = (id) => ({
+      resolution: 'deterministic_poi',
+      providerIdentity: { provider: 'google-places', id },
+      references: [
+        { provider: 'google-places', externalId: id, observedAt: time },
+      ],
+      candidateConfidence: 'low',
+    });
+    const discovery = (id, candidates, status) => ({
+      id,
+      workspaceId: workspace.id,
+      source: {
+        provider: id === 'telegram-id' ? 'telegram' : 'ai-chat',
+        observedAt: time,
+      },
+      recognition: {
+        visibleText: [],
+        clues: [
+          {
+            name: 'Application-owned label',
+            aliases: [],
+            category: 'park',
+            confidence: 1,
+          },
+        ],
+      },
+      candidates,
+      status,
+      revision: 0,
+      visionProvider: 'fixture',
+      createdAt: time,
+      ...(status === 'needs_selection' ? { selectedCandidateIndices: [] } : {}),
+    });
+    await repository.createDiscovery(
+      discovery('telegram-id', [candidate('existing')], 'needs_confirmation'),
+    );
+    const telegram = await repository.finishDiscovery(
+      workspace.id,
+      'telegram-id',
+      0,
+      'confirm',
+    );
+    await repository.createDiscovery(
+      discovery(
+        'chat-id',
+        [candidate('existing'), candidate('new-branch')],
+        'needs_selection',
+      ),
+    );
+    const done = await repository.finishDiscovery(
+      workspace.id,
+      'chat-id',
+      0,
+      'confirm',
+      { indices: [0, 1], requestId: 'confirm' },
+    );
+    assert.equal(done.places.length, 2);
+    assert.equal(done.reusedCount, 1);
+    assert.equal(done.places[0].id, telegram.place.id);
+    assert.equal(done.discovery.completionNewCount, 1);
+    const retry = await repository.finishDiscovery(
+      workspace.id,
+      'chat-id',
+      0,
+      'confirm',
+      { indices: [0, 1], requestId: 'confirm' },
+    );
+    assert.equal(retry.changed, false);
+    assert.deepEqual(
+      retry.discovery.confirmedPlaceIds,
+      done.discovery.confirmedPlaceIds,
+    );
+    await repository.createDiscovery(
+      discovery('stale-id', [candidate('never-saved')], 'needs_confirmation'),
+    );
+    assert.equal(
+      (
+        await repository.finishDiscovery(
+          workspace.id,
+          'stale-id',
+          99,
+          'confirm',
+          { indices: [0], requestId: 'stale' },
+        )
+      ).changed,
+      false,
+    );
+    assert.equal(
+      (
+        await db
+          .collection('workspaces')
+          .doc(workspace.id)
+          .collection('places')
+          .get()
+      ).size,
+      2,
+    );
+  } finally {
+    await db.terminate();
+  }
+});

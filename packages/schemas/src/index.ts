@@ -9,6 +9,7 @@ const RelationshipSchema = z.enum([
   'plausible_exact',
   'related_branch',
   'related_chain_location',
+  'viewpoint_hypothesis',
 ]);
 const Confidence = z.number().min(0).max(1);
 const AttributionsSchema = z.array(
@@ -54,7 +55,7 @@ export const ApplicationLabelSchema = z
       .min(1)
       .max(300)
       .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s)),
-    labelSource: z.enum(['recognition', 'user']),
+    labelSource: z.enum(['recognition', 'user', 'application']),
   })
   .strict();
 export type ApplicationLabel = z.infer<typeof ApplicationLabelSchema>;
@@ -99,6 +100,13 @@ const mapMetadataText = (max: number) =>
     .min(1)
     .max(max)
     .refine((s) => !/[\u0000-\u001f\u007f]/u.test(s));
+export const LocalityIdentitySchema = z
+  .object({
+    key: z.string().regex(/^google-locality:[a-f0-9]{64}$/),
+    source: z.literal('google-places-locality'),
+  })
+  .strict();
+export type LocalityIdentity = z.infer<typeof LocalityIdentitySchema>;
 export const MapMetadataSchema = z
   .object({
     city: z
@@ -108,6 +116,7 @@ export const MapMetadataSchema = z
       })
       .strict()
       .optional(),
+    locality: LocalityIdentitySchema.optional(),
     category: z
       .object({
         value: mapMetadataText(MAX_MAP_CATEGORY),
@@ -173,7 +182,21 @@ export const WorkspaceSchema = z
 // Vision never returns authoritative coordinates. This schema is shared by both AI adapters.
 export const RecognitionSchema = z
   .object({
-    mode: z.enum(['single_venue', 'recommendation_list']).optional(),
+    mode: z
+      .enum(['single_venue', 'recommendation_list', 'scene_viewpoint'])
+      .optional(),
+    scene: z
+      .object({
+        landmarks: z.array(z.string().trim().min(1).max(300)).min(1).max(3),
+        cityHint: z.string().trim().min(1).max(200),
+        countryCode: z
+          .string()
+          .regex(/^[A-Z]{2}$/)
+          .optional(),
+        context: z.enum(['waterfront', 'park', 'skyline', 'viewpoint']),
+      })
+      .strict()
+      .optional(),
     recommendationsTruncated: z.boolean().optional(),
     visibleText: z.array(z.string()).max(100),
     clues: z
@@ -221,6 +244,15 @@ export const RecognitionSchema = z
           ),
         ).size === r.clues.length),
     'invalid_recommendation_list',
+  )
+  .refine(
+    (r) =>
+      r.mode === 'scene_viewpoint'
+        ? !!r.scene &&
+          r.clues.length <= 3 &&
+          r.clues.every((c) => !c.signage && !c.possibleChain)
+        : r.scene === undefined,
+    'invalid_scene_viewpoint',
   );
 // Durable Recognition retains the historical ten-clue decoder. Fresh model
 // output must have unambiguous mode semantics before it enters persistence/search.
@@ -234,6 +266,7 @@ export const FreshRecognitionSchema = RecognitionSchema.refine(
 );
 export const CandidateSchema = z
   .object({
+    localityIdentity: LocalityIdentitySchema.optional(),
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),
     canonicalName: z.string().min(1),
     nativeName: z.string().optional(),
@@ -264,6 +297,7 @@ export const CandidateSchema = z
   .strict();
 export const GoogleStoredCandidateSchema = z
   .object({
+    localityIdentity: LocalityIdentitySchema.optional(),
     relationship: RelationshipSchema.optional(),
     candidateConfidence: z.enum(['high', 'medium', 'low']).optional(),
     recognitionClueIndex: z.number().int().min(0).max(9).optional(),
@@ -301,6 +335,9 @@ export function storedCandidate(candidate: Candidate): StoredCandidate {
           ...(candidate.relationship
             ? { relationship: candidate.relationship }
             : {}),
+          ...(candidate.localityIdentity
+            ? { localityIdentity: candidate.localityIdentity }
+            : {}),
           resolution: candidate.resolution,
           providerIdentity: candidate.providerIdentity,
           references: candidate.references,
@@ -329,6 +366,7 @@ export const ProjectedPlaceSchema = z
     tags: z.array(z.string()),
     category: z.string().optional(),
     city: z.string().min(1).optional(),
+    cityKey: LocalityIdentitySchema.shape.key.optional(),
     // Independently licensed (OSM/Nominatim) formatted address only; never Google content.
     address: z.string().min(1).optional(),
     providerIdentity: z.union([
@@ -460,6 +498,18 @@ export const DiscoverySchema = z
     cityOverride: z.string().min(1).max(200).optional(),
     resolutionReason: ResolutionReasonSchema.optional(),
     revision: z.number().int().nonnegative().default(0),
+    completionRequestId: IdSchema.optional(),
+    completionNewCount: z.number().int().min(0).max(MAX_CANDIDATES).optional(),
+    completionReusedCount: z
+      .number()
+      .int()
+      .min(0)
+      .max(MAX_CANDIDATES)
+      .optional(),
+    inputDigest: z
+      .string()
+      .regex(/^[a-f0-9]{64}$/)
+      .optional(),
     confirmedPlaceId: IdSchema.optional(),
     confirmedPlaceIds: z.array(IdSchema).min(1).max(MAX_CANDIDATES).optional(),
     selectedCandidateIndices: z
@@ -683,6 +733,7 @@ export function mapMetadataFor(
   candidate: {
     recognitionClueIndex?: number;
     relationship?: string;
+    localityIdentity?: LocalityIdentity;
   },
 ): MapMetadata | undefined {
   const related = candidate.relationship?.startsWith('related_') ?? false;
@@ -693,9 +744,16 @@ export function mapMetadataFor(
   const userCity = metadataValue(discovery.cityOverride, MAX_MAP_CITY);
   const boundCity = related
     ? undefined
-    : recognitionCity(discovery.recognition, candidate.recognitionClueIndex);
-  const category = metadataValue(clue?.category, MAX_MAP_CATEGORY);
+    : (discovery.recognition.scene?.cityHint ??
+      recognitionCity(discovery.recognition, candidate.recognitionClueIndex));
+  const category = metadataValue(
+    clue?.category ?? discovery.recognition.scene?.context,
+    MAX_MAP_CATEGORY,
+  );
   const parsed = MapMetadataSchema.safeParse({
+    ...((userCity || boundCity) && candidate.localityIdentity
+      ? { locality: candidate.localityIdentity }
+      : {}),
     ...(userCity
       ? { city: { value: userCity, source: 'user' } }
       : boundCity
@@ -718,9 +776,11 @@ export function fillMissingMapMetadata(
   if (!derived) return;
   const city = existing?.city ? undefined : derived.city;
   const category = existing?.category ? undefined : derived.category;
-  if (!city && !category) return;
+  const locality = existing?.locality ? undefined : derived.locality;
+  if (!city && !category && !locality) return;
   return MapMetadataSchema.parse({
     ...(existing ?? {}),
+    ...(locality ? { locality } : {}),
     ...(city ? { city } : {}),
     ...(category ? { category } : {}),
   });

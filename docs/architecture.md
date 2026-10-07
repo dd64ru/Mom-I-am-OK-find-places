@@ -60,3 +60,5 @@ The [read-only projection layer](map-projection.md) reads confirmed Places throu
 Google resolution attempts share transient ID deduplication and diagnostic slots across first/enriched queries. Alternatives enter Discovery needs_selection with at most eight stored identities; live provider content stays in memory and is refreshed by ID for Telegram. Revision-fenced checkboxes retain the candidate list and selected indices; final bulk confirmation is the only Place write, in one bounded transaction. Optional confirmedPlaceIds extends the legacy first confirmedPlaceId. No feed/projection/backfill behavior changes.
 
 See [Exact venues and related locations](chain-selection.md) for structured signage, bounded chain inference, independent city normalization, multi-selection and backwards-compatible multi-confirmation.
+
+Saved Places discovery v2: [channel-neutral service, scene hypotheses and locality identity](saved-places-service.md). Telegram and AI Chat reuse the same canonical confirmation boundary; the feed remains read-only.

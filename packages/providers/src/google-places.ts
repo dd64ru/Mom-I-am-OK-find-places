@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { googleSearchPlan, type GooglePhase } from './google-search-plan.js';
 import { PipelineTelemetry } from './telemetry.js';
 import { z } from 'zod';
@@ -415,7 +416,11 @@ export class GooglePlacesPoi implements PoiProvider {
         | GoogleRelatedEvent
         | GoogleDecisionEvent
         | GoogleCandidateEvent
-        | GoogleBrandEvent,
+        | GoogleBrandEvent
+        | {
+            event: 'locality_identity';
+            outcome: 'normalized' | 'ambiguous' | 'unavailable';
+          },
     ) => void = () => {},
     private readonly telemetry = new PipelineTelemetry(),
   ) {
@@ -598,6 +603,88 @@ export class GooglePlacesPoi implements PoiProvider {
     return display.data;
   }
 
+  // Identity is proven from the venue's structured provider geography and one
+  // bounded locality lookup. Names/aliases alone never become a durable key.
+  async resolveLocality(
+    identity: { provider: string; id: string },
+    city: string,
+  ) {
+    if (identity.provider !== 'google-places' || !city || city.length > 200)
+      return;
+    const loaded = await this.load(
+      'https://places.googleapis.com/v1/places/' + encodeGoogleId(identity.id),
+      {
+        method: 'GET',
+        fieldMask: 'id,displayName,location,types,addressComponents',
+      },
+    );
+    const venue = this.parseLog('ok', [loaded.raw], loaded.credential)[0];
+    if (!venue || venue.id !== identity.id) return;
+    const component = (type: string) =>
+      venue.addressComponents.filter((c) => c.types.includes(type));
+    const cities = component('locality');
+    const countries = component('country');
+    const regions = component('administrative_area_level_1');
+    if (cities.length !== 1 || countries.length !== 1 || regions.length !== 1)
+      return;
+    const expectedCity = cities[0]!.longText;
+    const country = countries[0]!.shortText;
+    const region = regions[0]!.longText;
+    if (!expectedCity || !country || !region) return;
+    const result = await this.load(GOOGLE_PLACES_ENDPOINT, {
+      method: 'POST',
+      fieldMask: GOOGLE_PLACES_FIELD_MASK,
+      body: JSON.stringify({
+        textQuery: [city, region, country].join(', '),
+        languageCode: 'en',
+        pageSize: 10,
+      }),
+    });
+    const envelope = searchEnvelope(result.raw);
+    if (!envelope || envelope.nextPageToken) return;
+    const rows = this.parseLog('ok', envelope.places, result.credential).filter(
+      (row) => {
+        const inCountry = row.addressComponents.some(
+          (c) => c.types.includes('country') && c.shortText === country,
+        );
+        const inRegion = row.addressComponents.some(
+          (c) =>
+            c.types.includes('administrative_area_level_1') &&
+            c.longText === region,
+        );
+        return (
+          row.types.includes('locality') &&
+          inCountry &&
+          inRegion &&
+          normalizedLocality(row.displayName.text) ===
+            normalizedLocality(expectedCity)
+        );
+      },
+    );
+    const ids = [...new Set(rows.map((r) => r.id))];
+    if (ids.length !== 1) {
+      try {
+        this.diagnostic({
+          event: 'locality_identity',
+          outcome: ids.length > 1 ? 'ambiguous' : 'unavailable',
+        });
+      } catch {
+        /* best effort */
+      }
+      return;
+    }
+    try {
+      this.diagnostic({ event: 'locality_identity', outcome: 'normalized' });
+    } catch {
+      /* best effort */
+    }
+    return {
+      key:
+        'google-locality:' + createHash('sha256').update(ids[0]!).digest('hex'),
+      source: 'google-places-locality' as const,
+    };
+  }
+
   beginAttempt(): PoiProvider {
     const attempt = newAttempt();
     return {
@@ -616,6 +703,7 @@ export class GooglePlacesPoi implements PoiProvider {
       resolve: (r, v, c) =>
         this.resolve(r, v, c, 'google_enriched_pass', attempt),
       refresh: (identity) => this.refresh(identity),
+      resolveLocality: (identity, city) => this.resolveLocality(identity, city),
     };
   }
   firstPass(
@@ -679,6 +767,7 @@ export class GooglePlacesPoi implements PoiProvider {
       input.data.verification,
       input.data.context,
     );
+    const scene = recognition.mode === 'scene_viewpoint';
     const queries =
       phase === 'google_related_pass'
         ? [attempt.relatedQuery!]
@@ -840,6 +929,24 @@ export class GooglePlacesPoi implements PoiProvider {
         const category =
           recognizedCategory(row.types) ?? matchingClue.category ?? 'place';
         const geography = geographicEvidence(row, locality);
+        // A visible landmark cannot become the camera pin even if verification suggested it.
+        if (
+          scene &&
+          recognition.scene?.landmarks.some(
+            (n) =>
+              identityStrength(
+                venueNameEvidence(n, row.displayName.text).nameEvidence,
+              ) >= 2,
+          )
+        )
+          continue;
+        if (
+          scene &&
+          (support === 'conflict' ||
+            !geography.cityMatch ||
+            geography.countryConflict)
+        )
+          continue;
         const exactChainAddressConflict =
           phase !== 'google_related_pass' &&
           (attempt.recommendationIndex !== undefined ||
@@ -1078,9 +1185,11 @@ export class GooglePlacesPoi implements PoiProvider {
           address: { formatted: row.formattedAddress ?? '', ...address },
           references: [...input.data.verification.references, reference],
           confidence: matchingClue.confidence,
-          relationship,
+          relationship: scene ? 'viewpoint_hypothesis' : relationship,
           candidateConfidence:
-            weakEligible || related ? 'low' : candidateConfidence(evidence),
+            scene || weakEligible || related
+              ? 'low'
+              : candidateConfidence(evidence),
           resolution: 'deterministic_poi',
           providerIdentity: { provider: 'google-places', id: row.id },
           ...(row.attributions?.length
@@ -1164,6 +1273,7 @@ export class GooglePlacesPoi implements PoiProvider {
         /* best effort */
       }
       if (
+        !scene &&
         best &&
         ranked.length === 1 &&
         isAccepted(decision) &&
@@ -1179,12 +1289,14 @@ export class GooglePlacesPoi implements PoiProvider {
         return { status: 'resolved', candidate: best.candidate };
       }
     }
-    const expanded = await this.expandRelated(
-      input.data.recognition,
-      input.data.verification,
-      input.data.context,
-      attempt,
-    );
+    const expanded = scene
+      ? undefined
+      : await this.expandRelated(
+          input.data.recognition,
+          input.data.verification,
+          input.data.context,
+          attempt,
+        );
     if (expanded) return expanded;
     const alternatives = [...candidates.values()]
       .sort((a, b) => compareLocations(a, b))

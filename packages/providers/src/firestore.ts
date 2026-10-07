@@ -103,6 +103,7 @@ export class FirestoreRepository implements PlacesRepository {
     id: string,
     revision: number,
     action: 'confirm' | 'cancel',
+    selection?: { indices: number[]; requestId: string },
   ) {
     const ref = this.doc(workspaceId, 'discoveries', id);
     return this.db.runTransaction(async (tx) => {
@@ -127,17 +128,30 @@ export class FirestoreRepository implements PlacesRepository {
           ...(places.length ? { place: places[0], places } : {}),
         };
       }
+      if (
+        selection &&
+        (selection.indices.length > 8 ||
+          new Set(selection.indices).size !== selection.indices.length ||
+          selection.indices.some(
+            (i) =>
+              !Number.isInteger(i) || i < 0 || i >= discovery.candidates.length,
+          ))
+      )
+        throw new Error('invalid_selection');
       const time = new Date().toISOString();
       const places: Place[] = [];
       let reused = 0;
       if (action === 'confirm') {
         const indices =
-          discovery.status === 'needs_selection'
-            ? (discovery.selectedCandidateIndices ?? [])
-            : discovery.status === 'needs_confirmation' &&
-                discovery.candidates.length === 1
-              ? [0]
-              : [];
+          selection &&
+          ['needs_selection', 'needs_confirmation'].includes(discovery.status)
+            ? selection.indices
+            : discovery.status === 'needs_selection'
+              ? (discovery.selectedCandidateIndices ?? [])
+              : discovery.status === 'needs_confirmation' &&
+                  discovery.candidates.length === 1
+                ? [0]
+                : [];
         if (!indices.length)
           throw new Error('deterministic_candidate_required');
         const entries = [
@@ -167,6 +181,7 @@ export class FirestoreRepository implements PlacesRepository {
             existing = snapshots[index]!;
           const {
             resolution: _,
+            localityIdentity: _localityIdentity,
             recognitionClueIndex,
             relationship: _relationship,
             candidateConfidence: _candidateConfidence,
@@ -221,10 +236,16 @@ export class FirestoreRepository implements PlacesRepository {
                 ...fields,
                 ...(candidate.relationship?.startsWith('related_')
                   ? {}
-                  : recognitionLabel(
+                  : (recognitionLabel(
                       discovery.recognition,
                       recognitionClueIndex,
-                    )),
+                    ) ??
+                    (discovery.recognition.mode === 'scene_viewpoint'
+                      ? {
+                          label: 'Viewpoint hypothesis',
+                          labelSource: 'application',
+                        }
+                      : {}))),
                 id: placeId,
                 workspaceId,
                 source,
@@ -246,6 +267,14 @@ export class FirestoreRepository implements PlacesRepository {
         ...discovery,
         status: action === 'confirm' ? 'confirmed' : 'cancelled',
         revision: revision + 1,
+        ...(selection
+          ? {
+              completionReusedCount: reused,
+              completionNewCount: places.length - reused,
+              completionRequestId: selection.requestId,
+              selectedCandidateIndices: selection.indices,
+            }
+          : {}),
         ...(places.length
           ? {
               confirmedPlaceId: places[0]!.id,

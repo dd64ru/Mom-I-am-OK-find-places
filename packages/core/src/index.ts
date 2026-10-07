@@ -19,6 +19,8 @@ import {
   type Verification,
   type GeographicContext,
   type PoiResolution,
+  type LocalityIdentity,
+  recognitionCity,
 } from '@places/schemas';
 export class ProviderFailure extends Error {
   constructor(readonly code: string) {
@@ -59,6 +61,10 @@ export interface PoiProvider {
     context?: GeographicContext,
     normalization?: Verification,
   ): Promise<PoiResolution>;
+  resolveLocality?(
+    identity: { provider: string; id: string },
+    city: string,
+  ): Promise<LocalityIdentity | undefined>;
   refresh?(identity: { provider: string; id: string }): Promise<PlaceDisplay>;
   resolve(
     recognition: Recognition,
@@ -90,6 +96,7 @@ export interface PlacesRepository {
     id: string,
     revision: number,
     action: 'confirm' | 'cancel',
+    selection?: { indices: number[]; requestId: string },
   ): Promise<Completion>;
   savePlace(place: Place): Promise<void>;
   getPlace(workspaceId: string, id: string): Promise<Place | undefined>;
@@ -225,16 +232,29 @@ export class DiscoveryService {
         references: [],
         ...(intent ? { localityIntent: intent } : {}),
       };
+      this.diagnostic({
+        event: 'resolution_path',
+        path:
+          discovery.recognition.mode === 'scene_viewpoint'
+            ? 'viewpoint_hypothesis'
+            : 'exact_venue',
+      });
       const first = poi.firstPass
         ? adapt(
             await poi.firstPass(discovery.recognition, context, normalization),
           )
         : undefined;
+      this.diagnostic({
+        event: 'resolution_first_pass',
+        result: first?.status ?? 'unavailable',
+      });
       if (
         (discovery.recognition.mode === 'recommendation_list' &&
           first !== undefined) ||
         first?.status === 'resolved' ||
-        (first?.status === 'unresolved' && first.reason === 'no_place_evidence')
+        (first?.status === 'unresolved' &&
+          first.reason === 'no_place_evidence' &&
+          discovery.recognition.mode !== 'scene_viewpoint')
       ) {
         resolution = first;
       } else {
@@ -258,6 +278,10 @@ export class DiscoveryService {
             /* best effort */
           }
         };
+        this.diagnostic({
+          event: 'web_enrichment_started',
+          outcome: 'started',
+        });
         let raw: Verification | undefined;
         let failed = false;
         // Only the optional web call is recoverable. Schema adaptation and Google
@@ -308,6 +332,51 @@ export class DiscoveryService {
       return this.recordFailure(discovery, error);
     }
 
+    const resolvedCandidates =
+      resolution.status === 'resolved'
+        ? [resolution.candidate]
+        : resolution.status === 'alternatives'
+          ? resolution.candidates
+          : [];
+    for (const candidate of resolvedCandidates) {
+      if (discovery.recognition.mode === 'scene_viewpoint') {
+        candidate.candidateConfidence = 'low';
+        candidate.relationship = 'viewpoint_hypothesis';
+      }
+      const city =
+        discovery.cityOverride ??
+        discovery.recognition.scene?.cityHint ??
+        recognitionCity(discovery.recognition, candidate.recognitionClueIndex);
+      if (city && candidate.providerIdentity && poi.resolveLocality) {
+        try {
+          candidate.localityIdentity = await poi.resolveLocality(
+            candidate.providerIdentity,
+            city,
+          );
+        } catch {
+          /* optional identity cannot block a safe venue proposal */
+        }
+      }
+    }
+    this.diagnostic({
+      event: 'discovery_resolution',
+      path:
+        discovery.recognition.mode === 'scene_viewpoint'
+          ? 'viewpoint_hypothesis'
+          : 'exact_venue',
+      result: resolution.status,
+      candidateCount: resolvedCandidates.length,
+      high: resolvedCandidates.filter((c) => c.candidateConfidence === 'high')
+        .length,
+      medium: resolvedCandidates.filter(
+        (c) => c.candidateConfidence === 'medium',
+      ).length,
+      low: resolvedCandidates.filter((c) => c.candidateConfidence === 'low')
+        .length,
+      locality: resolvedCandidates.some((c) => c.localityIdentity)
+        ? 'normalized'
+        : 'unavailable',
+    });
     const updated = await this.repository.reviseDiscovery(
       discovery.workspaceId,
       discovery.id,
@@ -586,3 +655,7 @@ export function normalizeCity(value: string): string | undefined {
 export * from './projection.js';
 export * from './label-backfill.js';
 export * from './map-alignment.js';
+
+export * from './service-api.js';
+
+export * from './locality-backfill.js';

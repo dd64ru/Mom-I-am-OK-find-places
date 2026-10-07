@@ -243,11 +243,13 @@ export class TelegramInteractions {
           ].join('\n')
         : '© Участники OpenStreetMap (ODbL)';
       const confidenceText = google
-        ? candidate?.relationship?.startsWith('related_')
-          ? 'Потенциально связанное место (не подтверждённая принадлежность к сети). Уверенность низкая — проверь на карте и подтверди.'
-          : candidate?.candidateConfidence === 'high'
-            ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
-            : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
+        ? candidate?.relationship === 'viewpoint_hypothesis'
+          ? 'Нашёл возможную точку съёмки, но это не точно 🙂 Видимый ориентир не доказывает положение камеры. Проверь место на карте.'
+          : candidate?.relationship?.startsWith('related_')
+            ? 'Потенциально связанное место (не подтверждённая принадлежность к сети). Уверенность низкая — проверь на карте и подтверди.'
+            : candidate?.candidateConfidence === 'high'
+              ? 'Уверенность: высокая. Похоже, это именно оно. Проверь место на карте и подтверди.'
+              : `${candidate?.candidateConfidence === 'medium' ? 'Уверенность: средняя.' : 'Уверенность: низкая.'} Нашёл возможный вариант. Но это не точно 🙂 Проверь место на карте и подтверди.`
         : '';
       const message =
         candidate && !google && candidate.address.formatted
@@ -423,13 +425,15 @@ export class TelegramInteractions {
           candidate.references.find((r) => r.provider === 'google-places')
             ?.url ?? '';
         const relation =
-          discovery.recognition.mode === 'recommendation_list'
-            ? 'Возможное место по рекомендации; уверенность низкая — проверь на карте'
-            : candidate.relationship === 'likely_exact'
-              ? 'Вероятно место с фото'
-              : candidate.relationship?.startsWith('related_')
-                ? 'Потенциально связанное место (предположение)'
-                : 'Возможный вариант';
+          candidate.relationship === 'viewpoint_hypothesis'
+            ? 'Возможная точка съёмки; точное положение не доказано — проверь на карте'
+            : discovery.recognition.mode === 'recommendation_list'
+              ? 'Возможное место по рекомендации; уверенность низкая — проверь на карте'
+              : candidate.relationship === 'likely_exact'
+                ? 'Вероятно место с фото'
+                : candidate.relationship?.startsWith('related_')
+                  ? 'Потенциально связанное место (предположение)'
+                  : 'Возможный вариант';
         const brand =
           discovery.recognition.mode === 'recommendation_list'
             ? discovery.recognition.clues[

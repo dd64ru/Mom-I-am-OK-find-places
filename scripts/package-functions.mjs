@@ -8,7 +8,8 @@ export async function packageFunctions(
   commit,
   target = 'webhook',
 ) {
-  if (!['webhook', 'feed'].includes(target)) throw new Error('invalid_target');
+  if (!['webhook', 'feed', 'service'].includes(target))
+    throw new Error('invalid_target');
   if (!/^[a-f0-9]{40}$/.test(commit)) throw new Error('invalid_commit');
   await mkdir(output, { recursive: true });
   if ((await readdir(output)).length)

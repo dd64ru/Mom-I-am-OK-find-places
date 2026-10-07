@@ -30,6 +30,12 @@ export class FallbackPoi implements PoiProvider {
       this.diagnostic,
     );
   }
+  resolveLocality(identity: { provider: string; id: string }, city: string) {
+    return (
+      this.primary.resolveLocality?.(identity, city) ??
+      Promise.resolve(undefined)
+    );
+  }
   refresh(identity: { provider: string; id: string }) {
     if (!this.primary.refresh)
       throw new GooglePlacesFailure('google_places_configuration_invalid');

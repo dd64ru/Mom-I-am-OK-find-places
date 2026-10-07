@@ -144,6 +144,9 @@ export class ProjectionService {
                   ...(place.mapMetadata?.city
                     ? { city: place.mapMetadata.city.value }
                     : {}),
+                  ...(place.mapMetadata?.locality
+                    ? { cityKey: place.mapMetadata.locality.key }
+                    : {}),
                   ...(place.mapMetadata?.category
                     ? { category: place.mapMetadata.category.value }
                     : {}),
@@ -231,6 +234,7 @@ export function geojson(places: readonly ProjectedPlace[]) {
         ...(osmAttribution(p) ? { attribution: osmAttribution(p) } : {}),
         ...(p.category !== undefined ? { category: p.category } : {}),
         ...(p.city !== undefined ? { city: p.city } : {}),
+        ...(p.cityKey !== undefined ? { cityKey: p.cityKey } : {}),
         ...(p.address !== undefined ? { address: p.address } : {}),
         ...(p.sourceLink ? { sourceLink: p.sourceLink } : {}),
       },

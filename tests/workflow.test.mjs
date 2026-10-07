@@ -3661,9 +3661,10 @@ for (const [kind, normalizeLocality, expected] of [
     }
     assert.equal(outcome.status, 200);
     assert.equal(searched, 1);
-    assert.deepEqual(logs.map(JSON.parse), [
-      { event: 'locality_normalization', outcome: expected },
-    ]);
+    assert.deepEqual(
+      logs.map(JSON.parse).filter((e) => e.event === 'locality_normalization'),
+      [{ event: 'locality_normalization', outcome: expected }],
+    );
   });
 
 test('eight-candidate Google request counts: initial reconstruction 8; toggle/all/clear/confirm each 0', async () => {
