@@ -5,3 +5,4 @@ package-lock.json
 .credentials
 .runtime
 .deploy
+packages/core/src/mainland-china-region.generated.ts

@@ -5,6 +5,7 @@ import {
   PlaceSchema,
   type PlaceDisplay,
 } from '@places/schemas';
+import { standardWgs84Position } from './map-alignment.js';
 export { ProjectedPlaceSchema, type ProjectedPlace } from '@places/schemas';
 export type ProjectionCounts = {
   placesTotal: number;
@@ -123,9 +124,15 @@ export class ProjectionService {
                 view.providerIdentity.id !== place.providerIdentity.id
               )
                 throw new Error('projection_identity_mismatch');
-              // The adapter's own coordinate value, CRS included (the Places API location is
-              // WGS84 per GooglePlacesPoi); never re-labelled from the provider name.
-              const coordinates = CoordinatesSchema.parse(view.coordinates);
+              // The Places API location is WGS84 (GooglePlacesPoi states it) but aligned to
+              // Google's map data: inside mainland China that data is GCJ-02-offset, so the
+              // point is corrected once, here, to its position on a standard WGS84 map.
+              // Elsewhere (Hong Kong, Macao and Taiwan included) it is unchanged.
+              const acquired = CoordinatesSchema.parse(view.coordinates);
+              const coordinates = CoordinatesSchema.parse({
+                ...standardWgs84Position(acquired, 'google-mainland'),
+                crs: acquired.crs,
+              });
               // city/category come only from application-owned mapMetadata; a Google
               // feature never carries an address.
               output.push(
@@ -152,6 +159,7 @@ export class ProjectionService {
               ProjectedPlaceSchema.parse({
                 id: place.id,
                 label,
+                // Stored OSM/Nominatim coordinates are standard-wgs84: emitted unchanged.
                 coordinates: place.coordinates,
                 category: place.category,
                 // Independently licensed OSM/Nominatim address, exposed with OSM attribution.
@@ -194,10 +202,9 @@ const osmAttribution = (place: ProjectedPlace) =>
     : undefined;
 // Every serialized position is WGS84: RFC 7946 GeoJSON requires it, and GPX 1.1 and KML 2.2
 // define their coordinates as WGS84 too. The CRS travels with the coordinate value itself
-// (CoordinatesSchema `crs`, stated by the acquisition adapter that produced it: the Places
-// API location in GooglePlacesPoi, the stored OSM/Nominatim coordinates), never from the
-// provider name. A coordinate in any other system must be converted to WGS84 by its adapter
-// before it reaches a serializer; this guard refuses it instead of emitting mislabelled numbers.
+// (CoordinatesSchema `crs`), and projection has already put every point on a standard WGS84
+// map (map-alignment.ts), so serializers never convert. A coordinate in any other system is
+// refused here instead of being emitted with mislabelled numbers.
 export function wgs84Position(coordinates: ProjectedPlace['coordinates']) {
   if (coordinates.crs !== 'WGS84')
     throw new Error('projection_non_wgs84_coordinates');

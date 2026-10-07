@@ -585,3 +585,4 @@ export function normalizeCity(value: string): string | undefined {
 }
 export * from './projection.js';
 export * from './label-backfill.js';
+export * from './map-alignment.js';

@@ -109,6 +109,13 @@ const view = {
   ],
   providerIdentity: google.providerIdentity,
 };
+// view.coordinates lie in Shenzhen (mainland China) and come from Google map data, so
+// projection emits their corrected standard WGS84 position (packages/core/src/map-alignment.ts).
+const projectedGoogle = {
+  latitude: 22.553046631893483,
+  longitude: 113.8851160022276,
+  crs: 'WGS84',
+};
 const clone = structuredClone;
 test('legacy production-shaped Google Place parses; optional label is an atomic independent provenance pair', () => {
   assert.deepEqual(PlaceSchema.parse(google), google);
@@ -350,7 +357,7 @@ test('projection uses durable OSM and transient refreshed Google coordinates; mi
     result.places.map((p) => p.id),
     ['google-place', 'osm-place'],
   );
-  assert.deepEqual(result.places[0].coordinates, view.coordinates);
+  assert.deepEqual(result.places[0].coordinates, projectedGoogle);
   assert.deepEqual(result.places[1].coordinates, osm.coordinates);
   assert.equal(result.places[0].label, 'Happy Harbour');
   assert.equal(result.counts.googleHydrated, 1);
@@ -418,7 +425,7 @@ test('GeoJSON is an RFC 7946 FeatureCollection with stable IDs and longitude,lat
   assert.equal(result.type, 'FeatureCollection');
   assert.deepEqual(result.features[0].geometry, {
     type: 'Point',
-    coordinates: [113.89, 22.55],
+    coordinates: [projectedGoogle.longitude, projectedGoogle.latitude],
   });
   assert.equal(result.features[0].id, google.id);
   assert.deepEqual(result.features[0].properties, {
@@ -448,7 +455,10 @@ test('GPX 1.1 waypoints and KML placemarks are valid namespace-aware XML with sa
   assert.equal(gp.tag, '{http://www.topografix.com/GPX/1/1}gpx');
   assert.equal(gp.attrib.version, '1.1');
   const waypoint = gp.nodes.find((n) => n.tag.endsWith('}wpt'));
-  assert.deepEqual(waypoint.attrib, { lat: '22.55', lon: '113.89' });
+  assert.deepEqual(waypoint.attrib, {
+    lat: String(projectedGoogle.latitude),
+    lon: String(projectedGoogle.longitude),
+  });
   assert.equal(
     gp.nodes.find((n) => n.tag.endsWith('}name')).text,
     points[0].label,
@@ -457,7 +467,7 @@ test('GPX 1.1 waypoints and KML placemarks are valid namespace-aware XML with sa
   assert.equal(km.nodes.filter((n) => n.tag.endsWith('}Placemark')).length, 2);
   assert.equal(
     km.nodes.find((n) => n.tag.endsWith('}coordinates')).text,
-    '113.89,22.55',
+    `${projectedGoogle.longitude},${projectedGoogle.latitude}`,
   );
 });
 test('all adapters share deterministic ordering and omit Google display/address/types/attributions', async () => {
