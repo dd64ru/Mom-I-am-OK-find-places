@@ -6,6 +6,32 @@ reviewed main SHA; the workflow does not grant IAM, run migrations or release
 the App. Do not widen the existing deployment identity. Existing SIWC, Secret
 Manager and ADC access remain unchanged.
 
+## First-time rollout order
+
+1. Merge rollout preparation to Places main.
+2. Deploy placesService with service_enabled=false and verify it is dormant/private.
+3. Run Mom-I-am-OK Production Release target=backend at reviewed App SHA
+   111a023ac90ac76e8ca5c699c6306fe62acabdcd to create the caller function.
+4. Verify reviewAiChatSavedPlaces exists and read its actual
+   serviceConfig.serviceAccountEmail.
+5. Grant only that account roles/run.invoker on the underlying placesService
+   Cloud Run service and read back the policy.
+6. Deploy placesService again with service_enabled=true.
+7. Verify unauthenticated access is denied and IAM remains private.
+8. Publish clients using Mom-I-am-OK Production Release target=both (web + Android)
+   at the same reviewed App SHA.
+9. Perform the explicit-confirmation production smoke.
+
+If reviewAiChatSavedPlaces already exists from an earlier compatible backend
+release, the backend-only bootstrap may be skipped after verifying that release
+is compatible and reading the function's actual runtime identity. Existence alone
+does not prove compatibility. Never substitute an assumed service account.
+
+For later complete releases, target=all is appropriate. For this first rollout,
+backend → service IAM/enablement → clients avoids exposing the UI before its
+private dependency is ready. Each production release requires owner authorization;
+these commands document the sequence and do not authorize execution here.
+
 ## Deploy dormant
 
 Record the reviewed Places main SHA and verify it is still current before each
@@ -38,7 +64,7 @@ credential-free import/discovery smoke before WIF authentication. It shares the
 places-production-deploy concurrency lock with webhook/feed deployments. It
 uses the existing GCP_WIF_PROVIDER and GCP_DEPLOY_SERVICE_ACCOUNT variables.
 
-## Read the actual function, service and caller identity
+## Verify dormant service and bootstrap the backend
 
 ```bash
 gcloud functions describe placesService --gen2 --region europe-west3 --project mom-im-ok-places --format=json > placesService.dormant.json
@@ -50,10 +76,6 @@ test "$(gcloud functions describe placesService --gen2 --region europe-west3 --p
 gcloud run services describe "$PLACES_RUN_SERVICE" --region europe-west3 --project mom-im-ok-places --format=json > placesService.run.dormant.json
 gcloud run services get-iam-policy "$PLACES_RUN_SERVICE" --region europe-west3 --project mom-im-ok-places --format=json > placesService.iam.before.json
 
-gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format=json > reviewAiChatSavedPlaces.runtime.json
-APP_RUNTIME_SA=$(gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format='value(serviceConfig.serviceAccountEmail)')
-test -n "$APP_RUNTIME_SA"
-printf 'Actual caller runtime service account: %s\n' "$APP_RUNTIME_SA"
 ```
 
 Inspect the saved function/Run descriptions: region europe-west3, expected runtime
@@ -63,11 +85,33 @@ allAuthenticatedUsers invoker grant; stop if either exists. Also inspect inherit
 project/folder/org policies using the organization's IAM review tools: a private
 service policy cannot counter an inherited public binding.
 
+Before reading the caller identity, bootstrap the backend if the function is
+absent. Follow the App repository's production-release skill. From a clean
+detached worktree of reviewed App SHA
+111a023ac90ac76e8ca5c699c6306fe62acabdcd, confirm App main still matches (if it
+moved, obtain review for the new SHA), then run the owner-authorized backend-only
+release and wait for success. Keep placesService disabled throughout bootstrap.
+
+```bash
+node scripts/release/productionRelease.mjs --target backend --expected-sha 111a023ac90ac76e8ca5c699c6306fe62acabdcd
+```
+
+This creates reviewAiChatSavedPlaces without publishing the new client surfaces.
+If an earlier compatible backend already provides it, skip this bootstrap after
+verifying compatibility, but always read the actual runtime identity:
+
+```bash
+gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format=json > reviewAiChatSavedPlaces.runtime.json
+APP_RUNTIME_SA=$(gcloud functions describe reviewAiChatSavedPlaces --gen2 --region europe-west1 --project where-i-am-cbde1 --format='value(serviceConfig.serviceAccountEmail)')
+test -n "$APP_RUNTIME_SA"
+printf 'Actual caller runtime service account: %s\n' "$APP_RUNTIME_SA"
+```
+
 The expected current App account is
 142094474582-compute@developer.gserviceaccount.com, but use the actual live
 serviceConfig.serviceAccountEmail above, never an assumed identity. If the caller
-function does not yet exist, stop: establish its deployed runtime identity before
-proceeding. Do not substitute a developer account.
+still does not exist after bootstrap, stop and investigate the backend release
+before granting IAM. Do not substitute a developer account.
 
 ## Grant only the caller, then read back
 
@@ -84,7 +128,7 @@ Compare before/after: the only intended new permission is roles/run.invoker for
 that exact caller on that exact Run service. No public principals, no project-wide
 Run Invoker, no deployer IAM role expansion. Verify the service is still disabled.
 
-## Enable, verify isolation, then release App
+## Enable, verify isolation, then publish clients
 
 ```bash
 test "$(gh api repos/dd64ru/Mom-I-am-OK-find-places/git/ref/heads/main --jq .object.sha)" = "$PLACES_REVIEWED_SHA"
@@ -105,15 +149,15 @@ done
 Require IAM rejection (401/403), not an application response. Verify the caller
 binding survived redeployment, no public invoker exists, runtime SA is unchanged,
 and neither sibling's code/config/update time changed. Resolve unexpected
-changes before App release. No locality backfill is required.
+changes before publishing clients. No locality backfill is required.
 
 Only after the service is ready, explicitly authorize Mom-I-am-OK Production
-Release **all** at reviewed App SHA 111a023ac90ac76e8ca5c699c6306fe62acabdcd.
+Release **both** (web + Android) at the same reviewed App SHA 111a023ac90ac76e8ca5c699c6306fe62acabdcd.
 Follow that repository's production-release skill and use its launcher from a
 clean detached worktree of that exact SHA:
 
 ```bash
-node scripts/release/productionRelease.mjs --target all --expected-sha 111a023ac90ac76e8ca5c699c6306fe62acabdcd
+node scripts/release/productionRelease.mjs --target both --expected-sha 111a023ac90ac76e8ca5c699c6306fe62acabdcd
 ```
 
 Confirm App main is still that reviewed SHA; if it moved, obtain review for the
@@ -126,6 +170,14 @@ appears or canonical Place is correctly reused on Saved Places. This smoke write
 production data only through the human confirmation path; it is not run during
 preparation or deployment checks. Verify meaningful durable labels and no Trip
 mutation.
+
+## Cost safety
+
+placesService uses minInstances=0 and maxInstances=2; no always-on VM is
+introduced. Locality backfill is optional and must not be part of rollout.
+No paid real-provider acceptance is required for rollout. The explicit production
+smoke may use providers as part of normal application behavior; it is separate
+from any billed acceptance campaign.
 
 ## Rollback and optional maintenance
 
