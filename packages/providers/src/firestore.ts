@@ -208,7 +208,12 @@ export class FirestoreRepository implements PlacesRepository {
         }[] = [];
         const enrichments: {
           ref: ReturnType<FirestoreRepository['doc']>;
-          mapMetadata: MapMetadata;
+          patch: {
+            label?: string;
+            labelSource?: Place['labelSource'];
+            mapMetadata?: MapMetadata;
+            updatedAt: string;
+          };
         }[] = [];
         for (const [
           index,
@@ -252,22 +257,36 @@ export class FirestoreRepository implements PlacesRepository {
             : undefined;
           // A reused Google Place gains the same application-owned map metadata, but only
           // for fields it does not have yet: an existing city/category is never overwritten,
-          // whatever its source, and nothing else on the Place changes because it was reused.
+          // whatever its source. An authorized label fills only an unlabeled legacy
+          // Google Place; existing labels and all other canonical fields are preserved.
           const missing =
             stored &&
             'providerIdentity' in stored &&
             stored.providerIdentity.provider === 'google-places'
               ? fillMissingMapMetadata(stored.mapMetadata, mapMetadata)
               : undefined;
-          if (stored && missing)
-            enrichments.push({ ref: placeRef, mapMetadata: missing });
-          const place = stored
-            ? missing
-              ? PlaceSchema.parse({
-                  ...stored,
-                  mapMetadata: missing,
+          const missingLabel =
+            stored &&
+            'providerIdentity' in stored &&
+            stored.providerIdentity.provider === 'google-places' &&
+            stored.label === undefined &&
+            label &&
+            NewSavedLabelSchema.safeParse(label.label).success
+              ? label
+              : undefined;
+          const enrichment =
+            stored && (missing || missingLabel)
+              ? {
+                  ...(missing ? { mapMetadata: missing } : {}),
+                  ...(missingLabel ?? {}),
                   updatedAt: time,
-                })
+                }
+              : undefined;
+          if (enrichment)
+            enrichments.push({ ref: placeRef, patch: enrichment });
+          const place = stored
+            ? enrichment
+              ? PlaceSchema.parse({ ...stored, ...enrichment })
               : stored
             : PlaceSchema.parse({
                 ...fields,
@@ -286,8 +305,7 @@ export class FirestoreRepository implements PlacesRepository {
           else writes.push({ ref: placeRef, place });
         }
         for (const { ref, place } of writes) tx.create(ref, clean(place));
-        for (const { ref, mapMetadata } of enrichments)
-          tx.update(ref, clean({ mapMetadata, updatedAt: time }));
+        for (const { ref, patch } of enrichments) tx.update(ref, clean(patch));
       }
       const next = DiscoverySchema.parse({
         ...discovery,

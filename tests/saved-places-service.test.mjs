@@ -706,3 +706,136 @@ test('unbound Telegram viewpoint candidates cannot fall back to generic durable 
   ]);
   assert.ok(result.places.every((p) => p.labelSource === 'user'));
 });
+
+for (const labelSource of ['user', 'recognition'])
+  test(`legacy unlabeled canonical reuse atomically fills authorized ${labelSource} label and becomes projectable`, async () => {
+    const { ProjectionService } = await import('@places/core');
+    const { db, repo, api } = await fixture();
+    const providerIdentity = {
+      provider: 'google-places',
+      id: 'legacy-' + labelSource,
+    };
+    const reference = {
+      provider: 'google-places',
+      externalId: providerIdentity.id,
+      observedAt: time,
+      url: 'https://www.google.com/maps/',
+    };
+    const legacy = {
+      id: canonicalPlaceId({ providerIdentity }),
+      workspaceId: 'shared',
+      providerIdentity,
+      source: reference,
+      evidence: [reference],
+      tags: ['keep-tag'],
+      status: 'confirmed',
+      mapMetadata: {
+        city: { value: 'Existing city', source: 'user' },
+        ...(labelSource === 'recognition'
+          ? { category: { value: 'Original category', source: 'user' } }
+          : {}),
+      },
+      createdAt: time,
+      updatedAt: time,
+    };
+    await repo.savePlace(legacy);
+    const projection = new ProjectionService({
+      refresh: async (identity) => ({
+        canonicalName: 'GOOGLE_DISPLAY_NEVER_DURABLE',
+        coordinates: { ...row.location, crs: 'WGS84' },
+        address: { formatted: 'PROVIDER_ADDRESS_NEVER_DURABLE' },
+        providerIdentity: identity,
+        references: [{ ...reference, externalId: identity.id }],
+      }),
+    });
+    assert.equal((await projection.project([legacy])).counts.missingLabels, 1);
+    const label =
+      labelSource === 'user'
+        ? 'My waterfront stop'
+        : 'Independent waterfront park';
+    const r = await api.execute({
+      action: 'prepare',
+      requestId: 'enrich-' + labelSource,
+      identities: [
+        {
+          placeId: providerIdentity.id,
+          category: 'park',
+          city: 'Shenzhen',
+          label:
+            labelSource === 'recognition'
+              ? label
+              : 'Independently recognized waterfront park',
+        },
+      ],
+    });
+    const updates = [],
+      transact = db.runTransaction.bind(db);
+    db.runTransaction = (fn) =>
+      transact((tx) =>
+        fn({
+          ...tx,
+          update: (ref, patch) => {
+            if (ref.path.includes('/places/'))
+              updates.push(structuredClone(patch));
+            tx.update(ref, patch);
+          },
+        }),
+      );
+    const command = {
+      action: 'confirm',
+      discoveryId: r.discoveryId,
+      revision: r.revision,
+      requestId: 'fill-' + labelSource,
+      indices: [0],
+      ...(labelSource === 'user' ? { labels: [{ index: 0, label }] } : {}),
+    };
+    const done = await api.execute(command);
+    assert.equal(done.reusedCount, 1);
+    assert.equal(done.newCount, 0);
+    const saved = await repo.getPlace('shared', legacy.id);
+    assert.equal(saved.label, label);
+    assert.equal(saved.labelSource, labelSource);
+    assert.equal(
+      [...db.values.keys()].filter((p) => p.includes('/places/')).length,
+      1,
+    );
+    const {
+      label: _label,
+      labelSource: _source,
+      mapMetadata,
+      updatedAt,
+      ...unchanged
+    } = saved;
+    const {
+      mapMetadata: oldMetadata,
+      updatedAt: oldTime,
+      ...oldFields
+    } = legacy;
+    assert.deepEqual(unchanged, oldFields);
+    assert.deepEqual(mapMetadata.city, oldMetadata.city);
+    assert.equal(
+      mapMetadata.category.value,
+      labelSource === 'recognition' ? 'Original category' : 'park',
+    );
+    assert.equal(updates.length, 1);
+    assert.deepEqual(
+      Object.keys(updates[0]).sort(),
+      labelSource === 'recognition'
+        ? ['label', 'labelSource', 'updatedAt']
+        : ['label', 'labelSource', 'mapMetadata', 'updatedAt'],
+    );
+    const projected = await projection.project([saved]);
+    assert.equal(projected.counts.missingLabels, 0);
+    assert.equal(projected.counts.placesProjected, 1);
+    assert.equal(projected.places[0].label, label);
+    assert.ok(
+      !JSON.stringify([...db.values]).includes('GOOGLE_DISPLAY_NEVER_DURABLE'),
+    );
+    assert.ok(
+      !JSON.stringify([...db.values]).includes(
+        'PROVIDER_ADDRESS_NEVER_DURABLE',
+      ),
+    );
+    assert.equal((await api.execute(command)).reusedCount, 1);
+    assert.equal(updates.length, 1);
+  });
