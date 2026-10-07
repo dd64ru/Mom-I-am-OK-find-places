@@ -167,9 +167,13 @@ export class DiscoveryService {
   async resolve(discovery: Discovery): Promise<DiscoveryView> {
     if (
       !this.verification ||
-      ['confirmed', 'cancelled', 'failed', 'awaiting_brands'].includes(
-        discovery.status,
-      )
+      [
+        'confirmed',
+        'cancelled',
+        'failed',
+        'expired',
+        'awaiting_brands',
+      ].includes(discovery.status)
     )
       return discovery;
     const workspace = await this.repository.getWorkspace(discovery.workspaceId);

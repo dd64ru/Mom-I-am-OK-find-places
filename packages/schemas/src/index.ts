@@ -501,6 +501,7 @@ export const DiscoverySchema = z
     recognition: RecognitionSchema,
     candidates: z.array(StoredCandidateSchema).max(20),
     visionProvider: z.string(),
+    identityProvenance: z.literal('trusted_provider_identity').optional(),
     status: z.enum([
       'needs_confirmation',
       'awaiting_brands',
@@ -510,6 +511,7 @@ export const DiscoverySchema = z
       'confirmed',
       'cancelled',
       'failed',
+      'expired',
     ]),
     failureReason: ProviderFailureReasonSchema.optional(),
     relatedRequested: z.boolean().optional(),

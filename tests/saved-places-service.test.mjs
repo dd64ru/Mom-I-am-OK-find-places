@@ -879,3 +879,323 @@ test('unlabeled candidate retains provider review refresh', async () => {
   await f.api.execute({ action: 'review', discoveryId: p.discoveryId });
   assert.ok(f.refreshes() > before);
 });
+
+test('initial multi identity preparation reuses its transient provider views only in that response', async () => {
+  const f = await fixture();
+  const r = await f.api.execute({
+    action: 'prepare',
+    requestId: 'views-once',
+    identities: [{ placeId: 'a' }, { placeId: 'b' }],
+  });
+  assert.equal(r.candidates.length, 2);
+  assert.equal(f.refreshes(), 2);
+  await f.api.execute({ action: 'review', discoveryId: r.discoveryId });
+  assert.equal(f.refreshes(), 4);
+});
+for (const confidence of ['high', 'low'])
+  test(`recognition ${confidence} plausible match keeps canonical display verification`, async () => {
+    const f = await fixture();
+    const initial = await f.api.execute({
+      action: 'prepare',
+      requestId: 'origin-' + confidence,
+      identities: [
+        { placeId: 'recognition-' + confidence, label: 'Independent name' },
+      ],
+    });
+    const d = await f.repo.getDiscovery('shared', initial.discoveryId);
+    delete d.identityProvenance;
+    d.id = 'recognition-' + confidence;
+    d.candidates[0].candidateConfidence = confidence;
+    await f.repo.createDiscovery(DiscoverySchema.parse(d));
+    const count = f.refreshes();
+    const r = await f.api.execute({ action: 'review', discoveryId: d.id });
+    assert.equal(f.refreshes(), count + 1);
+    assert.equal(r.candidates[0].name, 'GOOGLE_DISPLAY_NEVER_DURABLE');
+    await f.api.execute({
+      action: 'confirm',
+      discoveryId: d.id,
+      revision: r.revision,
+      requestId: 'confirm-' + confidence,
+      indices: [0],
+    });
+    assert.equal(f.refreshes(), count + 2);
+  });
+test('set_city invokes existing core correction, is read-only and revision/bounds fenced', async () => {
+  const f = await fixture();
+  let cities = [];
+  const display = {
+    canonicalName: 'Transient cafe',
+    aliases: [],
+    category: 'cafe',
+    coordinates: { ...row.location, crs: 'WGS84' },
+    address: { formatted: 'Transient address' },
+    references: [
+      {
+        provider: 'google-places',
+        externalId: 'city-cafe',
+        observedAt: time,
+        url: 'https://www.google.com/maps/search/?api=1&query=x',
+      },
+    ],
+    providerIdentity: { provider: 'google-places', id: 'city-cafe' },
+    resolution: 'deterministic_poi',
+    confidence: 0.9,
+    recognitionClueIndex: 0,
+  };
+  const poi = {
+    firstPass: async (_, context) => {
+      cities.push(context.cityOverride);
+      return context.cityOverride
+        ? { status: 'resolved', candidate: display }
+        : { status: 'city_unknown', reason: 'missing_locality' };
+    },
+    refresh: async () => display,
+  };
+  const service = new DiscoveryService(f.repo, vision, {
+    poi,
+    search: {
+      verify: async () => ({
+        status: 'unavailable',
+        candidates: [],
+        references: [],
+      }),
+    },
+  });
+  const api = new PlacesServiceApi('shared', f.repo, service, poi);
+  const r = await api.execute({
+    action: 'prepare',
+    requestId: 'city',
+    recognition: {
+      mode: 'single_venue',
+      visibleText: [],
+      clues: [
+        { name: 'My cafe', aliases: [], category: 'cafe', confidence: 0.9 },
+      ],
+    },
+  });
+  assert.equal(r.status, 'awaiting_city');
+  const next = await api.execute({
+    action: 'set_city',
+    discoveryId: r.discoveryId,
+    revision: r.revision,
+    city: '  Shanghai  ',
+  });
+  assert.equal(next.status, 'needs_confirmation');
+  assert.equal(cities.at(-1), 'Shanghai');
+  assert.equal(
+    [...f.db.values.keys()].some((p) => p.includes('/places/')),
+    false,
+  );
+  await assert.rejects(
+    api.execute({
+      action: 'set_city',
+      discoveryId: r.discoveryId,
+      revision: r.revision,
+      city: 'Other',
+    }),
+    /stale_revision/,
+  );
+  for (const city of ['', 'x'.repeat(201), 'bad\ncity'])
+    assert.equal(
+      ServiceRequestSchema.safeParse({
+        action: 'set_city',
+        discoveryId: 'd',
+        revision: 0,
+        city,
+      }).success,
+      false,
+    );
+  assert.equal(
+    ServiceRequestSchema.safeParse({
+      action: 'set_city',
+      discoveryId: 'd',
+      revision: 0,
+      city: 'Shanghai',
+      placeId: 'forged',
+    }).success,
+    false,
+  );
+});
+test('expired review is terminal without provider refresh, completed outcome remains authoritative', async () => {
+  const f = await fixture();
+  const r = await f.api.execute({
+    action: 'prepare',
+    requestId: 'expiry',
+    identities: [{ placeId: 'expired', label: 'My stop' }],
+  });
+  const d = await f.repo.getDiscovery('shared', r.discoveryId);
+  d.id = 'expired-discovery';
+  d.createdAt = '2000-01-01T00:00:00.000Z';
+  await f.repo.createDiscovery(d);
+  const count = f.refreshes();
+  const expired = await f.api.execute({ action: 'review', discoveryId: d.id });
+  assert.equal(expired.status, 'expired');
+  assert.deepEqual(expired.candidates, []);
+  assert.equal(f.refreshes(), count);
+});
+
+test('authoritative refresh failure returns terminal failed; unknown transport failure remains retryable', async () => {
+  for (const terminal of [true, false]) {
+    const f = await fixture();
+    const r = await f.api.execute({
+      action: 'prepare',
+      requestId: 'provider-failure-' + terminal,
+      identities: [{ placeId: 'failure-' + terminal, label: 'My landmark' }],
+    });
+    const poi = {
+      refresh: async () => {
+        if (terminal) return { malformed: true };
+        throw Error('unknown transport outcome');
+      },
+    };
+    const service = new DiscoveryService(f.repo, vision, {
+      poi,
+      search: {
+        verify: async () => {
+          throw Error('never');
+        },
+      },
+    });
+    const api = new PlacesServiceApi('shared', f.repo, service, poi);
+    const command = {
+      action: 'confirm',
+      discoveryId: r.discoveryId,
+      revision: r.revision,
+      requestId: 'failed-confirm',
+      indices: [0],
+    };
+    if (terminal) {
+      const failed = await api.execute(command);
+      assert.equal(failed.status, 'failed');
+      assert.deepEqual(failed.candidates, []);
+    } else {
+      await assert.rejects(api.execute(command), /unknown transport outcome/);
+      assert.equal(
+        (await f.repo.getDiscovery('shared', r.discoveryId)).status,
+        'needs_confirmation',
+      );
+    }
+    assert.equal(
+      [...f.db.values.keys()].some((k) => k.includes('/places/')),
+      false,
+    );
+  }
+});
+
+test('expiration revision fence blocks an older in-flight confirm and returns normal expired outcome', async () => {
+  const f = await fixture();
+  const r = await f.api.execute({
+    action: 'prepare',
+    requestId: 'expiry-fence',
+    identities: [{ placeId: 'expiry-fence', label: 'My cafe' }],
+  });
+  const d = await f.repo.getDiscovery('shared', r.discoveryId);
+  d.id = 'expiry-fence';
+  d.createdAt = '2000-01-01T00:00:00.000Z';
+  await f.repo.createDiscovery(d);
+  const expired = await f.api.execute({ action: 'review', discoveryId: d.id });
+  assert.equal(expired.status, 'expired');
+  assert.equal(expired.revision, d.revision + 1);
+  const late = await f.repo.finishDiscovery(
+    'shared',
+    d.id,
+    d.revision,
+    'confirm',
+    { indices: [0], requestId: 'old-confirm' },
+  );
+  assert.equal(late.changed, false);
+  assert.equal(late.discovery.status, 'expired');
+  const retry = await f.api.execute({
+    action: 'confirm',
+    discoveryId: d.id,
+    revision: d.revision,
+    requestId: 'old-confirm',
+    indices: [0],
+  });
+  assert.equal(retry.status, 'expired');
+  assert.equal(
+    [...f.db.values.keys()].some((k) => k.includes('/places/')),
+    false,
+  );
+});
+
+test('expiration during authoritative refresh defeats in-flight Confirm; confirmed winner remains terminal', async () => {
+  const f = await fixture();
+  const r = await f.api.execute({
+    action: 'prepare',
+    requestId: 'in-flight',
+    identities: [{ placeId: 'racing', label: 'My cafe' }],
+  });
+  const display = {
+    canonicalName: 'Transient',
+    coordinates: { ...row.location, crs: 'WGS84' },
+    address: { formatted: 'Transient' },
+    providerIdentity: { provider: 'google-places', id: 'racing' },
+    references: [
+      {
+        provider: 'google-places',
+        externalId: 'racing',
+        observedAt: time,
+        url: 'https://www.google.com/maps/search/?api=1&query=x',
+      },
+    ],
+  };
+  const poi = {
+    refresh: async () => {
+      await f.repo.reviseDiscovery('shared', r.discoveryId, r.revision, {
+        status: 'expired',
+        candidates: [],
+      });
+      return display;
+    },
+  };
+  const api = new PlacesServiceApi(
+    'shared',
+    f.repo,
+    new DiscoveryService(f.repo, vision, {
+      poi,
+      search: {
+        verify: async () => {
+          throw Error('never');
+        },
+      },
+    }),
+    poi,
+  );
+  const result = await api.execute({
+    action: 'confirm',
+    discoveryId: r.discoveryId,
+    revision: r.revision,
+    requestId: 'in-flight-confirm',
+    indices: [0],
+  });
+  assert.equal(result.status, 'expired');
+  assert.equal(
+    [...f.db.values.keys()].some((k) => k.includes('/places/')),
+    false,
+  );
+  const won = await f.api.execute({
+    action: 'prepare',
+    requestId: 'winner',
+    identities: [{ placeId: 'winner', label: 'My park' }],
+  });
+  await f.api.execute({
+    action: 'confirm',
+    discoveryId: won.discoveryId,
+    revision: won.revision,
+    requestId: 'winner-confirm',
+    indices: [0],
+  });
+  assert.equal(
+    await f.repo.reviseDiscovery('shared', won.discoveryId, won.revision, {
+      status: 'expired',
+      candidates: [],
+    }),
+    undefined,
+  );
+  assert.equal(
+    (await f.api.execute({ action: 'review', discoveryId: won.discoveryId }))
+      .status,
+    'confirmed',
+  );
+});

@@ -5,6 +5,7 @@ import {
   validateCaller,
   verifyPolicy,
   reconcileServiceIam,
+  safeReason,
 } from '../scripts/reconcile-service-iam.mjs';
 const caller = '123456789-compute@developer.gserviceaccount.com';
 const policy = {
@@ -55,6 +56,7 @@ function fake({
     calls,
     run(args) {
       calls.push(args);
+      if (args[0] === 'projects') return { projectNumber: '123456' };
       if (args[0] === 'functions')
         return { serviceConfig: { service: resource } };
       if (args[2] === 'describe')
@@ -85,6 +87,7 @@ test('Firebase-erased binding restored and read after write on only underlying s
   assert.deepEqual(
     f.calls.map((a) => a[2]),
     [
+      'mom-im-ok-places',
       'placesService',
       'describe',
       'get-iam-policy',
@@ -92,7 +95,7 @@ test('Firebase-erased binding restored and read after write on only underlying s
       'get-iam-policy',
     ],
   );
-  const write = f.calls[3];
+  const write = f.calls[4];
   assert.ok(write.includes('placesservice'));
   assert.ok(write.includes(`--member=serviceAccount:${caller}`));
   assert.ok(write.includes('--role=roles/run.invoker'));
@@ -175,7 +178,7 @@ for (const member of [
     );
   });
 }
-test('conditional expected invoker rejected, unrelated roles preserved', () => {
+test('conditional and unrelated service-level bindings rejected without altering policy', () => {
   assert.throws(() =>
     verifyPolicy(
       {
@@ -193,6 +196,78 @@ test('conditional expected invoker rejected, unrelated roles preserved', () => {
       { role: 'roles/run.viewer', members: ['group:auditors@example.com'] },
     ],
   };
-  verifyPolicy(p, caller);
+  assert.throws(() => verifyPolicy(p, caller), /unexpected_service_policy/);
   assert.equal(p.bindings.length, 2);
+});
+
+test('failed deploy still reconciles after successful auth without continue-on-error', async () => {
+  const s = await readFile('.github/workflows/deploy-service.yml', 'utf8');
+  assert.match(s, /id: auth/);
+  assert.match(s, /id: deploy/);
+  assert.match(
+    s,
+    /if: \$\{\{ !cancelled\(\) && steps.auth.outcome == 'success' && steps.deploy.outcome != 'skipped' \}\}/,
+  );
+  assert.doesNotMatch(s, /continue-on-error/);
+  const shouldRun = (cancelled, auth, deploy) =>
+    !cancelled && auth === 'success' && deploy !== 'skipped';
+  assert.equal(shouldRun(false, 'success', 'failure'), true);
+  assert.equal(shouldRun(false, 'failure', 'skipped'), false);
+  assert.equal(shouldRun(true, 'success', 'failure'), false);
+});
+test('Places project default compute caller rejected after auth before service writes', () => {
+  const f = fake();
+  assert.throws(
+    () =>
+      reconcileServiceIam(
+        '123456-compute@developer.gserviceaccount.com',
+        f.run,
+      ),
+    /caller_is_places_identity/,
+  );
+  assert.deepEqual(
+    f.calls.map((a) => a[0]),
+    ['projects'],
+  );
+});
+for (const role of ['roles/run.admin', 'roles/editor', 'roles/run.viewer'])
+  test(`alternate service binding ${role} fails before writes`, () => {
+    const p = {
+      bindings: [
+        ...policy.bindings,
+        {
+          role,
+          members: [
+            'serviceAccount:other@another-project.iam.gserviceaccount.com',
+          ],
+        },
+      ],
+    };
+    const f = fake();
+    assert.throws(
+      () =>
+        reconcileServiceIam(caller, (a) =>
+          a[2] === 'get-iam-policy' ? p : f.run(a),
+        ),
+      /unexpected_service_policy/,
+    );
+    assert.equal(
+      f.calls.some((a) => a[2] === 'add-iam-policy-binding'),
+      false,
+    );
+    assert.equal(p.bindings.length, 2);
+  });
+test('safe diagnostic codes never include captured credentials', () => {
+  for (const code of [
+    'unexpected_service_policy',
+    'expected_app_invoker_missing',
+    'caller_is_places_identity',
+    'unexpected_service_resource',
+  ])
+    assert.equal(safeReason(Error(code)), code);
+  const e = Object.assign(Error('secret-token'), {
+    stderr: 'PERMISSION_DENIED secret-token',
+  });
+  assert.equal(safeReason(e), 'gcloud_permission_denied');
+  assert.equal(safeReason(Error('secret-token')), 'gcloud_operation_failed');
 });

@@ -11,6 +11,7 @@ import {
   NewSavedLabelSchema,
   SelectedLabelSchema,
   recognitionLabel,
+  type PlaceDisplay,
 } from '@places/schemas';
 import type { Discovery, DiscoveryView } from '@places/schemas';
 import {
@@ -42,6 +43,19 @@ export const ServiceRequestSchema = z
       })
       .strict(),
     z.object({ action: z.literal('review'), discoveryId: IdSchema }).strict(),
+    z
+      .object({
+        action: z.literal('set_city'),
+        discoveryId: IdSchema,
+        revision: z.number().int().nonnegative(),
+        city: z
+          .string()
+          .max(200)
+          .refine((v) => !/\p{Cc}/u.test(v))
+          .transform((v) => v.normalize('NFKC').trim().replace(/\s+/g, ' '))
+          .pipe(z.string().min(1).max(200)),
+      })
+      .strict(),
     z
       .object({
         action: z.literal('confirm'),
@@ -105,6 +119,7 @@ export class PlacesServiceApi {
       const digest = createHash('sha256')
         .update(JSON.stringify(request))
         .digest('hex');
+      const initialViews = new Map<number, PlaceDisplay>();
       let discovery = await this.repository.getDiscovery(this.workspace, id);
       if (discovery && discovery.inputDigest !== digest)
         throw new Error('idempotency_conflict');
@@ -149,6 +164,7 @@ export class PlacesServiceApi {
             view.providerIdentity.provider !== 'google-places'
           )
             throw new Error('provider_identity_mismatch');
+          initialViews.set(index, view);
           const localityIdentity = identity.city
             ? await this.poi.resolveLocality?.(
                 view.providerIdentity,
@@ -190,6 +206,9 @@ export class PlacesServiceApi {
             recognition: durableRecognition,
             candidates,
             visionProvider: 'server-clues',
+            ...(request.identities
+              ? { identityProvenance: 'trusted_provider_identity' }
+              : {}),
             inputDigest: digest,
             status:
               candidates.length > 1 ? 'needs_selection' : 'needs_confirmation',
@@ -206,7 +225,7 @@ export class PlacesServiceApi {
         request.recognition && discovery.revision === 0
           ? await this.service.resolve(discovery)
           : discovery;
-      return this.review(view);
+      return this.review(view, initialViews);
     }
     const discovery = await this.repository.getDiscovery(
       this.workspace,
@@ -215,6 +234,18 @@ export class PlacesServiceApi {
     if (!discovery || discovery.source.provider !== 'ai-chat')
       throw new Error('discovery_missing');
     if (request.action === 'review') return this.review(discovery);
+    if (request.action === 'set_city') {
+      if (
+        discovery.revision !== request.revision ||
+        discovery.status !== 'awaiting_city'
+      )
+        throw new Error('stale_revision');
+      if (Date.now() - Date.parse(discovery.createdAt) > 24 * 60 * 60 * 1000)
+        return this.review(discovery);
+      const updated = await this.service.correctCity(discovery, request.city);
+      if (!updated) throw new Error('stale_revision');
+      return this.review(updated);
+    }
     const terminal = request.action === 'confirm' ? 'confirmed' : 'cancelled';
     const indices = request.action === 'confirm' ? request.indices : [];
     const labels =
@@ -241,8 +272,11 @@ export class PlacesServiceApi {
       if (!sameCompletion(discovery)) throw new Error('idempotency_conflict');
       return this.review(discovery);
     }
-    if (Date.now() - Date.parse(discovery.createdAt) > 24 * 60 * 60 * 1000)
-      throw new Error('stale_revision');
+    if (
+      ['failed', 'expired'].includes(discovery.status) ||
+      Date.now() - Date.parse(discovery.createdAt) > 24 * 60 * 60 * 1000
+    )
+      return this.review(discovery);
     if (
       discovery.revision !== request.revision ||
       ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
@@ -254,7 +288,21 @@ export class PlacesServiceApi {
         const candidate = discovery.candidates[i];
         if (!candidate) throw new Error('invalid_selection');
         const view = await this.service.displayCandidate(discovery, i);
-        if (!view) throw new Error('provider_refresh_unavailable');
+        if (!view) {
+          const current = await this.repository.getDiscovery(
+            this.workspace,
+            discovery.id,
+          );
+          if (current && ['failed', 'expired'].includes(current.status))
+            return {
+              discoveryId: current.id,
+              revision: current.revision,
+              status: current.status,
+              candidates: [],
+              confirmedPlaceIds: [],
+            };
+          throw new Error('provider_refresh_unavailable');
+        }
       }
     const result = await this.repository.finishDiscovery(
       this.workspace,
@@ -267,8 +315,11 @@ export class PlacesServiceApi {
         labels,
       },
     );
-    if (!result.changed && !sameCompletion(result.discovery))
+    if (!result.changed && !sameCompletion(result.discovery)) {
+      if (['failed', 'expired'].includes(result.discovery.status))
+        return this.review(result.discovery);
       throw new Error('stale_revision');
+    }
     console.info(
       JSON.stringify({
         event: 'service_confirmation',
@@ -290,7 +341,49 @@ export class PlacesServiceApi {
         : {}),
     };
   }
-  private async review(discovery: DiscoveryView) {
+  private async review(
+    discovery: DiscoveryView,
+    initialViews = new Map<number, PlaceDisplay>(),
+  ) {
+    // Persist expiration through the same revision CAS as confirmation. A stale
+    // in-flight Confirm cannot finish after this terminal verdict; if Confirm won
+    // the race, its completed state remains authoritative.
+    if (
+      !['confirmed', 'cancelled', 'failed', 'expired'].includes(
+        discovery.status,
+      ) &&
+      Date.now() - Date.parse(discovery.createdAt) > 24 * 60 * 60 * 1000
+    ) {
+      const expired = await this.repository.reviseDiscovery(
+        this.workspace,
+        discovery.id,
+        discovery.revision,
+        {
+          status: 'expired',
+          candidates: [],
+          selectedCandidateIndices: undefined,
+        },
+      );
+      const current =
+        expired ??
+        (await this.repository.getDiscovery(this.workspace, discovery.id));
+      if (
+        !current ||
+        !['confirmed', 'cancelled', 'failed', 'expired'].includes(
+          current.status,
+        )
+      )
+        throw new Error('stale_revision');
+      discovery = current;
+    }
+    if (discovery.status === 'expired')
+      return {
+        discoveryId: discovery.id,
+        revision: discovery.revision,
+        status: discovery.status,
+        candidates: [],
+        confirmedPlaceIds: [],
+      };
     const candidates = [];
     if (['needs_confirmation', 'needs_selection'].includes(discovery.status))
       for (let i = 0; i < discovery.candidates.length; i++) {
@@ -312,11 +405,26 @@ export class PlacesServiceApi {
           !!label &&
           discovery.candidates.length === 1 &&
           candidate.providerIdentity?.provider === 'google-places' &&
-          candidate.relationship === 'plausible_exact';
+          discovery.identityProvenance === 'trusted_provider_identity';
         const view = stable
           ? null
-          : await this.service.displayCandidate(discovery, i);
-        if (!stable && !view) throw new Error('provider_refresh_unavailable');
+          : (initialViews.get(i) ??
+            (await this.service.displayCandidate(discovery, i)));
+        if (!stable && !view) {
+          const current = await this.repository.getDiscovery(
+            this.workspace,
+            discovery.id,
+          );
+          if (current && ['failed', 'expired'].includes(current.status))
+            return {
+              discoveryId: current.id,
+              revision: current.revision,
+              status: current.status,
+              candidates: [],
+              confirmedPlaceIds: [],
+            };
+          throw new Error('provider_refresh_unavailable');
+        }
         candidates.push({
           index: i,
           ...(label ? { label } : {}),

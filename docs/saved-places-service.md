@@ -112,7 +112,7 @@ migration with stale fencing; ambiguous results must stay unchanged.
 
 ## Low-cost review and exact invoker policy
 
-For one plausible-exact Google candidate with a bound application-owned label,
+For one Google candidate with explicit trusted_provider_identity provenance and a bound application-owned label,
 review constructs the Maps verification URL from the previously resolved stored
 provider ID and that label without fetching Google display content again.
 Unlabeled, multi-candidate and viewpoint/related hypotheses retain transient
@@ -123,4 +123,18 @@ Service deployment reconciliation rejects any Run Invoker member except the
 configured App caller, including conditional bindings, before writing and after
 reading back. An unexpected existing invoker requires owner review; the workflow
 never silently removes it or replaces the whole policy. Unrelated non-Invoker
-roles are preserved.
+roles are unexpected service-level bindings and are rejected before any write.
+
+A review shortcut requires a single meaningful application label and explicit
+trusted-provider-identity origin. Recognition matches (even high-confidence or
+plausible_exact) still refresh canonical provider display for review. All selected
+provider candidates refresh at Confirm. Initial identity preparation passes its
+already fetched provider views transiently to the immediate review; display data
+is never persisted. Service review returns terminal expired/failed states without
+candidates. The read-only set_city action accepts only discoveryId, revision and
+a bounded normalized city; it uses core correctCity and never creates a Place.
+
+Expiration is a revision-fenced terminal Discovery write. If an in-flight Confirm
+won the transaction race, its confirmed result is authoritative; if expiry won,
+the older Confirm cannot create a Place. An expired Confirm retry returns the
+normal terminal state rather than an impossible endless retry error.

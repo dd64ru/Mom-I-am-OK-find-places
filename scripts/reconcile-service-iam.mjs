@@ -8,45 +8,47 @@ export function validateCaller(value) {
     typeof value !== 'string' ||
     !/^(?:[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com|[0-9]+-compute@developer\.gserviceaccount\.com)$/.test(
       value,
-    ) ||
-    value.endsWith(`@${project}.iam.gserviceaccount.com`)
+    )
   )
     throw new Error('expected_app_caller_invalid');
+  if (value.endsWith(`@${project}.iam.gserviceaccount.com`))
+    throw new Error('caller_is_places_identity');
   return value;
 }
 export function verifyPolicy(policy, caller, requireCaller = true) {
   if (!policy || !Array.isArray(policy.bindings ?? []))
-    throw new Error('service_iam_invalid');
+    throw new Error('unexpected_service_policy');
   const bindings = policy.bindings ?? [];
+  if (!bindings.length) {
+    if (requireCaller) throw new Error('expected_app_invoker_missing');
+    return;
+  }
   if (
-    bindings.some(
-      (b) =>
-        !Array.isArray(b.members) ||
-        b.members.some((m) =>
-          ['allUsers', 'allAuthenticatedUsers'].includes(m),
-        ),
-    )
+    bindings.length !== 1 ||
+    bindings[0].role !== 'roles/run.invoker' ||
+    bindings[0].condition ||
+    !Array.isArray(bindings[0].members) ||
+    bindings[0].members.length !== 1 ||
+    bindings[0].members[0] !== `serviceAccount:${caller}`
   )
-    throw new Error('public_service_iam_forbidden');
-  if (
-    bindings.some(
-      (b) =>
-        b.role === 'roles/run.invoker' &&
-        (b.condition ||
-          b.members.some((m) => m !== `serviceAccount:${caller}`)),
-    )
-  )
-    throw new Error('unexpected_service_invoker');
-  if (
-    requireCaller &&
-    !bindings.some(
-      (b) =>
-        b.role === 'roles/run.invoker' &&
-        !b.condition &&
-        b.members.includes(`serviceAccount:${caller}`),
-    )
-  )
-    throw new Error('expected_app_invoker_missing');
+    throw new Error('unexpected_service_policy');
+}
+const reasonCodes = new Set([
+  'unexpected_service_policy',
+  'expected_app_invoker_missing',
+  'caller_is_places_identity',
+  'gcloud_permission_denied',
+  'unexpected_service_resource',
+  'expected_app_caller_invalid',
+  'service_iam_checks_disabled',
+  'invalid_arguments',
+]);
+export function safeReason(error) {
+  if (reasonCodes.has(error?.message)) return error.message;
+  // Classify captured stderr without printing it (it can contain account details).
+  if (/PERMISSION_DENIED|permission.*denied/i.test(String(error?.stderr ?? '')))
+    return 'gcloud_permission_denied';
+  return 'gcloud_operation_failed';
 }
 export function reconcileServiceIam(
   caller,
@@ -59,6 +61,13 @@ export function reconcileServiceIam(
     ),
 ) {
   validateCaller(caller);
+  const metadata = run(['projects', 'describe', project]);
+  if (!/^[0-9]+$/.test(String(metadata?.projectNumber ?? '')))
+    throw new Error('unexpected_service_resource');
+  if (
+    caller === `${metadata.projectNumber}-compute@developer.gserviceaccount.com`
+  )
+    throw new Error('caller_is_places_identity');
   const fn = run([
     'functions',
     'describe',
@@ -76,14 +85,13 @@ export function reconcileServiceIam(
     );
   if (!match) throw new Error('unexpected_service_resource');
   if (match[1] !== project) {
-    const metadata = run(['projects', 'describe', project]);
     if (!metadata.projectNumber || match[1] !== String(metadata.projectNumber))
       throw new Error('unexpected_service_resource');
   }
   const scope = ['placesservice', '--region', region, '--project', project];
   const service = run(['run', 'services', 'describe', ...scope]);
   if (service?.metadata?.name !== 'placesservice')
-    throw new Error('unexpected_run_service');
+    throw new Error('unexpected_service_resource');
   if (
     service?.metadata?.annotations?.[
       'run.googleapis.com/invoker-iam-disabled'
@@ -116,8 +124,10 @@ if (
       reconcileServiceIam(caller);
       console.info('private_service_iam_verified');
     } else throw new Error('invalid_arguments');
-  } catch {
-    console.error('private_service_iam_reconciliation_failed');
+  } catch (error) {
+    console.error(
+      `private_service_iam_reconciliation_failed:${safeReason(error)}`,
+    );
     process.exitCode = 1;
   }
 }

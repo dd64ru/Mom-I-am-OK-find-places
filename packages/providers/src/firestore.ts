@@ -68,7 +68,7 @@ export class FirestoreRepository implements PlacesRepository {
       const current = DiscoverySchema.parse(snapshot.data());
       if (
         current.revision !== revision ||
-        ['confirmed', 'cancelled', 'failed'].includes(current.status)
+        ['confirmed', 'cancelled', 'failed', 'expired'].includes(current.status)
       )
         return undefined;
       const next = DiscoverySchema.parse({
@@ -94,6 +94,7 @@ export class FirestoreRepository implements PlacesRepository {
           'awaiting_city',
           'unresolved',
           'failed',
+          'expired',
         ].includes(next.status)
       )
         throw new Error('discovery_transition_invalid');
@@ -119,7 +120,9 @@ export class FirestoreRepository implements PlacesRepository {
       const discovery = DiscoverySchema.parse(snapshot.data());
       if (
         discovery.revision !== revision ||
-        ['confirmed', 'cancelled', 'failed'].includes(discovery.status)
+        ['confirmed', 'cancelled', 'failed', 'expired'].includes(
+          discovery.status,
+        )
       ) {
         const places = [];
         for (const placeId of discovery.confirmedPlaceIds ??

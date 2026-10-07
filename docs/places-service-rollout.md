@@ -14,7 +14,7 @@ Manager and ADC access remain unchanged.
    containing these reviewed corrective changes. Do not publish clients yet.
 3. Read the function's actual serviceConfig.serviceAccountEmail and configure
    PLACES_EXPECTED_APP_CALLER_SA in the protected Places production environment.
-4. Ensure the deployment identity has the narrowly scoped Run service IAM
+4. Ensure the deployment identity has the existing custom deployment IAM
    permissions below, then deploy placesService with service_enabled=false.
    The workflow reconciles/verifies the caller binding after this deploy.
 5. Verify the dormant private service and its caller policy.
@@ -57,10 +57,11 @@ Firebase's invoker: private deployment can remove manual caller grants. Every
 service deployment now reconciles roles/run.invoker on ONLY its underlying Run
 service using the existing deployment identity, then reads back and verifies the
 policy. Disabled deployments do this too. Ensure that identity has run.services.get,
-run.services.getIamPolicy and run.services.setIamPolicy scoped only to
-placesservice (or an IAM condition limiting the resource if an initial creation
-requires bootstrap permissions). No IAM administrator role, project-wide Invoker,
-public principal or sibling IAM permission is required for reconciliation. An owner
+run.services.getIamPolicy and run.services.setIamPolicy. The existing deployment
+identity intentionally has project-level custom deployment permissions because
+it deploys placesWebhook, placesFeed and placesService. Its IAM permission is not
+scoped only to placesservice. The workflow's reconciliation itself targets ONLY
+placesservice. This correction introduces no new grants. An owner
 must separately review any required permission provisioning; the workflow does
 not provision its own privileges. Missing permissions fail the workflow closed.
 
@@ -117,10 +118,13 @@ service policy cannot counter an inherited public binding.
 
 Read the final policy saved above after each deployment: it must include an
 unconditional roles/run.invoker membership consisting only of the configured
-actual App caller, with no additional/conditional Invoker members and no
-allUsers/allAuthenticatedUsers anywhere. Unexpected existing invokers stop
-reconciliation before any write and require owner review; unrelated roles are
-preserved. The workflow checks the discovered
+actual App caller, and exactly one service-level binding: no conditions,
+additional members or any other service-level roles. Before reconciliation only
+an empty policy or this exact binding is accepted. Unexpected bindings stop
+before any write and require owner review; the workflow never removes them.
+Inherited/project-level policy remains a separate owner concern. After auth the
+Places project number is read and its default compute service account is also
+rejected as an App caller. The workflow checks the discovered
 underlying resource, enabled IAM enforcement, pre-write public bindings and the
 post-write expected grant. Reconciliation failure or missing/public final policy
 fails the deployment workflow; do not proceed to clients. Compare sibling function
@@ -195,3 +199,11 @@ integration. A failed deployment is not proof of disablement: verify live state.
 
 Locality backfill is optional, requires separate review/authorization, and is not
 a rollout prerequisite. Never run it as part of service deployment.
+
+Reconciliation runs after successful GCP authentication whenever Firebase deploy
+was attempted and the workflow was not cancelled, including a failed or partial
+deploy. A failed deploy still fails the workflow; reconciliation cannot make it
+green. Safe diagnostic reason codes distinguish unexpected_service_policy,
+expected_app_invoker_missing, caller_is_places_identity,
+gcloud_permission_denied and unexpected_service_resource without printing
+credentials or raw gcloud error output.
