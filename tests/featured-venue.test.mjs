@@ -315,3 +315,134 @@ test('Telegram presents a single numbered venue as a reviewable place and a real
     );
   }
 });
+
+// Synthetic names/city reproduce the shortened numbered viewpoint pattern.
+// All provider and web evidence is local; no production or provider requests.
+test('numbered short viewpoint name resolves a prefixed provider title without exact string equality', async () => {
+  const recognition = {
+    mode: 'recommendation_list',
+    visibleText: ['6 Juniper Viewing Platform'],
+    clues: [
+      clue('Juniper Viewing Platform', {
+        category: 'viewpoint',
+        recommendationEvidence: 'numbered_list',
+      }),
+    ],
+  };
+  const f = await serviceFor(recognition, [
+    providerRow('The Stage Juniper Viewing Platform'),
+  ]);
+  const result = await f.ingest();
+  assert.equal(result.recognition.mode, 'single_venue');
+  assert.equal(result.status, 'needs_confirmation');
+  assert.equal(result.candidates[0].providerIdentity.id, 'provider-id');
+  assert.equal(
+    [...f.db.values.keys()].some((k) => k.includes('/places/')),
+    false,
+  );
+});
+
+test('independently cited identity bridges a viewpoint alias through the real enriched discovery pass', async () => {
+  const recognition = {
+    mode: 'recommendation_list',
+    visibleText: ['6 Juniper Viewing Platform'],
+    clues: [
+      clue('Juniper Viewing Platform', {
+        category: 'observation deck',
+        recommendationEvidence: 'numbered_list',
+      }),
+    ],
+  };
+  const verified = {
+    status: 'verified',
+    references: [
+      {
+        provider: 'fixture-web',
+        url: 'https://example.org/venue',
+        observedAt: new Date().toISOString(),
+      },
+    ],
+    candidates: [
+      {
+        canonicalName: 'The Lantern Observation Deck',
+        aliases: ['Juniper Viewing Platform'],
+        category: 'viewpoint',
+        city: 'Vesper',
+        cityAliases: [],
+        countryCode: 'FR',
+        confidence: 0.95,
+      },
+    ],
+  };
+  let verificationCalls = 0;
+  const search = {
+    verify: async () => {
+      verificationCalls++;
+      return verified;
+    },
+  };
+  const f = await serviceFor(
+    recognition,
+    (query) =>
+      query.startsWith('The Lantern')
+        ? [providerRow('The Lantern Observation Deck')]
+        : [],
+    search,
+  );
+  const result = await f.ingest();
+  assert.equal(verificationCalls, 1);
+  assert.equal(result.recognition.mode, 'single_venue');
+  assert.equal(result.status, 'needs_confirmation');
+  assert.equal(result.candidates[0].providerIdentity.id, 'provider-id');
+  assert.ok(f.queries.some((q) => q.startsWith('Juniper Viewing Platform')));
+  assert.ok(
+    f.queries.some((q) => q.startsWith('The Lantern Observation Deck')),
+  );
+  assert.equal(
+    [...f.db.values.keys()].some((k) => k.includes('/places/')),
+    false,
+  );
+});
+
+test('generic viewpoint descriptors alone cannot resolve a provider venue in the same city', async () => {
+  for (const name of ['Viewing Platform', 'Observation Deck', 'Terrace']) {
+    const f = await serviceFor(
+      {
+        mode: 'single_venue',
+        visibleText: [name],
+        clues: [clue(name, { category: 'viewpoint' })],
+      },
+      [providerRow('The Stage Juniper Viewing Platform')],
+    );
+    const result = await f.ingest();
+    assert.equal(result.status, 'unresolved', name);
+    assert.equal(result.candidates.length, 0, name);
+  }
+});
+
+test('prefixed viewpoint identity retains competing alternatives and rejects a conflicting locality', async () => {
+  const recognition = {
+    mode: 'single_venue',
+    visibleText: [],
+    clues: [clue('Juniper Viewing Platform', { category: 'viewpoint' })],
+  };
+  const competing = await serviceFor(recognition, [
+    providerRow('The Stage Juniper Viewing Platform'),
+    {
+      ...providerRow('The Stage Juniper Viewing Platform'),
+      id: 'other-branch',
+    },
+  ]);
+  const choices = await competing.ingest();
+  assert.equal(choices.status, 'needs_selection');
+  assert.equal(choices.candidates.length, 2);
+  const conflicting = await serviceFor(recognition, [
+    providerRow('The Stage Juniper Viewing Platform', 'Other City'),
+  ]);
+  const rejected = await conflicting.poi.firstPass(
+    FreshRecognitionSchema.parse(recognition),
+    { cityOverride: 'Vesper' },
+  );
+  assert.equal(rejected.status, 'unresolved');
+  assert.equal(rejected.reason, 'locality_mismatch');
+});
