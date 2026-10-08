@@ -678,8 +678,29 @@ export function recognitionLabel(
   recognition: Recognition,
   index?: number,
 ): ApplicationLabel | undefined {
-  const name = recognitionClue(recognition, index)?.name;
-  if (!name) return;
+  const clue = recognitionClue(recognition, index);
+  for (const name of [clue?.nativeName, clue?.name]) {
+    if (!name) continue;
+    const parsed = ApplicationLabelSchema.safeParse({
+      label: singleLine(name),
+      labelSource: 'recognition',
+    });
+    if (parsed.success) return parsed.data;
+  }
+  return undefined;
+}
+// Related locations may share an independently recognized brand, but not the
+// photographed venue's branch-specific name. No provider display text is read.
+export function candidateRecognitionLabel(
+  recognition: Recognition,
+  candidate: Pick<StoredCandidate, 'recognitionClueIndex' | 'relationship'>,
+): ApplicationLabel | undefined {
+  if (!candidate.relationship?.startsWith('related_'))
+    return recognitionLabel(recognition, candidate.recognitionClueIndex);
+  const clue = recognitionClue(recognition, candidate.recognitionClueIndex);
+  const brand = clue?.possibleChain;
+  if (!brand) return;
+  const name = clue.nativeName && clue.name === brand ? clue.nativeName : brand;
   const parsed = ApplicationLabelSchema.safeParse({
     label: singleLine(name),
     labelSource: 'recognition',

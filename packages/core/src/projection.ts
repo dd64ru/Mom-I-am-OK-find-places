@@ -102,7 +102,9 @@ export class ProjectionService {
             continue;
           }
           const label =
-            place.label ?? (!google ? place.canonicalName : undefined);
+            place.label ?? (google ? 'Saved location' : place.canonicalName);
+          // This neutral application text exists only in the projection. A Google
+          // identity needs no durable name and no provider display content is copied.
           if (!label) {
             counts.missingLabels++;
             continue;

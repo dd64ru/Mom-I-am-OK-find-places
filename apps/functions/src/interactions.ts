@@ -282,10 +282,12 @@ export class TelegramInteractions {
     const candidate = discovery.candidates[index];
     if (candidate?.providerIdentity?.provider !== 'google-places') return false;
     return (
-      (await this.repository.getPlace(
-        this.workspace,
-        canonicalPlaceId(candidate),
-      )) !== undefined
+      (
+        await this.repository.getPlace(
+          this.workspace,
+          canonicalPlaceId(candidate),
+        )
+      )?.status === 'confirmed'
     );
   }
   private discoveryButtons(discovery: Discovery, token: string) {

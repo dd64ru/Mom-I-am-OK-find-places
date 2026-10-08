@@ -708,7 +708,7 @@ test('unbound Telegram viewpoint candidates cannot fall back to generic durable 
 });
 
 for (const labelSource of ['user', 'recognition'])
-  test(`legacy unlabeled canonical reuse atomically fills authorized ${labelSource} label and becomes projectable`, async () => {
+  test(`legacy unlabeled canonical reuse atomically fills authorized ${labelSource} label and replaces its projection fallback`, async () => {
     const { ProjectionService } = await import('@places/core');
     const { db, repo, api } = await fixture();
     const providerIdentity = {
@@ -748,7 +748,10 @@ for (const labelSource of ['user', 'recognition'])
         references: [{ ...reference, externalId: identity.id }],
       }),
     });
-    assert.equal((await projection.project([legacy])).counts.missingLabels, 1);
+    const before = await projection.project([legacy]);
+    assert.equal(before.counts.missingLabels, 0);
+    assert.equal(before.counts.placesProjected, 1);
+    assert.equal(before.places[0].label, 'Saved location');
     const label =
       labelSource === 'user'
         ? 'My waterfront stop'

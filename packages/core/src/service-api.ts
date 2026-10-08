@@ -10,7 +10,7 @@ import {
   GooglePlaceIdSchema,
   NewSavedLabelSchema,
   SelectedLabelSchema,
-  recognitionLabel,
+  candidateRecognitionLabel,
   type PlaceDisplay,
 } from '@places/schemas';
 import type { Discovery, DiscoveryView } from '@places/schemas';
@@ -406,12 +406,10 @@ export class PlacesServiceApi {
       for (let i = 0; i < discovery.candidates.length; i++) {
         const candidate = discovery.candidates[i]!;
         // Transient display may travel in this response, but the consumer persists only indices/status.
-        const owned = candidate.relationship?.startsWith('related_')
-          ? undefined
-          : recognitionLabel(
-              discovery.recognition,
-              candidate.recognitionClueIndex,
-            );
+        const owned = candidateRecognitionLabel(
+          discovery.recognition,
+          candidate,
+        );
         const label =
           owned && NewSavedLabelSchema.safeParse(owned.label).success
             ? owned.label

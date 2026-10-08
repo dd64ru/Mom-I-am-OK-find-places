@@ -330,7 +330,7 @@ test('backfill apply revalidates the Place transactionally and never overwrites 
   assert.equal(result.stale, 1);
   assert.equal(db.writes, 0);
 });
-test('projection uses durable OSM and transient refreshed Google coordinates; missing labels and failed refresh skip safely', async () => {
+test('projection uses durable OSM and transient refreshed Google coordinates; missing labels get a fallback and failed refresh skips safely', async () => {
   const input = [
     osm,
     labeled,
@@ -355,15 +355,15 @@ test('projection uses durable OSM and transient refreshed Google coordinates; mi
   assert.deepEqual(input, before);
   assert.deepEqual(
     result.places.map((p) => p.id),
-    ['google-place', 'osm-place'],
+    ['google-place', 'legacy-unlabeled', 'osm-place'],
   );
   assert.deepEqual(result.places[0].coordinates, projectedGoogle);
-  assert.deepEqual(result.places[1].coordinates, osm.coordinates);
+  assert.deepEqual(result.places[2].coordinates, osm.coordinates);
   assert.equal(result.places[0].label, 'Happy Harbour');
-  assert.equal(result.counts.googleHydrated, 1);
+  assert.equal(result.counts.googleHydrated, 2);
   assert.equal(result.counts.providerFailures, 1);
-  assert.equal(result.counts.missingLabels, 1);
-  assert.equal(calls.length, 2);
+  assert.equal(result.counts.missingLabels, 0);
+  assert.equal(calls.length, 3);
   assert.equal(JSON.stringify(result).includes('PROHIBITED_'), false);
   // OSM may expose its own independently licensed address; Google never does.
   for (const prohibited of ['address', 'attributions', 'types'])
@@ -813,12 +813,7 @@ test('v1 authenticated snapshot and conditional 304 expose complete content-free
   ])
     assert.equal(aggregate.includes(value), false);
 });
-for (const reason of [
-  'providerFailures',
-  'missingLabels',
-  'invalidPlaces',
-  'budgetSkipped',
-]) {
+for (const reason of ['providerFailures', 'invalidPlaces', 'budgetSkipped']) {
   test(`v1 marks ${reason} as incomplete on 200 and 304 while preserving siblings`, async () => {
     const f = feedFixture();
     if (reason === 'providerFailures')
@@ -827,7 +822,6 @@ for (const reason of [
           throw new Error('PRIVATE_PROVIDER_BODY');
         },
       });
-    if (reason === 'missingLabels') f.inputs[1] = clone(google);
     if (reason === 'invalidPlaces') f.inputs[1] = { ...labeled, tags: 123 };
     if (reason === 'budgetSkipped') {
       let clock = 0;
@@ -959,4 +953,25 @@ test('unknown provider strings and malformed raw documents never enter the v1 pr
   assertSnapshot(result, 4, 2, false);
   assert.equal(f.events[0].invalidPlaces, 2);
   assert.equal(JSON.stringify(result).includes('PRIVATE_PROVIDER_TEXT'), false);
+});
+
+test('v1 unlabeled confirmed Google Place remains complete and validates by ETag/304', async () => {
+  const f = feedFixture();
+  f.inputs[1] = clone(google);
+  const before = clone(f.inputs);
+  const first = await handleFeed(bearerRequest(f), f.deps);
+  assertSnapshot(first, 2, 2, true);
+  assert.equal(f.events[0].missingLabels, 0);
+  assert.equal(
+    JSON.parse(first.body).features.find((p) => p.id === google.id).properties
+      .label,
+    'Saved location',
+  );
+  const second = await handleFeed(
+    { ...bearerRequest(f), ifNoneMatch: first.headers.ETag },
+    f.deps,
+  );
+  assert.equal(second.status, 304);
+  assertSnapshot(second, 2, 2, true);
+  assert.deepEqual(f.inputs, before);
 });

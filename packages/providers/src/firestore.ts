@@ -4,7 +4,7 @@ import {
   IdSchema,
   fillMissingMapMetadata,
   mapMetadataFor,
-  recognitionLabel,
+  candidateRecognitionLabel,
   NewSavedLabelSchema,
   SelectedLabelSchema,
   WorkspaceSchema,
@@ -176,12 +176,10 @@ export class FirestoreRepository implements PlacesRepository {
           ...new Map(
             indices.map((i) => {
               const candidate = discovery.candidates[i]!;
-              const independent = candidate.relationship?.startsWith('related_')
-                ? undefined
-                : recognitionLabel(
-                    discovery.recognition,
-                    candidate.recognitionClueIndex,
-                  );
+              const independent = candidateRecognitionLabel(
+                discovery.recognition,
+                candidate,
+              );
               const user = labels.find((l) => l.index === i);
               const label = user
                 ? { label: user.label, labelSource: 'user' as const }
@@ -212,6 +210,7 @@ export class FirestoreRepository implements PlacesRepository {
         const enrichments: {
           ref: ReturnType<FirestoreRepository['doc']>;
           patch: {
+            status?: Place['status'];
             label?: string;
             labelSource?: Place['labelSource'];
             mapMetadata?: MapMetadata;
@@ -278,8 +277,11 @@ export class FirestoreRepository implements PlacesRepository {
               ? label
               : undefined;
           const enrichment =
-            stored && (missing || missingLabel)
+            stored && (missing || missingLabel || stored.status === 'archived')
               ? {
+                  ...(stored.status === 'archived'
+                    ? { status: 'confirmed' as const }
+                    : {}),
                   ...(missing ? { mapMetadata: missing } : {}),
                   ...(missingLabel ?? {}),
                   updatedAt: time,
