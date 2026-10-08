@@ -285,7 +285,18 @@ export const FreshRecognitionSchema = RecognitionSchema.refine(
       r.clues.every((c) => c.recommendationEvidence === undefined) &&
       r.recommendationsTruncated === undefined),
   'invalid_fresh_recognition_mode',
-);
+).transform((r): z.infer<typeof RecognitionSchema> => {
+  // A list number is presentation evidence, not multiple searchable targets.
+  // Normalize fresh singleton list output; keep the durable legacy decoder and
+  // explicit single-brand APIs compatible. Chain evidence survives unchanged.
+  if (r.mode !== 'recommendation_list' || r.clues.length !== 1) return r;
+  const { recommendationsTruncated: _, ...recognition } = r;
+  return {
+    ...recognition,
+    mode: 'single_venue' as const,
+    clues: r.clues.map(({ recommendationEvidence: _, ...clue }) => clue),
+  };
+});
 export const CandidateSchema = z
   .object({
     localityIdentity: LocalityIdentitySchema.optional(),

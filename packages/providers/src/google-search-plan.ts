@@ -133,7 +133,13 @@ export function googleSearchPlan(
       .sort((a, b) => b.confidence - a.confidence)
       .slice(0, 1)
       .map((c) => ({ clue: c, text: c.signage! })),
-    ...clues.map((c) => ({ clue: c, text: c.nativeName || name(c) })),
+    // Spend the existing second slot on a different supported identity of the
+    // primary venue before another competing clue or token permutation. These
+    // remain search hypotheses: provider name/geography checks still decide.
+    ...[primary.nativeName, name(primary), ...primary.aliases.slice(0, 1)]
+      .filter((text): text is string => !!text)
+      .map((text) => ({ clue: primary, text })),
+    ...clues.slice(1).map((c) => ({ clue: c, text: c.nativeName || name(c) })),
     ...clues.flatMap((c) =>
       [
         name(c),

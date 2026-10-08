@@ -119,6 +119,13 @@ export class PlacesServiceApi {
       const digest = createHash('sha256')
         .update(JSON.stringify(request))
         .digest('hex');
+      console.info(
+        JSON.stringify({
+          event: 'service_prepare_started',
+          requestKey: request.requestId,
+          discoveryId: id,
+        }),
+      );
       const initialViews = new Map<number, PlaceDisplay>();
       let discovery = await this.repository.getDiscovery(this.workspace, id);
       if (discovery && discovery.inputDigest !== digest)
@@ -225,7 +232,17 @@ export class PlacesServiceApi {
         request.recognition && discovery.revision === 0
           ? await this.service.resolve(discovery)
           : discovery;
-      return this.review(view, initialViews);
+      const result = await this.review(view, initialViews);
+      console.info(
+        JSON.stringify({
+          event: 'service_prepare_result',
+          requestKey: request.requestId,
+          discoveryId: id,
+          revision: result.revision,
+          status: result.status,
+        }),
+      );
+      return result;
     }
     const discovery = await this.repository.getDiscovery(
       this.workspace,

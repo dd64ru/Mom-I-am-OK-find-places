@@ -20,6 +20,13 @@ const generic = new Set([
   'college',
   'building',
   'landmark',
+  // Public viewpoint descriptors are category evidence, not venue identity.
+  'viewpoint',
+  'viewing',
+  'platform',
+  'observation',
+  'terrace',
+  'deck',
   'the',
   'of',
   'and',

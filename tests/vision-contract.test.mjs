@@ -392,3 +392,30 @@ test('credential-free vision model stream -> parsed scene -> DiscoveryService ->
     );
   });
 });
+
+for (const provider of ['openai', 'gemini'])
+  test(`${provider} one numbered featured attraction normalizes without losing native identity`, async () => {
+    const payload = {
+      mode: 'recommendation_list',
+      visibleText: ['3 Cedar Viewing Terrace'],
+      clues: [
+        {
+          ...clue('Cedar Viewing Terrace'),
+          nativeName: '杉木台',
+          aliases: ['Cedar Deck'],
+          category: 'viewpoint',
+          recommendationEvidence: 'numbered_list',
+        },
+      ],
+    };
+    await withVision(provider, payload, async (vision) => {
+      const result = await vision.recognize(images);
+      assert.equal(result.recognition.mode, 'single_venue');
+      assert.equal(result.recognition.clues[0].nativeName, '杉木台');
+      assert.deepEqual(result.recognition.clues[0].aliases, ['Cedar Deck']);
+      assert.equal(
+        result.recognition.clues[0].recommendationEvidence,
+        undefined,
+      );
+    });
+  });
